@@ -19,9 +19,16 @@ final class ConnectionService {
 
     let connection: Connection
     private(set) var state: State = .idle
+    private(set) var schema: SchemaSnapshot = .empty
+    private(set) var schemaState: SchemaState = .idle
+    let workspace = WorkspaceState()
+
+    enum SchemaState: Sendable, Equatable {
+        case idle, loading, loaded, error(String)
+    }
 
     @ObservationIgnored private var clientTask: Task<Void, Never>?
-    @ObservationIgnored private var client: PostgresClient?
+    @ObservationIgnored private(set) var client: PostgresClient?
 
     init(connection: Connection) {
         self.connection = connection
@@ -85,11 +92,23 @@ final class ConnectionService {
                 break
             }
             self.state = .connected(version: version, since: Date())
+            await self.loadSchema()
         } catch {
             self.state = .error(error.localizedDescription)
             task.cancel()
             self.clientTask = nil
             self.client = nil
+        }
+    }
+
+    func loadSchema() async {
+        guard let client else { return }
+        schemaState = .loading
+        do {
+            schema = try await SchemaFetcher.fetch(client: client)
+            schemaState = .loaded
+        } catch {
+            schemaState = .error(error.localizedDescription)
         }
     }
 

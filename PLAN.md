@@ -39,28 +39,41 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `./scripts/run.sh` produces an app where you can add a localhost connection, hit Save, double-click → window opens, runs `SELECT version()`, footer goes green. Quit and relaunch → connection list survives, password is still in the Keychain so reconnect is one click.
 
+### Iter 3 — Sidebar + first table view (2026-05-20)
+**Goal**: open a connection, see the database tree, double-click a table, browse the first 1000 rows.
+
+- **`SchemaSnapshot` / `SchemaNode` / `TableNode` / `ColumnNode`** — value-type schema model in `Sources/pgBrain/Schema/SchemaModel.swift`. `ColumnTypeKind` buckets `format_type()` strings into renderer kinds (text / integer / number / bool / timestamp / date / json / uuid / bytes / unknown).
+- **`SchemaFetcher`** — two parallel `pg_catalog` queries (relations + columns), merged in Swift. Excludes `pg_catalog`, `information_schema`, temp/toast namespaces. Handles `r/v/m/p` relkinds. Triggered automatically on connect from `ConnectionService.connect()` after `SELECT version()`.
+- **`ConnectionService` additions** — `schema: SchemaSnapshot`, `schemaState: idle|loading|loaded|error`, `client: PostgresClient?` exposed (read-only) for downstream fetchers, and per-window `workspace: WorkspaceState`.
+- **`SQLIdent`** — single chokepoint for PG identifier quoting (`"foo""bar"` style). Used everywhere we splice a schema/table/column name into generated SQL since the wire protocol doesn't allow parameterized identifiers.
+- **`RowsFetcher`** — server-side `::text` cast for every projected column so the grid renders strings without a per-OID decoder zoo. `NULL` survives the cast. Limit + 1 to detect truncation. Returns a `Page { columns, rows, truncated, limit, elapsed }`.
+- **`WorkspaceState`** — `@MainActor @Observable` per-window tab list with `openTable(_:)` (dedupes by `(schema, name)`), `closeTab(id:)`, and `move(id:before:)` for live drag-reorder.
+- **`SidebarOutlineView`** — `NSOutlineView` wrapped in `NSViewRepresentable`. Four-level tree: database → schema → table/view → `columns` group → column rows. Class-backed `SidebarNode` identity for AppKit. Custom `SidebarCellView` with SF Symbol + name + type/kind hint. Database + schemas auto-expanded; tables open on double-click, other nodes toggle expansion.
+- **`TabStripView`** — SwiftUI horizontal tab bar with brand-color active underline, hover/selected close button, live drag-reorder via `DropDelegate.dropEntered`. JetBrains feel.
+- **`TableTabView`** — header (qualified name, column count, row count + ms, reload button) + `DataGridView` content. `RowsLoader` (`@MainActor @Observable`) drives the load on `.task(id: table.id)` so tab switches refetch automatically.
+- **`DataGridView`** — `NSTableView` in inset style, alternating row colors, custom `DataCellView` with kind-aware alignment (right for numeric, center for bool), monospaced font for numeric / uuid / json / bytes / timestamp, italic+dimmed `NULL`, ✓ glyph for booleans, single-line JSON pretty-print. Per-column estimated widths.
+- **`ConnectionWindowContent`** — `HSplitView` sidebar + workspace pane. Sidebar shows schema loading / loaded / error states with retry. Workspace shows empty state until a tab opens, then tab strip + table tab content.
+
+**Verified**: connect to localhost, sidebar populates after `version()` resolves, double-clicking any table opens a new tab and renders the first 1000 rows in a real grid. Tabs reorder via drag, close cleanly, dedupe on repeat open. Build is clean (`swift build` ✓, `./scripts/bundle.sh` ✓).
+
 ---
 
-## Next — Iter 3: Sidebar + first table view
+## Next — Iter 4: SQL scratchpad with inline results ("Livebook")
 
-Smallest useful step on top of iter-2: when you open a connection, you see what's in the database and can browse a table's rows.
+Smallest useful step on top of iter-3: from any connection window, open a scratchpad tab, run SQL, see results inline below the statement.
 
-1. **Schema fetch** — query `pg_catalog` to enumerate databases, schemas, tables, views, columns on connect. Cached per `ConnectionService`.
-2. **`SidebarOutlineView`** — `NSOutlineView` in an `NSViewRepresentable`, four-level tree: database → schema → table/view → column. Disclosure carets, icon per node type.
-3. **Tab strip** — custom AppKit tab bar inside the connection window with closeable, reorderable tabs. One tab = one open table (or, later, scratchpad).
-4. **Table tab content** — `NSTableView`-backed grid loading the first 1000 rows of a selected table, with column headers from the schema fetch. Async fetch with a spinner; null cells visibly distinct from empty strings.
-5. **Type-aware cell renderers** — text / number / bool / timestamp / jsonb pretty-print read-only for now (editing lands in iter-5).
+1. **Decision: editor stack.** `TextKit 2` with a hand-rolled Postgres tokenizer is more work but feels Mac-native and has lower input latency than CodeMirror-in-WKWebView. Default to native unless tokenizer work blows the iter budget.
+2. **`ScratchpadTab` workspace kind** — extend `WorkspaceState.TabKind` so the same tab strip handles scratchpads alongside tables. New-tab `+` button + `⌘N` opens a fresh scratchpad.
+3. **`QueryRunner`** — async runner on top of the `PostgresClient`. Tracks backend PID (`pg_backend_pid()` on a sister connection) so cancel becomes possible in a later iter. Streams rows into the same `RowsFetcher.Page` shape the grid already understands.
+4. **Run-on-cursor / run-selection** — `⌘↩` runs the statement at the caret (split on `;` outside of strings/comments) or the highlighted text if any.
+5. **Inline result blocks** — each run produces a collapsible block immediately below its statement: status line + row count + duration + grid (or error). Multiple blocks stack chronologically; "Clear results" on the scratchpad header.
+6. **History side panel** — list of past runs (statement preview, when, rows, ms) scoped to the current scratchpad; click to scroll the result back into view.
 
-**Iter-3 done = user double-clicks a table in the sidebar and sees the first 1000 rows in a real grid.**
+**Iter-4 done = user opens a scratchpad, types `SELECT * FROM <some_table> LIMIT 5`, presses `⌘↩`, and sees a result grid render right below the statement.**
 
 ---
 
 ## Backlog (rough order)
-
-### Iter 4 — SQL scratchpad with inline results ("Livebook")
-- Code-editor view (CodeMirror via WKWebView, or Apple's `TextKit 2` with a Postgres tokenizer). Decide at iter start.
-- Run-on-cursor / run-selection. Results render inline as collapsible blocks below the query, JetBrains-style.
-- Multiple result blocks per scratchpad; history of past runs in a side panel.
 
 ### Iter 5 — Editable data grid
 - Inline cell editing with dirty marker.

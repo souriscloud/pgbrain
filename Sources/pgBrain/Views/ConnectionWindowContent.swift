@@ -18,13 +18,93 @@ struct ConnectionWindowContent: View {
         switch service.state {
         case .idle, .connecting:
             connectingPlaceholder
-        case .connected(let version, _):
-            connectedPlaceholder(version: version)
+        case .connected:
+            connectedWorkspace
         case .error(let message):
             errorPlaceholder(message: message)
         case .closed:
             closedPlaceholder
         }
+    }
+
+    @ViewBuilder
+    private var connectedWorkspace: some View {
+        HSplitView {
+            sidebarPane
+                .frame(minWidth: 220, idealWidth: 260, maxWidth: 420)
+            workspacePane
+                .frame(minWidth: 400, maxWidth: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private var sidebarPane: some View {
+        VStack(spacing: 0) {
+            switch service.schemaState {
+            case .loaded:
+                SidebarOutlineView(snapshot: service.schema) { table in
+                    service.workspace.openTable(table)
+                }
+            case .loading, .idle:
+                VStack(spacing: Tokens.Spacing.sm) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading schema…").font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .error(let message):
+                VStack(spacing: Tokens.Spacing.sm) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("Schema load failed")
+                        .font(.callout)
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                    Button("Retry") { Task { await service.loadSchema() } }
+                        .buttonStyle(.bordered)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding()
+            }
+        }
+        .background(Color(nsColor: .underPageBackgroundColor))
+    }
+
+    @ViewBuilder
+    private var workspacePane: some View {
+        VStack(spacing: 0) {
+            if service.workspace.tabs.isEmpty {
+                emptyWorkspace
+            } else {
+                TabStripView(workspace: service.workspace)
+                Divider()
+                if let selected = service.workspace.selectedTab {
+                    switch selected.kind {
+                    case .table(let table):
+                        TableTabView(table: table, service: service)
+                            .id(table.id)
+                    }
+                } else {
+                    EmptyView()
+                }
+            }
+        }
+    }
+
+    private var emptyWorkspace: some View {
+        VStack(spacing: Tokens.Spacing.md) {
+            Image(systemName: "tablecells")
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(.secondary)
+            Text("Pick a table from the sidebar")
+                .font(.headline)
+            Text("Double-click any table or view to load its first 1,000 rows.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var connectingPlaceholder: some View {
@@ -34,27 +114,6 @@ struct ConnectionWindowContent: View {
                 .font(.headline)
             Text("\(service.connection.username)@\(service.connection.host):\(service.connection.port)")
                 .font(.caption).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func connectedPlaceholder(version: String) -> some View {
-        VStack(spacing: Tokens.Spacing.md) {
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 56))
-                .foregroundStyle(Tokens.Brand.primary)
-            Text("Connected")
-                .font(.title2.weight(.semibold))
-            Text(version)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, Tokens.Spacing.xl)
-                .textSelection(.enabled)
-            Text("Sidebar with schemas + tables lands in iter-3. SQL scratchpad in iter-4.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .padding(.top, Tokens.Spacing.sm)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
