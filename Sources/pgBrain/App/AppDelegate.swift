@@ -30,20 +30,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // Keep the app alive via the menu bar item even with no windows open.
         false
     }
 
-    // MARK: - Window orchestration
+    // MARK: - Welcome / About
 
     func showWelcome(focus: Bool) {
         if welcomeWindow == nil {
             welcomeWindow = WelcomeWindowFactory.make { [weak self] in
                 self?.welcomeWindow = nil
-                if let self, self.windowManager.connectionWindows.isEmpty {
-                    // No connection windows + welcome closed — hide dock until user reopens.
-                    // We don't quit because menu bar item is still available.
-                }
             }
         }
         if focus {
@@ -65,11 +60,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func bringAnyWindowToFront() {
-        if let connection = windowManager.connectionWindows.first {
+        if let entry = windowManager.connectionWindows.first {
             NSApp.activate(ignoringOtherApps: true)
-            connection.makeKeyAndOrderFront(nil)
+            entry.window.makeKeyAndOrderFront(nil)
         } else {
             showWelcome(focus: true)
         }
+    }
+
+    // MARK: - Connection windows
+
+    /// Open a window for `connection` (or focus the existing one).
+    func openConnection(_ connection: Connection) {
+        if let existing = windowManager.window(for: connection.id) {
+            NSApp.activate(ignoringOtherApps: true)
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let window = ConnectionWindowFactory.make(connection: connection) { [weak self] closed in
+            guard let self else { return }
+            self.windowManager.unregister(window: closed)
+            // If no connection windows remain, re-show the Welcome window
+            // (matches "no window opened → show welcome screen again").
+            if self.windowManager.connectionWindows.isEmpty {
+                self.showWelcome(focus: true)
+            }
+        }
+        windowManager.register(window: window, for: connection.id)
+
+        NSApp.activate(ignoringOtherApps: true)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+
+        // Optional: dismiss the welcome window once a connection is open.
+        welcomeWindow?.orderOut(nil)
     }
 }

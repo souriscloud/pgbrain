@@ -1,9 +1,24 @@
 import SwiftUI
 
 struct WelcomeView: View {
+    @State private var store = ConnectionStore.shared
+    @State private var editorTarget: EditorTarget?
+    @State private var selection: UUID?
+
+    private enum EditorTarget: Identifiable {
+        case new
+        case edit(Connection)
+
+        var id: String {
+            switch self {
+            case .new: return "new"
+            case .edit(let c): return c.id.uuidString
+            }
+        }
+    }
+
     var body: some View {
         HStack(spacing: 0) {
-            // Left brand pane — JetBrains-style hero column.
             brandPane
                 .frame(width: 280)
                 .frame(maxHeight: .infinity)
@@ -14,14 +29,27 @@ struct WelcomeView: View {
                         endPoint: .bottomTrailing
                     )
                 )
-
-            // Right pane — connection list (empty in iter-1).
             connectionPane
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(nsColor: .windowBackgroundColor))
         }
         .frame(minWidth: Tokens.Window.welcomeSize.width,
                minHeight: Tokens.Window.welcomeSize.height)
+        .sheet(item: $editorTarget) { target in
+            ConnectionEditorView(
+                connection: {
+                    if case .edit(let c) = target { return c } else { return nil }
+                }(),
+                onSave: { conn, password in
+                    store.upsert(conn)
+                    if !password.isEmpty {
+                        try? Keychain.setPassword(password, for: conn.id)
+                    }
+                    editorTarget = nil
+                },
+                onCancel: { editorTarget = nil }
+            )
+        }
     }
 
     private var brandPane: some View {
@@ -61,15 +89,13 @@ struct WelcomeView: View {
                     .font(.title2.weight(.semibold))
                 Spacer()
                 Button {
-                    // Wired up in iter-2 (Connection editor sheet).
+                    editorTarget = .new
                 } label: {
                     Label("New Connection", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .tint(Tokens.Brand.primary)
-                .disabled(true)
-                .help("Connection editor lands in iter-2")
             }
             .padding(.horizontal, Tokens.Spacing.lg)
             .padding(.top, Tokens.Spacing.lg)
@@ -77,8 +103,28 @@ struct WelcomeView: View {
 
             Divider()
 
-            emptyState
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if store.connections.isEmpty {
+                emptyState.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                list
+                    .background(
+                        Button("Open Selected") { openSelected() }
+                            .keyboardShortcut(.defaultAction)
+                            .opacity(0)
+                            .frame(width: 0, height: 0)
+                    )
+            }
+        }
+        .onAppear {
+            if selection == nil, let first = store.connections.first {
+                selection = first.id
+            }
+        }
+    }
+
+    private func openSelected() {
+        if let id = selection, let conn = store.connections.first(where: { $0.id == id }) {
+            open(conn)
         }
     }
 
@@ -92,8 +138,84 @@ struct WelcomeView: View {
             Text("Add your first PostgreSQL connection to begin.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+            Button("Create connection") { editorTarget = .new }
+                .buttonStyle(.borderedProminent)
+                .tint(Tokens.Brand.primary)
+                .controlSize(.large)
+                .padding(.top, Tokens.Spacing.xs)
         }
         .padding(Tokens.Spacing.xl)
+    }
+
+    private var list: some View {
+        List(selection: $selection) {
+            ForEach(store.connections) { connection in
+                ConnectionRow(connection: connection)
+                    .tag(connection.id)
+                    .contentShape(Rectangle())
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+                    .onTapGesture(count: 2) {
+                        open(connection)
+                    }
+                    .contextMenu {
+                        Button("Open") { open(connection) }
+                        Button("Edit…") { editorTarget = .edit(connection) }
+                        Divider()
+                        Button("Delete", role: .destructive) {
+                            store.remove(connection)
+                            if selection == connection.id { selection = nil }
+                        }
+                    }
+            }
+        }
+        .listStyle(.inset(alternatesRowBackgrounds: false))
+        .scrollContentBackground(.hidden)
+    }
+
+    private func open(_ connection: Connection) {
+        AppDelegate.shared?.openConnection(connection)
+    }
+}
+
+private struct ConnectionRow: View {
+    let connection: Connection
+
+    var body: some View {
+        HStack(spacing: Tokens.Spacing.sm) {
+            Circle()
+                .fill(connection.colorTag.swiftUIColor.opacity(connection.colorTag == .none ? 0 : 1))
+                .stroke(Color.secondary.opacity(connection.colorTag == .none ? 0.4 : 0), lineWidth: 1)
+                .frame(width: 12, height: 12)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(connection.name).font(.body.weight(.medium))
+                    if connection.isProduction {
+                        Text("PROD")
+                            .font(.system(size: 9, weight: .bold))
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Tokens.Brand.danger)
+                            .foregroundStyle(.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                    }
+                }
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+    }
+
+    private var subtitle: String {
+        let db = connection.database.isEmpty ? "—" : connection.database
+        return "\(connection.username)@\(connection.host):\(connection.port) · \(db)"
     }
 }
 

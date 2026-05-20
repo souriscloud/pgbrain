@@ -23,31 +23,39 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `./scripts/run.sh` produces a launchable app. Welcome window centers, menu bar icon appears, all dropdown items wired. App stays alive after closing all windows (re-openable from menu bar).
 
+### Iter 2 — First real connection (2026-05-20)
+**Goal**: user can create, save, and connect to a real Postgres server, see `version()`, close & relaunch with the password surviving.
+
+- **PostgresNIO** dependency pinned in `Package.swift` (≥1.21).
+- **`ConnectionEditorView`** sheet — name, host, port, database, user, password, SSL mode, color tag, production toggle, inline "Test Connection" probe.
+- **`Keychain`** helper — generic-password items keyed by connection UUID, `kSecAttrAccessibleAfterFirstUnlock` so no prompt on relaunch.
+- **`ConnectionStore`** — JSON-backed `@Observable` store at `~/Library/Application Support/pgBrain/connections.json`. Upsert / remove / load on init.
+- **`AppSupport`** — single source of truth for the app's support directory and well-known file URLs.
+- **`WelcomeView`** — real list driven by `ConnectionStore`, double-click or `⏎` opens, context menu for Edit/Delete, empty state with CTA.
+- **`ConnectionWindowFactory` + `ConnectionWindowContent`** — one NSWindow per connection, tied to a `ConnectionService`. Title bar shows the connection name + `user@host:port`; production connections get a red-tinted background. Last close → Welcome re-shown via `WindowManager`.
+- **`ConnectionService`** — owns the `PostgresClient`, exposes a `@MainActor @Observable` state machine (idle / connecting / connected / error / closed), runs `SELECT version()` on connect, surfaces TLS via `SSLMode`.
+- **`StatusFooter`** — bottom-of-window strip: status dot, state label, production badge, target description, "connected at HH:MM".
+- **Menu bar** — "Open Windows" submenu now populated dynamically from `WindowManager` on menu open; clicking a row focuses that window.
+
+**Verified**: `./scripts/run.sh` produces an app where you can add a localhost connection, hit Save, double-click → window opens, runs `SELECT version()`, footer goes green. Quit and relaunch → connection list survives, password is still in the Keychain so reconnect is one click.
+
 ---
 
-## Next — Iter 2: First real connection
+## Next — Iter 3: Sidebar + first table view
 
-Smallest end-to-end vertical that lets the user **connect** to a Postgres server and see something.
+Smallest useful step on top of iter-2: when you open a connection, you see what's in the database and can browse a table's rows.
 
-1. **PostgresNIO dependency** — add to `Package.swift`, version pin.
-2. **Connection editor sheet** — modal from Welcome "+ New Connection". Fields: name, host, port, db, user, password, sslMode, colorTag, isProduction toggle.
-3. **Keychain helper** — `KeychainStore` reading/writing the password by connection UUID. Generic password class, accessible without user prompt after first save (`kSecAttrAccessibleAfterFirstUnlock`).
-4. **Connection store** — JSON file at `~/Library/Application Support/pgBrain/connections.json`. CRUD + change publisher.
-5. **Welcome connection list** — real list driven by the store. Double-click → open connection window.
-6. **ConnectionWindow shell** — empty NSWindow tied to a connection, registered with `WindowManager`. Title bar shows connection name + production red badge if `isProduction`. Closing it removes from `WindowManager`; if last → Welcome re-shown.
-7. **Connect on window open** — `PostgresClient` ping; show "connected to <server-version>" in a footer placeholder. Failure → inline error in the window with retry.
+1. **Schema fetch** — query `pg_catalog` to enumerate databases, schemas, tables, views, columns on connect. Cached per `ConnectionService`.
+2. **`SidebarOutlineView`** — `NSOutlineView` in an `NSViewRepresentable`, four-level tree: database → schema → table/view → column. Disclosure carets, icon per node type.
+3. **Tab strip** — custom AppKit tab bar inside the connection window with closeable, reorderable tabs. One tab = one open table (or, later, scratchpad).
+4. **Table tab content** — `NSTableView`-backed grid loading the first 1000 rows of a selected table, with column headers from the schema fetch. Async fetch with a spinner; null cells visibly distinct from empty strings.
+5. **Type-aware cell renderers** — text / number / bool / timestamp / jsonb pretty-print read-only for now (editing lands in iter-5).
 
-**Iter-2 done = user can create, save, and connect to a real Postgres server**, see the server's `version()` string, close, relaunch, password survives.
+**Iter-3 done = user double-clicks a table in the sidebar and sees the first 1000 rows in a real grid.**
 
 ---
 
 ## Backlog (rough order)
-
-### Iter 3 — Sidebar + first table view
-- `NSOutlineView`-backed sidebar: databases → schemas → tables → columns.
-- Tabs inside connection window (NSTabView-like, but custom AppKit since we need close buttons + reordering).
-- Double-click a table → open a "Table" tab using `NSTableView` with first 1000 rows.
-- Async row loading, column-type-aware cell renderers (text, number, bool, jsonb, timestamp, null distinct from empty string).
 
 ### Iter 4 — SQL scratchpad with inline results ("Livebook")
 - Code-editor view (CodeMirror via WKWebView, or Apple's `TextKit 2` with a Postgres tokenizer). Decide at iter start.

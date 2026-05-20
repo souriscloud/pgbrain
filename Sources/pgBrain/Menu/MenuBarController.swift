@@ -14,6 +14,7 @@ extension AppDelegate: MenuBarDelegate {}
 final class MenuBarController: NSObject {
     private weak var delegate: MenuBarDelegate?
     private var statusItem: NSStatusItem?
+    private var menu: NSMenu?
 
     init(delegate: MenuBarDelegate) {
         self.delegate = delegate
@@ -28,12 +29,16 @@ final class MenuBarController: NSObject {
             button.image = image
             button.toolTip = "pgBrain"
         }
-        item.menu = buildMenu()
+        let m = buildMenu()
+        m.delegate = self
+        item.menu = m
+        menu = m
         statusItem = item
     }
 
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
+        menu.autoenablesItems = false
 
         let welcome = NSMenuItem(title: "Show Welcome…", action: #selector(onShowWelcome), keyEquivalent: "")
         welcome.target = self
@@ -45,13 +50,15 @@ final class MenuBarController: NSObject {
 
         menu.addItem(.separator())
 
-        // Placeholder: in iter-2 we will dynamically list open connection windows here.
         let windowsHeader = NSMenuItem(title: "Open Windows", action: nil, keyEquivalent: "")
         windowsHeader.isEnabled = false
+        windowsHeader.tag = MenuTag.windowsHeader.rawValue
         menu.addItem(windowsHeader)
 
+        // Placeholder; replaced by `refreshOpenWindows()` on each menu open.
         let none = NSMenuItem(title: "  — none —", action: nil, keyEquivalent: "")
         none.isEnabled = false
+        none.tag = MenuTag.windowsPlaceholder.rawValue
         menu.addItem(none)
 
         menu.addItem(.separator())
@@ -71,6 +78,48 @@ final class MenuBarController: NSObject {
         menu.addItem(quit)
 
         return menu
+    }
+
+    private enum MenuTag: Int {
+        case windowsHeader = 100
+        case windowsPlaceholder = 101
+        case windowEntry = 102
+    }
+
+    /// Rebuilds the dynamic window-list block between the "Open Windows" header
+    /// and the next separator. Called on menu open via `NSMenuDelegate`.
+    private func refreshOpenWindows() {
+        guard let menu else { return }
+        // Drop all current entries (placeholder + any previously added rows).
+        menu.items.removeAll { $0.tag == MenuTag.windowsPlaceholder.rawValue || $0.tag == MenuTag.windowEntry.rawValue }
+
+        guard let headerIdx = menu.items.firstIndex(where: { $0.tag == MenuTag.windowsHeader.rawValue }) else { return }
+        let entries = delegate?.windowManager.connectionWindows ?? []
+        var insertAt = headerIdx + 1
+
+        if entries.isEmpty {
+            let none = NSMenuItem(title: "  — none —", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            none.tag = MenuTag.windowsPlaceholder.rawValue
+            menu.insertItem(none, at: insertAt)
+            return
+        }
+
+        for entry in entries {
+            let title = "  " + entry.window.title
+            let item = NSMenuItem(title: title, action: #selector(onWindowEntry(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = MenuTag.windowEntry.rawValue
+            item.representedObject = entry.window
+            menu.insertItem(item, at: insertAt)
+            insertAt += 1
+        }
+    }
+
+    @objc private func onWindowEntry(_ sender: NSMenuItem) {
+        guard let window = sender.representedObject as? NSWindow else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 
     @objc private func onShowWelcome() {
@@ -96,5 +145,11 @@ final class MenuBarController: NSObject {
 
     @objc private func onQuit() {
         NSApp.terminate(nil)
+    }
+}
+
+extension MenuBarController: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshOpenWindows()
     }
 }
