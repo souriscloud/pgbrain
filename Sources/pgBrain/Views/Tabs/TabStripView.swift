@@ -10,33 +10,48 @@ struct TabStripView: View {
     @State private var draggingID: UUID?
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 0) {
-                ForEach(workspace.tabs) { tab in
-                    TabChip(
-                        tab: tab,
-                        isSelected: workspace.selectedID == tab.id,
-                        isDragging: draggingID == tab.id,
-                        onSelect: { workspace.selectedID = tab.id },
-                        onClose: { workspace.closeTab(id: tab.id) }
-                    )
-                    .onDrag {
-                        draggingID = tab.id
-                        return NSItemProvider(object: tab.id.uuidString as NSString)
-                    }
-                    .onDrop(
-                        of: [.text],
-                        delegate: TabDropDelegate(
-                            target: tab,
-                            workspace: workspace,
-                            draggingID: $draggingID
+        HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 0) {
+                    ForEach(workspace.tabs) { tab in
+                        TabChip(
+                            tab: tab,
+                            isSelected: workspace.selectedID == tab.id,
+                            isDragging: draggingID == tab.id,
+                            onSelect: { workspace.selectedID = tab.id },
+                            onClose: { workspace.closeTab(id: tab.id) }
                         )
-                    )
-                    Divider().frame(height: 18).opacity(0.4)
+                        .onDrag {
+                            draggingID = tab.id
+                            return NSItemProvider(object: tab.id.uuidString as NSString)
+                        }
+                        .onDrop(
+                            of: [.text],
+                            delegate: TabDropDelegate(
+                                target: tab,
+                                workspace: workspace,
+                                draggingID: $draggingID
+                            )
+                        )
+                        Divider().frame(height: 18).opacity(0.4)
+                    }
                 }
+                .padding(.horizontal, 4)
+                .animation(.easeInOut(duration: 0.18), value: workspace.tabs.map(\.id))
             }
-            .padding(.horizontal, 4)
-            .animation(.easeInOut(duration: 0.18), value: workspace.tabs.map(\.id))
+            Spacer(minLength: 0)
+            Button {
+                workspace.openScratchpad()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 26, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("n", modifiers: .command)
+            .help("New scratchpad (⌘N)")
+            .padding(.trailing, 4)
         }
         .frame(height: 30)
         .background(Color(nsColor: .underPageBackgroundColor))
@@ -96,6 +111,8 @@ private struct TabChip: View {
             case .view: return "rectangle.stack"
             case .materializedView: return "rectangle.stack.fill"
             }
+        case .scratchpad:
+            return "doc.text"
         }
     }
 }

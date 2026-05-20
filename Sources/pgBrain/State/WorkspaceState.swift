@@ -1,13 +1,22 @@
 import Foundation
 import Observation
 
-/// Per-connection-window tab state. Owns the list of open tabs and the
-/// selection. Iter-3 ships table tabs only; scratchpad tabs land in iter-4.
+/// Per-connection-window tab state. Tabs are either a read-only table view
+/// (iter-3) or a SQL scratchpad with inline result blocks (iter-4).
 @MainActor
 @Observable
 final class WorkspaceState {
-    enum TabKind: Sendable, Equatable {
+    enum TabKind: Equatable {
         case table(TableNode)
+        case scratchpad(Scratchpad)
+
+        static func == (lhs: TabKind, rhs: TabKind) -> Bool {
+            switch (lhs, rhs) {
+            case (.table(let l), .table(let r)): return l.id == r.id
+            case (.scratchpad(let l), .scratchpad(let r)): return l === r
+            default: return false
+            }
+        }
     }
 
     final class Tab: Identifiable, Equatable {
@@ -25,6 +34,7 @@ final class WorkspaceState {
 
     private(set) var tabs: [Tab] = []
     var selectedID: UUID?
+    @ObservationIgnored private var scratchpadCounter = 0
 
     var selectedTab: Tab? {
         guard let id = selectedID else { return nil }
@@ -43,6 +53,18 @@ final class WorkspaceState {
         let tab = Tab(kind: .table(table), title: table.qualifiedName)
         tabs.append(tab)
         selectedID = tab.id
+    }
+
+    /// Always opens a fresh scratchpad — unlike table tabs we don't dedupe,
+    /// since users may want multiple independent scratchpads side by side.
+    @discardableResult
+    func openScratchpad() -> Scratchpad {
+        scratchpadCounter += 1
+        let pad = Scratchpad(title: "Query \(scratchpadCounter)")
+        let tab = Tab(kind: .scratchpad(pad), title: pad.title)
+        tabs.append(tab)
+        selectedID = tab.id
+        return pad
     }
 
     func closeTab(id: UUID) {

@@ -75,20 +75,19 @@ struct ConnectionWindowContent: View {
     @ViewBuilder
     private var workspacePane: some View {
         VStack(spacing: 0) {
-            if service.workspace.tabs.isEmpty {
-                emptyWorkspace
-            } else {
-                TabStripView(workspace: service.workspace)
-                Divider()
-                if let selected = service.workspace.selectedTab {
-                    switch selected.kind {
-                    case .table(let table):
-                        TableTabView(table: table, service: service)
-                            .id(table.id)
-                    }
-                } else {
-                    EmptyView()
+            TabStripView(workspace: service.workspace)
+            Divider()
+            if let selected = service.workspace.selectedTab {
+                switch selected.kind {
+                case .table(let table):
+                    TableTabView(table: table, service: service)
+                        .id(table.id)
+                case .scratchpad(let pad):
+                    ScratchpadView(scratchpad: pad, service: service)
+                        .id(pad.id)
                 }
+            } else {
+                emptyWorkspace
             }
         }
     }
@@ -100,9 +99,11 @@ struct ConnectionWindowContent: View {
                 .foregroundStyle(.secondary)
             Text("Pick a table from the sidebar")
                 .font(.headline)
-            Text("Double-click any table or view to load its first 1,000 rows.")
+            Text("Double-click any table or view to load its first 1,000 rows, or press ⌘N to open a SQL scratchpad.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

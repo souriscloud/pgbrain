@@ -56,29 +56,42 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: connect to localhost, sidebar populates after `version()` resolves, double-clicking any table opens a new tab and renders the first 1000 rows in a real grid. Tabs reorder via drag, close cleanly, dedupe on repeat open. Build is clean (`swift build` ✓, `./scripts/bundle.sh` ✓).
 
+### Iter 4 — SQL scratchpad with inline results ("Livebook") (2026-05-20)
+**Goal**: from any connection window, open a scratchpad tab, run SQL, see results inline below the statement.
+
+- **`Scratchpad` / `ResultBlock`** — `@MainActor @Observable` model in `Sources/pgBrain/State/Scratchpad.swift`. Scratchpad owns editor buffer + chronological result-block stack (newest at top). Each block is mutable so `.running → .success(QueryResult) | .failure(String)` updates land in place.
+- **`WorkspaceState.TabKind.scratchpad`** — same tab strip handles scratchpads alongside tables. `openScratchpad()` always creates a fresh tab (unlike `openTable` which dedupes — multiple independent scratchpads is a real workflow).
+- **`SQLStatementSplitter`** — quote/comment/dollar-quote-aware splitter on PG's actual grammar (single quotes with `''` escape, double-quoted idents, `--` line / `/* */` nestable block comments, `$tag$…$tag$`). `statementAt(caret:)` picks the JetBrains-style "run statement under cursor" target.
+- **`QueryRunner`** — async runner over the existing `PostgresClient`. Walks the row stream, materialises columns from the first row's cells, decodes every value as `String?` via the cell's typed decoder, and returns a `RowsFetcher.Page` so the grid renders unchanged. `limit + 1` to flag truncation. `commandTag` left `nil` for now — PostgresNIO's streaming `query()` doesn't surface it cleanly; non-SELECT statements show "OK".
+- **`ScratchpadView`** — header (title, ⌘↩ Run, Clear, History toggle), `HSplitView` of `VSplitView { SQLEditor / result-block stack }` + optional `HistoryPanel`. SQL editor is an `NSTextView` subclass with monospaced font, autosubst/autocorrect off, ⌘↩ intercepted in `keyDown`. Multi-line result-block stack via `ScrollViewReader` so the history panel can `scrollTo(blockID)`.
+- **`HistoryPanel`** — compact right-side list of past runs: status icon, preview, HH:mm:ss, "N rows · X ms". Click → scroll matching block to top + select.
+- **`+` button + `⌘N`** in `TabStripView` opens a fresh scratchpad.
+- **`ConnectionService.client`** exposed read-only so the runner can reuse the live `PostgresClient`.
+
+**Verified**: build is clean (`swift build` ✓, `./scripts/bundle.sh` ✓). App launches, Welcome lists saved connections. End-to-end run-and-render flow ready for interactive smoke test.
+
+**Deferred** (intentional):
+- Backend PID tracking for `pg_cancel_backend` — pushed to the cancellation iter where it actually pays off.
+- SQL syntax highlighting — TextKit-2 tokenizer vs. CodeMirror-in-WKWebView decision punted until we've used the plain editor for a bit.
+- `commandTag` population — PostgresNIO's high-level streaming API doesn't surface it; would need to drop to raw `PSQLChannel` bits.
+
 ---
 
-## Next — Iter 4: SQL scratchpad with inline results ("Livebook")
+## Next — Iter 5: Editable data grid
 
-Smallest useful step on top of iter-3: from any connection window, open a scratchpad tab, run SQL, see results inline below the statement.
+Smallest useful step on top of iter-4: clicking a cell in any data grid (table tab or scratchpad result block) lets you edit it. Commit-on-focus-loss with a dirty marker so accidental edits don't escape.
 
-1. **Decision: editor stack.** `TextKit 2` with a hand-rolled Postgres tokenizer is more work but feels Mac-native and has lower input latency than CodeMirror-in-WKWebView. Default to native unless tokenizer work blows the iter budget.
-2. **`ScratchpadTab` workspace kind** — extend `WorkspaceState.TabKind` so the same tab strip handles scratchpads alongside tables. New-tab `+` button + `⌘N` opens a fresh scratchpad.
-3. **`QueryRunner`** — async runner on top of the `PostgresClient`. Tracks backend PID (`pg_backend_pid()` on a sister connection) so cancel becomes possible in a later iter. Streams rows into the same `RowsFetcher.Page` shape the grid already understands.
-4. **Run-on-cursor / run-selection** — `⌘↩` runs the statement at the caret (split on `;` outside of strings/comments) or the highlighted text if any.
-5. **Inline result blocks** — each run produces a collapsible block immediately below its statement: status line + row count + duration + grid (or error). Multiple blocks stack chronologically; "Clear results" on the scratchpad header.
-6. **History side panel** — list of past runs (statement preview, when, rows, ms) scoped to the current scratchpad; click to scroll the result back into view.
+1. **Dirty buffer per grid** — track `(rowIndex, columnIndex) → newValue?` in the `DataGridView`'s model, draw a yellow corner triangle on dirty cells, footer shows "N pending edits".
+2. **Inline `NSTextField` editor** — per-cell editor commit on Enter / Tab / focus-loss, Esc reverts. Cell rendering switches to editor when double-clicked. Type-aware later; iter-5 ships text-edit-for-everything.
+3. **PK detection** — `pg_catalog.pg_index` query at schema-fetch time so every `TableNode` knows its primary key. Without a PK, editing is disabled with a tooltip explaining why.
+4. **Commit / revert** — "Apply" + "Revert" in the table tab header. Apply runs an `UPDATE … WHERE pk = …` per row in a single transaction; "Revert" drops the dirty buffer. Failure surfaces as a per-row error.
+5. **Undo before commit** — `⌘Z` in the grid undoes the last cell edit (stack lives in the dirty buffer).
 
-**Iter-4 done = user opens a scratchpad, types `SELECT * FROM <some_table> LIMIT 5`, presses `⌘↩`, and sees a result grid render right below the statement.**
+**Iter-5 done = double-click any cell in a `pg_*` table → type a new value → tab away → "1 pending edit" in footer → press Apply → row updated in the DB.**
 
 ---
 
 ## Backlog (rough order)
-
-### Iter 5 — Editable data grid
-- Inline cell editing with dirty marker.
-- Commit-on-focus-loss, transaction batching, undo before commit.
-- Type-aware editors (date picker for timestamps, popover JSON editor, etc.).
 
 ### Iter 6 — Production + color UX everywhere
 - Production flag drives: red title bar accent, red badge on tab, red border in cells (warn on edit), confirm dialog before DELETE/UPDATE without WHERE.
@@ -125,6 +138,7 @@ Smallest useful step on top of iter-3: from any connection window, open a scratc
 ---
 
 ## Open questions for later
-- **SQL editor implementation**: native `TextKit 2` with a hand-rolled Postgres lexer vs. CodeMirror-in-WKWebView. Native is more work but feels more Mac-native and has lower input latency. Decide at start of iter-4.
-- **Sidebar tree perf**: at very large schemas (10k+ tables) `NSOutlineView` with lazy children works fine, but the search-as-you-type filter needs an index. Address at iter-3 if it bites.
-- **Cancellation**: cancelling a long `PostgresQuery` requires opening a side connection and `pg_cancel_backend(pid)`. Plan the API around this from iter-2 (track every query's backend PID).
+- **SQL syntax highlighting**: shipped iter-4 with a plain `NSTextView` (no highlighting). Pick a direction once we've felt the absence — TextKit-2 + hand-rolled Postgres lexer vs. CodeMirror-in-WKWebView. Native is more work but lower input latency and matches the rest of the chrome.
+- **Sidebar tree perf**: at very large schemas (10k+ tables) `NSOutlineView` with lazy children works fine, but the search-as-you-type filter needs an index. Address when it bites.
+- **Cancellation**: cancelling a long `PostgresQuery` requires opening a side connection and `pg_cancel_backend(pid)`. The runner doesn't track backend PIDs yet — wire it in when the cancellation iter lands.
+- **`commandTag` for non-SELECT**: PostgresNIO's high-level streaming API doesn't expose the libpq-style command tag. To show "UPDATE 12" instead of "OK", drop to raw `PSQLChannel` or fork a thin wrapper around `query`.
