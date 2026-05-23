@@ -9,9 +9,10 @@ enum SchemaFetcher {
         async let dbName = currentDatabase(client: client)
         async let relations = fetchRelations(client: client)
         async let columns = fetchColumns(client: client)
+        async let pks = fetchPrimaryKeys(client: client)
 
-        let (db, rels, cols) = try await (dbName, relations, columns)
-        return assemble(databaseName: db, relations: rels, columns: cols)
+        let (db, rels, cols, primaryKeys) = try await (dbName, relations, columns, pks)
+        return assemble(databaseName: db, relations: rels, columns: cols, primaryKeys: primaryKeys)
     }
 
     private static func currentDatabase(client: PostgresClient) async throws -> String {
@@ -35,6 +36,13 @@ enum SchemaFetcher {
         let typeName: String
         let notNull: Bool
         let ordinal: Int
+    }
+
+    private struct PrimaryKeyRow: Sendable {
+        let schema: String
+        let table: String
+        let columnName: String
+        let position: Int  // 1-based ordinal within the PK
     }
 
     private static func fetchRelations(client: PostgresClient) async throws -> [Relation] {
@@ -89,7 +97,41 @@ enum SchemaFetcher {
         return out
     }
 
-    private static func assemble(databaseName: String, relations: [Relation], columns: [ColumnRow]) -> SchemaSnapshot {
+    private static func fetchPrimaryKeys(client: PostgresClient) async throws -> [PrimaryKeyRow] {
+        // Walk pg_index for primary keys, then expand `indkey` (an int2vector
+        // of attnums) into one row per PK column via `WITH ORDINALITY` so we
+        // preserve column order across composite keys.
+        let sql: PostgresQuery = """
+        SELECT n.nspname,
+               c.relname,
+               a.attname,
+               k.ord::int
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+        WHERE i.indisprimary
+          AND c.relkind IN ('r','p')
+          AND n.nspname NOT IN ('pg_catalog','information_schema')
+          AND n.nspname NOT LIKE 'pg_temp_%'
+          AND n.nspname NOT LIKE 'pg_toast%'
+        ORDER BY n.nspname, c.relname, k.ord
+        """
+        let rows = try await client.query(sql)
+        var out: [PrimaryKeyRow] = []
+        for try await (schema, table, columnName, position) in rows.decode((String, String, String, Int).self) {
+            out.append(PrimaryKeyRow(schema: schema, table: table, columnName: columnName, position: position))
+        }
+        return out
+    }
+
+    private static func assemble(
+        databaseName: String,
+        relations: [Relation],
+        columns: [ColumnRow],
+        primaryKeys: [PrimaryKeyRow]
+    ) -> SchemaSnapshot {
         // Bucket columns by (schema, table) once for O(1) lookup during merge.
         var colsByTable: [String: [ColumnNode]] = [:]
         for c in columns {
@@ -99,12 +141,22 @@ enum SchemaFetcher {
             )
         }
 
+        // Bucket PK columns by (schema, table). Input is already ordered by
+        // `position`, so appending preserves composite-key order.
+        var pksByTable: [String: [String]] = [:]
+        for pk in primaryKeys {
+            let key = "\(pk.schema)\u{1F}\(pk.table)"
+            pksByTable[key, default: []].append(pk.columnName)
+        }
+
         // Group relations by schema in original (ordered) iteration.
         var schemas: [SchemaNode] = []
         var indexBySchema: [String: Int] = [:]
         for r in relations {
-            let cols = colsByTable["\(r.schema)\u{1F}\(r.name)"] ?? []
-            let table = TableNode(schema: r.schema, name: r.name, kind: r.kind, columns: cols)
+            let key = "\(r.schema)\u{1F}\(r.name)"
+            let cols = colsByTable[key] ?? []
+            let pk = pksByTable[key] ?? []
+            let table = TableNode(schema: r.schema, name: r.name, kind: r.kind, columns: cols, primaryKey: pk)
             if let i = indexBySchema[r.schema] {
                 schemas[i].tables.append(table)
             } else {

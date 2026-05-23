@@ -8,7 +8,9 @@ import PostgresNIO
 enum RowsFetcher {
     struct Page: Sendable {
         let columns: [ColumnNode]   // copied from the schema snapshot
-        let rows: [[String?]]
+        // Mutable so iter-5 can splice in newly-applied cell edits without
+        // refetching from the server.
+        var rows: [[String?]]
         let truncated: Bool         // true when limit was reached
         let limit: Int
         let elapsed: TimeInterval

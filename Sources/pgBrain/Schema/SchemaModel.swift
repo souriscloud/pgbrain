@@ -26,9 +26,24 @@ struct TableNode: Equatable, Identifiable, Sendable {
     var name: String
     var kind: Kind
     var columns: [ColumnNode]
+    /// Names of columns making up the primary key, in index order. Empty when
+    /// the relation has no primary key (or is a view) — gates row editing.
+    var primaryKey: [String] = []
 
     var id: String { "\(schema).\(name)" }
     var qualifiedName: String { "\(schema).\(name)" }
+
+    /// Editing is only meaningful on real tables that have a PK we can target
+    /// in a UPDATE's WHERE clause.
+    var isEditable: Bool {
+        (kind == .table) && !primaryKey.isEmpty
+    }
+
+    /// Looks up the `ColumnNode`s named by `primaryKey`, preserving PK order.
+    /// Missing names (shouldn't happen if schema is consistent) are dropped.
+    var primaryKeyColumns: [ColumnNode] {
+        primaryKey.compactMap { name in columns.first(where: { $0.name == name }) }
+    }
 }
 
 struct ColumnNode: Equatable, Identifiable, Sendable {

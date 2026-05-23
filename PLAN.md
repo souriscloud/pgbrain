@@ -75,27 +75,34 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 - SQL syntax highlighting — TextKit-2 tokenizer vs. CodeMirror-in-WKWebView decision punted until we've used the plain editor for a bit.
 - `commandTag` population — PostgresNIO's high-level streaming API doesn't surface it; would need to drop to raw `PSQLChannel` bits.
 
+### Iter 5 — Editable data grid (2026-05-23)
+**Goal**: double-click any cell in a table tab, type a new value, press Apply → row updated in Postgres.
+
+- **PK detection in schema fetcher** — new third query against `pg_index` joined with `pg_attribute` (via `unnest(indkey) WITH ORDINALITY` to preserve composite-key order), merged into `TableNode.primaryKey: [String]`. `TableNode.isEditable` gates editing on `kind == .table` + non-empty PK; views and PK-less tables show a lock icon with a tooltip.
+- **`EditBuffer`** — `@MainActor @Observable` per-grid store of dirty `(row, column) → newValue` plus a per-edit history stack so `undo()` walks one cell at a time. Lives on `RowsLoader` for the tab's lifetime.
+- **`UpdateApplier`** — runs all pending edits inside one `client.withTransaction { … }`. Generates one `UPDATE` per dirty row with positional binds + server-side `::"<typename>"` casts so we don't need per-type Swift encoders. PK values are read out of the in-memory snapshot, so deletes between load and apply will be detected by zero rows affected (treated as success today; row-existence check is on the backlog).
+- **`EditableTableView`** — `NSTableView` subclass that owns `doubleAction` → `editColumn(_:row:with:select:)` and intercepts ⌘Z via `performKeyEquivalent` to pop the `EditBuffer` undo stack.
+- **`DataGridView` editing** — per-cell `NSTextField` editor (commit on Enter/Tab/focus-loss, Esc reverts via cached `lastConfiguredText`). Dirty cells get a yellow corner triangle + faint yellow tint. Bool glyph (`✓`) swaps to raw token on edit start so the server gets a parseable value. Empty-string commits on originally-NULL cells are no-ops to avoid silently overwriting NULL.
+- **`TableTabView` header** — pending count, Apply (transactional commit, splices new values into `page.rows` on success), Revert (drops the buffer), inline error text on failure. Apply button is brand-tinted, prominent; Revert is bordered.
+- **`RowsFetcher.Page.rows`** — now `var` so apply can mutate in place without a refetch.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓. App launches; tables with a PK show the lock-free header and editable cells, tables without a PK show the lock icon.
+
+**Deferred** (intentional):
+- Explicit "Set NULL" affordance for non-NULL cells — empty-string-on-non-NULL is treated as the literal empty string today.
+- Row-existence guard before UPDATE (zero rows affected → warn). PK values are still trusted from the snapshot.
+- Type-specific editors (date pickers, bool toggles, JSON editor). iter-5 ships text-edit-for-everything per plan.
+- `INSERT` and `DELETE` from the grid — separate iter.
+
 ---
 
-## Next — Iter 5: Editable data grid
-
-Smallest useful step on top of iter-4: clicking a cell in any data grid (table tab or scratchpad result block) lets you edit it. Commit-on-focus-loss with a dirty marker so accidental edits don't escape.
-
-1. **Dirty buffer per grid** — track `(rowIndex, columnIndex) → newValue?` in the `DataGridView`'s model, draw a yellow corner triangle on dirty cells, footer shows "N pending edits".
-2. **Inline `NSTextField` editor** — per-cell editor commit on Enter / Tab / focus-loss, Esc reverts. Cell rendering switches to editor when double-clicked. Type-aware later; iter-5 ships text-edit-for-everything.
-3. **PK detection** — `pg_catalog.pg_index` query at schema-fetch time so every `TableNode` knows its primary key. Without a PK, editing is disabled with a tooltip explaining why.
-4. **Commit / revert** — "Apply" + "Revert" in the table tab header. Apply runs an `UPDATE … WHERE pk = …` per row in a single transaction; "Revert" drops the dirty buffer. Failure surfaces as a per-row error.
-5. **Undo before commit** — `⌘Z` in the grid undoes the last cell edit (stack lives in the dirty buffer).
-
-**Iter-5 done = double-click any cell in a `pg_*` table → type a new value → tab away → "1 pending edit" in footer → press Apply → row updated in the DB.**
+## Next — Iter 6: Production + color UX everywhere
+- Production flag drives: red title bar accent, red badge on tab, red border in cells (warn on edit), confirm dialog before DELETE/UPDATE without WHERE.
+- Color tag visible in: Welcome list, connection window sidebar header, menu bar window list, status footer.
 
 ---
 
 ## Backlog (rough order)
-
-### Iter 6 — Production + color UX everywhere
-- Production flag drives: red title bar accent, red badge on tab, red border in cells (warn on edit), confirm dialog before DELETE/UPDATE without WHERE.
-- Color tag visible in: Welcome list, connection window sidebar header, menu bar window list, status footer.
 
 ### Iter 7 — Status footer + active operations popover
 - Bottom-of-window footer: connection state, current schema, active query indicator, row count, last error.
