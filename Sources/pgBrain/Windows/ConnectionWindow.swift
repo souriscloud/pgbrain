@@ -3,7 +3,12 @@ import SwiftUI
 
 @MainActor
 enum ConnectionWindowFactory {
-    static func make(connection: Connection, onClose: @escaping @MainActor (NSWindow) -> Void) -> NSWindow {
+    struct Result {
+        let window: NSWindow
+        let service: ConnectionService
+    }
+
+    static func make(connection: Connection, onClose: @escaping @MainActor (NSWindow) -> Void) -> Result {
         let service = ConnectionService(connection: connection)
         let content = ConnectionWindowContent(service: service)
         let hosting = NSHostingController(rootView: content)
@@ -31,7 +36,7 @@ enum ConnectionWindowFactory {
         // Kick off the connect as soon as the window exists.
         service.start()
 
-        return window
+        return Result(window: window, service: service)
     }
 }
 

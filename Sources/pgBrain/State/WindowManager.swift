@@ -5,19 +5,38 @@ import AppKit
 /// menu bar's "Open Windows" list.
 @MainActor
 final class WindowManager {
-    private(set) var connectionWindows: [(connectionID: UUID, window: NSWindow)] = []
+    struct Entry {
+        let connectionID: UUID
+        let window: NSWindow
+        weak var service: ConnectionService?
+    }
 
-    func register(window: NSWindow, for connectionID: UUID) {
-        if !connectionWindows.contains(where: { $0.window === window }) {
-            connectionWindows.append((connectionID, window))
+    private(set) var entries: [Entry] = []
+
+    /// Backwards-compatible adapter used by `MenuBarController`. Kept until
+    /// the menu controller is refactored to read `entries` directly.
+    var connectionWindows: [(connectionID: UUID, window: NSWindow)] {
+        entries.map { ($0.connectionID, $0.window) }
+    }
+
+    func register(window: NSWindow, service: ConnectionService) {
+        if !entries.contains(where: { $0.window === window }) {
+            entries.append(Entry(connectionID: service.connection.id, window: window, service: service))
         }
     }
 
     func unregister(window: NSWindow) {
-        connectionWindows.removeAll { $0.window === window }
+        entries.removeAll { $0.window === window }
     }
 
     func window(for connectionID: UUID) -> NSWindow? {
-        connectionWindows.first(where: { $0.connectionID == connectionID })?.window
+        entries.first(where: { $0.connectionID == connectionID })?.window
+    }
+
+    /// Live `ConnectionService` for a connection if its window is currently
+    /// open, otherwise nil. iter-9 cross-DB copy uses this to reuse an
+    /// already-leased PostgresClient instead of opening a transient one.
+    func service(for connectionID: UUID) -> ConnectionService? {
+        entries.first(where: { $0.connectionID == connectionID })?.service
     }
 }

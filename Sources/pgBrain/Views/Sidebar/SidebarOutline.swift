@@ -86,15 +86,81 @@ final class SidebarNode {
 struct SidebarOutlineView: NSViewRepresentable {
     let snapshot: SchemaSnapshot
     let onOpenTable: (TableNode) -> Void
+    var onCopyTable: ((TableNode) -> Void)? = nil
+    var onExportTable: ((TableNode) -> Void)? = nil
+    var onImportInto: ((TableNode) -> Void)? = nil
 
     @MainActor
     final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
         var root: SidebarNode
         let onOpenTable: (TableNode) -> Void
+        let onCopyTable: ((TableNode) -> Void)?
+        let onExportTable: ((TableNode) -> Void)?
+        let onImportInto: ((TableNode) -> Void)?
 
-        init(root: SidebarNode, onOpenTable: @escaping (TableNode) -> Void) {
+        init(
+            root: SidebarNode,
+            onOpenTable: @escaping (TableNode) -> Void,
+            onCopyTable: ((TableNode) -> Void)?,
+            onExportTable: ((TableNode) -> Void)?,
+            onImportInto: ((TableNode) -> Void)?
+        ) {
             self.root = root
             self.onOpenTable = onOpenTable
+            self.onCopyTable = onCopyTable
+            self.onExportTable = onExportTable
+            self.onImportInto = onImportInto
+        }
+
+        func menu(forRow row: Int, in outline: NSOutlineView) -> NSMenu? {
+            guard let node = outline.item(atRow: row) as? SidebarNode,
+                  let table = node.openableTable
+            else { return nil }
+            let menu = NSMenu()
+            let open = NSMenuItem(title: "Open in tab", action: #selector(handleOpen(_:)), keyEquivalent: "")
+            open.target = self
+            open.representedObject = table
+            menu.addItem(open)
+            menu.addItem(.separator())
+            if onCopyTable != nil {
+                let copy = NSMenuItem(title: "Copy table to…", action: #selector(handleCopy(_:)), keyEquivalent: "")
+                copy.target = self
+                copy.representedObject = table
+                menu.addItem(copy)
+            }
+            if onExportTable != nil {
+                let exp = NSMenuItem(title: "Export…", action: #selector(handleExport(_:)), keyEquivalent: "")
+                exp.target = self
+                exp.representedObject = table
+                menu.addItem(exp)
+            }
+            if onImportInto != nil {
+                let imp = NSMenuItem(title: "Import CSV into this table…", action: #selector(handleImport(_:)), keyEquivalent: "")
+                imp.target = self
+                imp.representedObject = table
+                menu.addItem(imp)
+            }
+            return menu
+        }
+
+        @objc private func handleOpen(_ sender: NSMenuItem) {
+            guard let table = sender.representedObject as? TableNode else { return }
+            onOpenTable(table)
+        }
+
+        @objc private func handleCopy(_ sender: NSMenuItem) {
+            guard let table = sender.representedObject as? TableNode else { return }
+            onCopyTable?(table)
+        }
+
+        @objc private func handleExport(_ sender: NSMenuItem) {
+            guard let table = sender.representedObject as? TableNode else { return }
+            onExportTable?(table)
+        }
+
+        @objc private func handleImport(_ sender: NSMenuItem) {
+            guard let table = sender.representedObject as? TableNode else { return }
+            onImportInto?(table)
         }
 
         // MARK: NSOutlineViewDataSource
@@ -147,11 +213,18 @@ struct SidebarOutlineView: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(root: SidebarNode.build(from: snapshot), onOpenTable: onOpenTable)
+        Coordinator(
+            root: SidebarNode.build(from: snapshot),
+            onOpenTable: onOpenTable,
+            onCopyTable: onCopyTable,
+            onExportTable: onExportTable,
+            onImportInto: onImportInto
+        )
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let outline = NSOutlineView()
+        let outline = SidebarOutline()
+        outline.coordinatorRef = context.coordinator
         outline.headerView = nil
         outline.style = .sourceList
         outline.floatsGroupRows = false
@@ -252,5 +325,22 @@ private final class SidebarCellView: NSTableCellView {
             secondary.stringValue = ""
             secondary.isHidden = true
         }
+    }
+}
+
+/// NSOutlineView subclass that delegates right-click menu construction to
+/// the SidebarOutlineView coordinator so we can build per-row context
+/// menus (Open / Copy to… / Export… / Import CSV).
+final class SidebarOutline: NSOutlineView {
+    weak var coordinatorRef: SidebarOutlineView.Coordinator?
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: point)
+        guard row >= 0 else { return nil }
+        // Select the row that was right-clicked so the menu has visual
+        // anchor; this matches Finder behaviour.
+        selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        return coordinatorRef?.menu(forRow: row, in: self)
     }
 }

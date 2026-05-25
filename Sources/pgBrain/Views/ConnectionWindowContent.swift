@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ConnectionWindowContent: View {
     @Bindable var service: ConnectionService
+    @State private var copySource: TableNode?
 
     private var appearance: ConnectionAppearance {
         ConnectionAppearance(connection: service.connection)
@@ -23,6 +24,9 @@ struct ConnectionWindowContent: View {
             StatusFooter(service: service)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(item: $copySource) { source in
+            CrossDBCopyView(source: source, sourceService: service)
+        }
     }
 
     @ViewBuilder
@@ -56,9 +60,11 @@ struct ConnectionWindowContent: View {
             Divider().opacity(0.6)
             switch service.schemaState {
             case .loaded:
-                SidebarOutlineView(snapshot: service.schema) { table in
-                    service.workspace.openTable(table)
-                }
+                SidebarOutlineView(
+                    snapshot: service.schema,
+                    onOpenTable: { service.workspace.openTable($0) },
+                    onCopyTable: { copySource = $0 }
+                )
             case .loading, .idle:
                 VStack(spacing: Tokens.Spacing.sm) {
                     ProgressView().controlSize(.small)

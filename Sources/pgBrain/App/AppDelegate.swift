@@ -78,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let window = ConnectionWindowFactory.make(connection: connection) { [weak self] closed in
+        let result = ConnectionWindowFactory.make(connection: connection) { [weak self] closed in
             guard let self else { return }
             self.windowManager.unregister(window: closed)
             // If no connection windows remain, re-show the Welcome window
@@ -87,11 +87,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.showWelcome(focus: true)
             }
         }
-        windowManager.register(window: window, for: connection.id)
+        windowManager.register(window: result.window, service: result.service)
 
         NSApp.activate(ignoringOtherApps: true)
-        window.center()
-        window.makeKeyAndOrderFront(nil)
+        result.window.center()
+        result.window.makeKeyAndOrderFront(nil)
 
         // Optional: dismiss the welcome window once a connection is open.
         welcomeWindow?.orderOut(nil)

@@ -150,17 +150,31 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 - `pg_restore` action — the dump side covers backup-on-demand; restore wizard belongs in iter-11/Settings flow.
 - Server-side `COPY ... TO STDOUT` instead of `SELECT ... FROM` — would be faster for very wide tables but PostgresNIO's high-level API doesn't expose it. Add when we drop to the raw channel for the same reason as commandTag.
 
+### Iter 9 — Cross-DB / cross-schema copy (2026-05-25)
+**Goal**: pipe a table from one connection to another without staging it on disk and without holding everything in memory.
+
+- **`CrossDBCopy`** — Wraps source `SELECT … FROM` (streaming row sequence) → target `copyFrom` (PostgresNIO COPY TEXT writer). Bytes never touch disk; worst-case memory is one 64KB `ByteBuffer`. Source rows are projected via per-column `::text` so we don't need typed encoders on either end.
+- **Two-sided cancellation** — same sister-connection `pg_cancel_backend` handshake from iter-7, wired to the *source* connection (the side actually pulling rows). Cancelling the operation cleanly rolls back the target transaction via `ROLLBACK`.
+- **Transient target client** — when the target connection isn't currently open in another window, a fresh `PostgresClient` is brought up for the duration of the copy and torn down via `Task.detached { client.run() }` + `defer cancel`. When it *is* open (via `WindowManager.service(for:)`), we reuse the already-running pool so we don't double-connect.
+- **`WindowManager` upgrade** — now tracks `(connectionID, NSWindow, weak service)` so cross-DB copy (and any future "act on the other open connection" feature) can grab the live `PostgresClient` directly.
+- **Strategies** — `.append` and `.truncateAndInsert` ship; `.upsert` (INSERT ... ON CONFLICT) deferred until we have a column-mapping wizard that needs it.
+- **`CrossDBCopyView`** — SwiftUI sheet reached from the sidebar right-click context menu (`Copy table to…`). Lists every saved connection except the current one (with "· open" hint when a window already holds it). Default mapping is 1:1 source→target by name with per-column include toggles + free-text rename. Submits → opens an op in the popover, then dismisses on success.
+- **Sidebar context menu** — `SidebarOutline` is now an `NSOutlineView` subclass; the coordinator builds per-row menus with `Open in tab / Copy table to… / Export… / Import CSV…` and selects the right-clicked row first (Finder behaviour).
+
+**Verified**: `swift build` ✓.
+
+**Deferred**:
+- True bidirectional `COPY ... TO STDOUT BINARY → COPY ... FROM STDIN BINARY` pipe (same blocker as iter-8 — PostgresNIO's high-level API doesn't expose `COPY TO STDOUT` yet).
+- Upsert / `MERGE` strategy.
+- Auto-create target table when it doesn't exist (column mapping currently assumes the target already matches).
+
 ---
 
-## Next — Iter 9: Cross-DB / cross-schema copy
+## Next — Iter 10: State restoration
 
 ---
 
 ## Backlog (rough order)
-
-### Iter 9 — Cross-DB / cross-schema copy
-- "Copy table to…" action: pick target connection + schema, map columns, choose strategy (truncate-and-insert / upsert / append).
-- Bulk row streaming via `COPY` on both ends when possible.
 
 ### Iter 10 — State restoration
 - Persist open windows + tabs + scratchpad contents to `~/Library/Application Support/pgBrain/state.json`.
