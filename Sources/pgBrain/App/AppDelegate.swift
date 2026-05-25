@@ -19,7 +19,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar = MenuBarController(delegate: self)
         menuBar?.install()
 
-        showWelcome(focus: true)
+        let restored = AppSettings.shared.restoreLastSession
+            ? restoreSession()
+            : false
+        if !restored {
+            showWelcome(focus: true)
+        }
+    }
+
+    /// Reopen every connection window that was open at last save, restoring
+    /// frame, tabs, and scratchpad contents. Returns false (caller should
+    /// show Welcome) if no session was restorable.
+    @discardableResult
+    private func restoreSession() -> Bool {
+        guard let state = SessionStateStore.shared.load(), !state.windows.isEmpty else { return false }
+        var opened = 0
+        for snapshot in state.windows {
+            guard let conn = ConnectionStore.shared.connections.first(where: { $0.id == snapshot.connectionID }) else { continue }
+            openConnection(conn, restoring: snapshot)
+            opened += 1
+        }
+        return opened > 0
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -70,8 +90,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Connection windows
 
-    /// Open a window for `connection` (or focus the existing one).
-    func openConnection(_ connection: Connection) {
+    /// Open a window for `connection` (or focus the existing one). Pass
+    /// `restoring` to repopulate the window's frame + tab list + scratchpad
+    /// text from a `SessionState` snapshot.
+    func openConnection(_ connection: Connection, restoring snapshot: SessionState.Window? = nil) {
         if let existing = windowManager.window(for: connection.id) {
             NSApp.activate(ignoringOtherApps: true)
             existing.makeKeyAndOrderFront(nil)
@@ -81,19 +103,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let result = ConnectionWindowFactory.make(connection: connection) { [weak self] closed in
             guard let self else { return }
             self.windowManager.unregister(window: closed)
-            // If no connection windows remain, re-show the Welcome window
-            // (matches "no window opened → show welcome screen again").
+            SessionStateStore.shared.scheduleSnapshot()
             if self.windowManager.connectionWindows.isEmpty {
                 self.showWelcome(focus: true)
             }
         }
         windowManager.register(window: result.window, service: result.service)
 
-        NSApp.activate(ignoringOtherApps: true)
-        result.window.center()
-        result.window.makeKeyAndOrderFront(nil)
+        if let snapshot {
+            result.window.setFrame(snapshot.frame.ns, display: true)
+            // Defer tab restoration until the schema loads so tables can be
+            // resolved to live TableNode instances.
+            restoreTabs(into: result.service, from: snapshot)
+        } else {
+            result.window.center()
+        }
 
-        // Optional: dismiss the welcome window once a connection is open.
+        NSApp.activate(ignoringOtherApps: true)
+        result.window.makeKeyAndOrderFront(nil)
+        SessionStateStore.shared.scheduleSnapshot()
+
         welcomeWindow?.orderOut(nil)
+    }
+
+    /// Wait for the connection's schema to load, then replay each persisted
+    /// tab against the live schema. Tables that no longer exist are dropped.
+    private func restoreTabs(into service: ConnectionService, from snapshot: SessionState.Window) {
+        Task { @MainActor in
+            // Spin until the schema is loaded or errored; bail on error.
+            while case .loading = service.schemaState {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            if case .loaded = service.schemaState {
+                let workspace = service.workspace
+                for (idx, persisted) in snapshot.tabs.enumerated() {
+                    switch persisted.kind {
+                    case .table:
+                        guard let schema = persisted.tableSchema, let name = persisted.tableName,
+                              let live = service.schema.schemas.first(where: { $0.name == schema })?
+                                .tables.first(where: { $0.name == name })
+                        else { continue }
+                        workspace.openTable(live)
+                    case .scratchpad:
+                        let pad = workspace.openScratchpad()
+                        if let title = persisted.scratchpadTitle { pad.title = title }
+                        if let text = persisted.scratchpadText { pad.text = text }
+                    }
+                    if snapshot.selectedTabIndex == idx, let last = workspace.tabs.last {
+                        workspace.selectedID = last.id
+                    }
+                }
+                SessionStateStore.shared.scheduleSnapshot()
+            }
+        }
     }
 }

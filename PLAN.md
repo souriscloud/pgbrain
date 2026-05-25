@@ -168,18 +168,30 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 - Upsert / `MERGE` strategy.
 - Auto-create target table when it doesn't exist (column mapping currently assumes the target already matches).
 
+### Iter 10 — State restoration (2026-05-25)
+**Goal**: quit pgBrain, relaunch, find every window and tab where you left it — including unsaved SQL in scratchpads.
+
+- **`SessionState`** — Codable model: per-window `connectionID`, `CodableRect` frame, `[Tab]` (kind / `(schema, name)` for tables / `title + text` for scratchpads), `selectedTabIndex`. Versioned (v1) for future migrations.
+- **`SessionStateStore`** — singleton with `load()` (best-effort decode) and `scheduleSnapshot(delay:)` (debounced 0.5s write on a serial utility-QoS queue so a flurry of mutations writes once). Captures from `AppDelegate.windowManager.entries`.
+- **`AppSettings`** — `@Observable` shim around `UserDefaults` with first-launch defaults. `restoreLastSession` is the iter-10 trigger; the rest (binary overrides, default row limit, verbose logging, editor font, Sparkle channel) are stubs that iter-11 Settings will bind to.
+- **Launch flow** — `AppDelegate.applicationDidFinishLaunching` checks `restoreLastSession`, walks each saved window, looks up the connection from `ConnectionStore`, and re-opens it via the existing `openConnection(_:restoring:)` overload. Welcome is suppressed if any window was restored.
+- **Tab replay** — `restoreTabs` waits for `service.schemaState` to become `.loaded`, then resolves persisted `(schema, name)` against the live schema (silently drops tables that no longer exist), replays scratchpads with their `text` intact, and re-selects the right tab.
+- **Persist on change** — `WorkspaceState.openTable/openScratchpad/closeTab/move` and the window-close handler all call `scheduleSnapshot()`. Scratchpad text edits aren't captured per-keystroke (deferred to iter-11); the on-close snapshot still catches them on a clean quit.
+
+**Verified**: `swift build` ✓.
+
+**Deferred**:
+- Per-keystroke scratchpad text persistence — current snapshot covers clean quits; iter-11 Settings can expose an "autosave every N seconds" toggle.
+- Restoring per-window grid scroll positions or selection ranges — needs additional state piped from `RowsLoader` / `EditBuffer`.
+- Restoring open scratchpad result blocks — they're transient by design; the SQL is what matters and that already round-trips.
+
 ---
 
-## Next — Iter 10: State restoration
+## Next — Iter 11: Settings window
 
 ---
 
 ## Backlog (rough order)
-
-### Iter 10 — State restoration
-- Persist open windows + tabs + scratchpad contents to `~/Library/Application Support/pgBrain/state.json`.
-- Setting: "Restore last session on launch" (default on).
-- Sensitive bits (selected text, recent results) only restored if window had an open session.
 
 ### Iter 11 — Settings window
 - Sections: General (restore on launch, theme), Connections (default SSL mode, pg_dump path), Editor (font, theme, tab size), Updates (Sparkle channel).

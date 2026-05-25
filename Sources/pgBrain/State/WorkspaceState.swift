@@ -53,6 +53,7 @@ final class WorkspaceState {
         let tab = Tab(kind: .table(table), title: table.qualifiedName)
         tabs.append(tab)
         selectedID = tab.id
+        SessionStateStore.shared.scheduleSnapshot()
     }
 
     /// Always opens a fresh scratchpad — unlike table tabs we don't dedupe,
@@ -64,6 +65,7 @@ final class WorkspaceState {
         let tab = Tab(kind: .scratchpad(pad), title: pad.title)
         tabs.append(tab)
         selectedID = tab.id
+        SessionStateStore.shared.scheduleSnapshot()
         return pad
     }
 
@@ -74,6 +76,7 @@ final class WorkspaceState {
             selectedID = tabs.indices.contains(idx) ? tabs[idx].id
                 : (tabs.last?.id)
         }
+        SessionStateStore.shared.scheduleSnapshot()
     }
 
     /// Move the tab identified by `id` to sit immediately before the tab
@@ -86,5 +89,6 @@ final class WorkspaceState {
         let tab = tabs.remove(at: from)
         let insertAt = from < to ? to - 1 : to
         tabs.insert(tab, at: insertAt)
+        SessionStateStore.shared.scheduleSnapshot()
     }
 }

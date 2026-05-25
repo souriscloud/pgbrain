@@ -19,4 +19,13 @@ enum AppSupport {
     static var stateFile: URL {
         directory.appendingPathComponent("state.json")
     }
+
+    /// Alias used by `SessionStateStore` — matches the naming convention of
+    /// `connectionsFile`/`stateFile` and lets `SessionStateStore.init` use a
+    /// stable name even if we later add `*.URL` variants.
+    static var stateFileURL: URL { stateFile }
+
+    static func ensureDirectoryExists() throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
 }
