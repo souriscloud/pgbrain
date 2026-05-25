@@ -330,6 +330,21 @@ private struct ResultBlockView: View {
             outcomeSummary
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if case .success(let result) = block.outcome, !result.page.columns.isEmpty {
+                Menu {
+                    ForEach(Exporter.Format.allCases) { fmt in
+                        Button(fmt.uiLabel) { savePage(result.page, as: fmt) }
+                    }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.caption2)
+                        .frame(width: 18, height: 18)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Export result…")
+            }
             Button {
                 block.isCollapsed.toggle()
             } label: {
@@ -347,6 +362,27 @@ private struct ResultBlockView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
+    }
+
+    private func savePage(_ page: RowsFetcher.Page, as format: Exporter.Format) {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "result.\(format.fileExtension)"
+        panel.allowedContentTypes = []
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                _ = try Exporter.exportPage(page, format: format, destination: url)
+            } catch {
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "Export failed"
+                    alert.informativeText = error.localizedDescription
+                    alert.alertStyle = .warning
+                    alert.runModal()
+                }
+            }
+        }
     }
 
     @ViewBuilder

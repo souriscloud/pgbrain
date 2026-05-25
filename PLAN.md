@@ -131,18 +131,32 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 - Per-statement cancellation inside the schema fetch fan-out — single batch op for now since the user rarely wants to cancel "loading schema".
 - Persisting the operations log across relaunches — popover only shows the current session.
 
+### Iter 8 — Streaming export / import + pg_dump (2026-05-25)
+**Goal**: get data out of and into a table fast and at any scale, without loading the whole thing into memory.
+
+- **`Exporter`** — streams full tables via `SELECT col::text … FROM …` (no LIMIT) → buffered 64KB writes → file. Three formats: `.csv` (RFC 4180), `.json` (streaming array with type-aware values), `.sql` (one `INSERT` per row). Cancellable via `OperationsCenter` + sister-connection `pg_cancel_backend`. `exportPage` for already-materialised scratchpad results.
+- **`Importer`** — CSV reader streams the input file (no whole-file load); transcodes each row to Postgres COPY TEXT format and pushes through PostgresNIO's `copyFrom`. RFC 4180 parsing (quotes, `""` escape, embedded newlines), header-driven column mapping (or positional fallback), `emptyAsNull` toggle. Whole import runs inside a single transaction with `SET LOCAL search_path` for schema-qualified targets, rolls back on cancel/error.
+- **`PgDumpCLI`** — `pg_dump` wrapper. Auto-discovers binaries from Postgres.app, Homebrew (Apple Silicon + Intel), EnterpriseDB installer, `/usr/bin`, with a `pgbrain.binaryOverride.<name>` UserDefaults override hook for iter-11 Settings. Subprocess receives `PGPASSWORD` via env (never on the command line). Supports `.plain` / `.custom` / `.directory` / `.tar` output formats.
+- **UI hooks**:
+  - Table tab header: `Menu` with "Export full table (streaming)" (CSV/JSON/SQL) → `NSSavePanel`, "Export visible page" for the loaded 1000 rows, "Import CSV into this table…" → `NSOpenPanel`. Reloads after import.
+  - Scratchpad result block: per-format Export menu in the block header (in-memory `exportPage`).
+  - Sidebar header: `ellipsis.circle` menu with pg_dump format options + reload schema.
+- Every long-running export/import shows up in the iter-7 operations popover with a working Cancel button.
+
+**Verified**: `swift build` ✓. Streaming row iteration confirmed via `PostgresRowSequence`; `copyFrom` confirmed in PostgresNIO 1.21.
+
+**Deferred**:
+- Column-mapping wizard UI (manual reorder, type coercion override, on-conflict strategy) — iter-8 ships header-driven mapping; the wizard lands when the first user needs to reshape CSV to fit.
+- `pg_restore` action — the dump side covers backup-on-demand; restore wizard belongs in iter-11/Settings flow.
+- Server-side `COPY ... TO STDOUT` instead of `SELECT ... FROM` — would be faster for very wide tables but PostgresNIO's high-level API doesn't expose it. Add when we drop to the raw channel for the same reason as commandTag.
+
 ---
 
-## Next — Iter 8: Streaming export / import
+## Next — Iter 9: Cross-DB / cross-schema copy
 
 ---
 
 ## Backlog (rough order)
-
-### Iter 8 — Import / Export
-- CSV / JSON / SQL export from any result set or table.
-- Import wizard with column mapping UI (target columns, type coercion, on-conflict strategy).
-- pg_dump / pg_restore wrapper (find binaries via Postgres.app path heuristic + override in Settings).
 
 ### Iter 9 — Cross-DB / cross-schema copy
 - "Copy table to…" action: pick target connection + schema, map columns, choose strategy (truncate-and-insert / upsert / append).

@@ -74,10 +74,105 @@ struct TableTabView: View {
             }
             .buttonStyle(.borderless)
             .help("Reload")
+            Menu {
+                Section("Export full table (streaming)") {
+                    ForEach(Exporter.Format.allCases) { fmt in
+                        Button(fmt.uiLabel) { exportFullTable(as: fmt) }
+                    }
+                }
+                if case .loaded(let page) = loader.state, !page.rows.isEmpty {
+                    Divider()
+                    Section("Export visible page") {
+                        ForEach(Exporter.Format.allCases) { fmt in
+                            Button(fmt.uiLabel) { exportPage(page, as: fmt) }
+                        }
+                    }
+                }
+                Divider()
+                Button("Import CSV into this table…", action: importCSV)
+            } label: {
+                Image(systemName: "tray.and.arrow.up")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Import / Export")
         }
         .padding(.horizontal, Tokens.Spacing.md)
         .padding(.vertical, 6)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func exportFullTable(as format: Exporter.Format) {
+        guard let client = service.client else { return }
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "\(table.schema).\(table.name).\(format.fileExtension)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let op = service.operations.begin(
+            kind: .export,
+            summary: "Export \(table.qualifiedName) → \(url.lastPathComponent)"
+        )
+        let tracker = service.operations
+        let opID = op.id
+        Task {
+            do {
+                _ = try await Exporter.exportTable(
+                    table,
+                    format: format,
+                    destination: url,
+                    client: client,
+                    tracker: tracker,
+                    operationID: opID
+                )
+                tracker.finish(op, status: .succeeded)
+            } catch is CancellationError {
+                tracker.finish(op, status: .cancelled)
+            } catch {
+                tracker.finish(op, status: .failed(error.localizedDescription))
+            }
+        }
+    }
+
+    private func exportPage(_ page: RowsFetcher.Page, as format: Exporter.Format) {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "\(table.schema).\(table.name)_page.\(format.fileExtension)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = try? Exporter.exportPage(page, format: format, destination: url, tableNameHint: table.name)
+        }
+    }
+
+    private func importCSV() {
+        guard let client = service.client else { return }
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let op = service.operations.begin(
+            kind: .importJob,
+            summary: "Import \(url.lastPathComponent) → \(table.qualifiedName)"
+        )
+        let tracker = service.operations
+        let opID = op.id
+        Task {
+            do {
+                _ = try await Importer.importCSV(
+                    into: table,
+                    from: url,
+                    client: client,
+                    tracker: tracker,
+                    operationID: opID
+                )
+                tracker.finish(op, status: .succeeded)
+                await loader.load()
+            } catch is CancellationError {
+                tracker.finish(op, status: .cancelled)
+            } catch {
+                tracker.finish(op, status: .failed(error.localizedDescription))
+            }
+        }
     }
 
     @ViewBuilder

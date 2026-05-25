@@ -111,10 +111,63 @@ struct ConnectionWindowContent: View {
                     .foregroundStyle(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 3))
             }
+            Menu {
+                Section("pg_dump") {
+                    ForEach(PgDumpCLI.Format.allCases) { fmt in
+                        Button("Dump as \(fmt.rawValue)") { runPgDump(format: fmt) }
+                    }
+                }
+                Divider()
+                Button("Reload schema") { Task { await service.loadSchema() } }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Connection actions")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(appearance.emphasized.opacity(0.08))
+    }
+
+    private func runPgDump(format: PgDumpCLI.Format) {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        let ext = format.fileExtension
+        let stem = service.connection.database.isEmpty ? service.connection.name : service.connection.database
+        panel.nameFieldStringValue = ext.isEmpty ? stem : "\(stem).\(ext)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let conn = service.connection
+        let password = Keychain.password(for: conn.id) ?? ""
+        let op = service.operations.begin(
+            kind: .export,
+            summary: "pg_dump → \(url.lastPathComponent)"
+        )
+        let tracker = service.operations
+        Task {
+            do {
+                _ = try await PgDumpCLI.dump(
+                    connection: conn,
+                    password: password,
+                    format: format,
+                    destination: url
+                )
+                tracker.finish(op, status: .succeeded)
+            } catch {
+                tracker.finish(op, status: .failed(error.localizedDescription))
+                await MainActor.run {
+                    let alert = NSAlert()
+                    alert.messageText = "pg_dump failed"
+                    alert.informativeText = error.localizedDescription
+                    alert.alertStyle = .warning
+                    alert.runModal()
+                }
+            }
+        }
     }
 
     @ViewBuilder
