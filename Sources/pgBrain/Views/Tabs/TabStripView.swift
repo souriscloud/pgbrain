@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 /// user drags, matching the JetBrains feel.
 struct TabStripView: View {
     @Bindable var workspace: WorkspaceState
+    var appearance: ConnectionAppearance
     @State private var draggingID: UUID?
 
     var body: some View {
@@ -18,6 +19,8 @@ struct TabStripView: View {
                             tab: tab,
                             isSelected: workspace.selectedID == tab.id,
                             isDragging: draggingID == tab.id,
+                            accent: appearance.emphasized,
+                            isProduction: appearance.connection.isProduction,
                             onSelect: { workspace.selectedID = tab.id },
                             onClose: { workspace.closeTab(id: tab.id) }
                         )
@@ -62,6 +65,8 @@ private struct TabChip: View {
     let tab: WorkspaceState.Tab
     let isSelected: Bool
     let isDragging: Bool
+    let accent: Color
+    let isProduction: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
 
@@ -71,11 +76,17 @@ private struct TabChip: View {
         HStack(spacing: 6) {
             Image(systemName: icon)
                 .font(.system(size: 11))
-                .foregroundStyle(isSelected ? Tokens.Brand.primary : .secondary)
+                .foregroundStyle(isSelected ? accent : .secondary)
             Text(tab.title)
                 .font(.system(size: 12, weight: isSelected ? .medium : .regular))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
+            if isProduction {
+                Circle()
+                    .fill(Tokens.Brand.danger)
+                    .frame(width: 6, height: 6)
+                    .help("Production connection — destructive queries will prompt for confirmation.")
+            }
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
@@ -92,7 +103,7 @@ private struct TabChip: View {
                 Color.clear
                 if isSelected {
                     Rectangle()
-                        .fill(Tokens.Brand.primary)
+                        .fill(accent)
                         .frame(height: 2)
                 }
             }

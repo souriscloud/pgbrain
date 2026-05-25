@@ -94,19 +94,32 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 - Type-specific editors (date pickers, bool toggles, JSON editor). iter-5 ships text-edit-for-everything per plan.
 - `INSERT` and `DELETE` from the grid — separate iter.
 
+### Iter 6 — Production + color UX everywhere (2026-05-25)
+**Goal**: connection identity (colour tag + PROD flag) reads at a glance from every surface, and destructive SQL on a PROD connection has to be confirmed.
+
+- **`ConnectionAppearance`** — single value type wrapping a `Connection`; exposes `accent` (brand violet → connection colour), `emphasized` (production red wins), `windowTintNS`, and a `" · PROD"` suffix string. Used by every painted surface so colour rules live in one file.
+- **Sidebar header** (`ConnectionWindowContent.sidebarHeader`) — name + db, colour dot, PROD pill, tinted background. Sits above the schema outline.
+- **Top stripe** — 3pt coloured bar above the workspace; red on production, connection colour otherwise, hidden for plain connections.
+- **Tab strip** (`TabStripView`) — active-tab underline + icon use `appearance.emphasized`; production connections show a small red dot per tab as a passive warning.
+- **Status footer** — adds the colour dot beside the existing PROD pill; the dot is hidden for uncoloured connections.
+- **Menu bar window list** — entries pick up a coloured `circle.fill` palette symbol image and a `" · PROD"` suffix so prod windows are obvious in the dropdown.
+- **`SQLSafety`** — quote/comment/dollar-quote-aware token sniffer that classifies a statement as `readOnly | write | destructiveUnscoped | ddl`. `ScratchpadView.runAtCaret()` consults it and, on production connections, shows a critical NSAlert with the SQL preview before firing the actual query.
+
+**Verified**: `swift build` ✓. Existing PROD-tinted window background from iter-2 stays; the new chrome layers on top.
+
+**Deferred**:
+- Per-cell red border on the editable grid for PROD connections — added passive dot on the tab badge instead; cell-level treatment can wait until we have a clearer signal it's noisy enough to need it.
+- Confirm dialog on Apply-against-PROD in the data grid — UpdateApplier is intrinsically scoped to a single PK so it's strictly safer than scratchpad SQL; revisit if real usage proves otherwise.
+
 ---
 
-## Next — Iter 6: Production + color UX everywhere
-- Production flag drives: red title bar accent, red badge on tab, red border in cells (warn on edit), confirm dialog before DELETE/UPDATE without WHERE.
-- Color tag visible in: Welcome list, connection window sidebar header, menu bar window list, status footer.
+## Next — Iter 7: Status footer + active operations popover
+- Bottom-of-window footer: connection state, current schema, active query indicator, row count, last error.
+- Popover with cancellable list of running queries / imports / exports.
 
 ---
 
 ## Backlog (rough order)
-
-### Iter 7 — Status footer + active operations popover
-- Bottom-of-window footer: connection state, current schema, active query indicator, row count, last error.
-- Popover with cancellable list of running queries / imports / exports.
 
 ### Iter 8 — Import / Export
 - CSV / JSON / SQL export from any result set or table.

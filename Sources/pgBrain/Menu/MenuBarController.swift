@@ -106,11 +106,19 @@ final class MenuBarController: NSObject {
         }
 
         for entry in entries {
-            let title = "  " + entry.window.title
+            let connection = ConnectionStore.shared.connections.first(where: { $0.id == entry.connectionID })
+            let appearance = connection.map(ConnectionAppearance.init)
+            let title = "  " + entry.window.title + (appearance?.suffix ?? "")
             let item = NSMenuItem(title: title, action: #selector(onWindowEntry(_:)), keyEquivalent: "")
             item.target = self
             item.tag = MenuTag.windowEntry.rawValue
             item.representedObject = entry.window
+            // SF Symbol coloured dot lines up the colour tag with the row.
+            if let appearance, appearance.connection.colorTag != .none {
+                let dot = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)
+                let config = NSImage.SymbolConfiguration(paletteColors: [NSColor(appearance.accent)])
+                item.image = dot?.withSymbolConfiguration(config)
+            }
             menu.insertItem(item, at: insertAt)
             insertAt += 1
         }

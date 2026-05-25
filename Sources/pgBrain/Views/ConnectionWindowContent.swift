@@ -3,8 +3,20 @@ import SwiftUI
 struct ConnectionWindowContent: View {
     @Bindable var service: ConnectionService
 
+    private var appearance: ConnectionAppearance {
+        ConnectionAppearance(connection: service.connection)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            // Thin coloured stripe at the very top — connection colour, or
+            // red on production. Disappears entirely for an uncoloured,
+            // non-prod connection.
+            if appearance.connection.colorTag != .none || appearance.connection.isProduction {
+                Rectangle()
+                    .fill(appearance.emphasized)
+                    .frame(height: 3)
+            }
             mainArea
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
@@ -40,6 +52,8 @@ struct ConnectionWindowContent: View {
     @ViewBuilder
     private var sidebarPane: some View {
         VStack(spacing: 0) {
+            sidebarHeader
+            Divider().opacity(0.6)
             switch service.schemaState {
             case .loaded:
                 SidebarOutlineView(snapshot: service.schema) { table in
@@ -72,10 +86,41 @@ struct ConnectionWindowContent: View {
         .background(Color(nsColor: .underPageBackgroundColor))
     }
 
+    private var sidebarHeader: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(appearance.connection.colorTag == .none
+                      ? Color.secondary.opacity(0.25)
+                      : appearance.connection.colorTag.swiftUIColor)
+                .frame(width: 10, height: 10)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(appearance.connection.name)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Text(appearance.connection.database.isEmpty ? appearance.connection.host : appearance.connection.database)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if appearance.connection.isProduction {
+                Text("PROD")
+                    .font(.system(size: 9, weight: .bold))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Tokens.Brand.danger)
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(appearance.emphasized.opacity(0.08))
+    }
+
     @ViewBuilder
     private var workspacePane: some View {
         VStack(spacing: 0) {
-            TabStripView(workspace: service.workspace)
+            TabStripView(workspace: service.workspace, appearance: appearance)
             Divider()
             if let selected = service.workspace.selectedTab {
                 switch selected.kind {
@@ -167,6 +212,12 @@ struct StatusFooter: View {
                 .font(.caption.weight(.medium))
             Text("·")
                 .foregroundStyle(.tertiary)
+            if service.connection.colorTag != .none {
+                Circle()
+                    .fill(service.connection.colorTag.swiftUIColor)
+                    .frame(width: 8, height: 8)
+                    .help("Connection color tag")
+            }
             if service.connection.isProduction {
                 Text("PRODUCTION")
                     .font(.caption2.weight(.bold))

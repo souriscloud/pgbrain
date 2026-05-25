@@ -132,6 +132,30 @@ struct ScratchpadView: View {
         }
         guard let statement = sql, !statement.isEmpty else { return }
 
+        // Destructive guardrail — production connections prompt before
+        // unscoped UPDATE/DELETE/TRUNCATE/DROP/ALTER.
+        if service.connection.isProduction {
+            let verdict = SQLSafety.classify(statement)
+            if verdict == .destructiveUnscoped || verdict == .ddl {
+                let preview = statement.count > 240
+                    ? String(statement.prefix(240)) + "…"
+                    : statement
+                let alert = NSAlert()
+                alert.messageText = "Run on production?"
+                alert.informativeText = """
+                    The connection "\(service.connection.name)" is marked \
+                    PRODUCTION and this statement is \
+                    \(verdict == .ddl ? "DDL" : "an unscoped mutation").
+
+                    \(preview)
+                    """
+                alert.alertStyle = .critical
+                alert.addButton(withTitle: "Run on PROD")
+                alert.addButton(withTitle: "Cancel")
+                if alert.runModal() != .alertFirstButtonReturn { return }
+            }
+        }
+
         let block = ResultBlock(statement: statement)
         scratchpad.addBlock(block)
         Task { @MainActor in
