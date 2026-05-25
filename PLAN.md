@@ -227,17 +227,27 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 - Sparkle's XPC bundling for a sandboxed build (we're hardened-runtime-only for now).
 - Channel-aware version pinning (e.g. force a downgrade between channels) — not needed until beta exists.
 
+### Iter 13 — Custom DMG background (2026-05-25)
+**Goal**: ship the .dmg with branded chrome — gradient background, drag-to-Applications arrow, sized window.
+
+- **`scripts/gen-dmg-background.swift`** — CoreGraphics-rendered PNG matching the Welcome/AppIcon brand gradient. Adds a "Drag pgBrain to Applications" headline + a centred drag-arrow between the two icon slots. 660×400 to line up with `create-dmg`'s window size.
+- **`scripts/build-dmg.sh`** — wraps `create-dmg` when installed (`brew install create-dmg`) for the full branded layout (background, icon at 180,200, Applications drop-link at 480,200, 96pt icons). Falls back to `hdiutil` if not present so the build never fails for lack of a Homebrew formula.
+- **Idempotent regeneration** — `build-dmg.sh` re-runs `gen-dmg-background.swift` whenever the generator is newer than the PNG, matching the AppIcon flow.
+- **Release pipeline** — `release.sh` already calls `scripts/build-dmg.sh` when present; iter-13 fulfils that contract.
+
+**Verified**: `swift scripts/gen-dmg-background.swift Resources/dmg-background.png` ✓ (266KB PNG written).
+
+**Deferred**:
+- `.DS_Store` icon arrangement baked-in via `create-dmg`'s defaults — fine for now; revisit if QA wants pixel-perfect placement.
+- Light/dark adaptive background — `.dmg` window doesn't honor system appearance, so one fixed image is the right answer.
+
 ---
 
-## Next — Iter 13: Custom DMG background
+## Next — Iter 14+: Polish (i18n scaffold, schema diff, saved queries, query vars)
 
 ---
 
 ## Backlog (rough order)
-
-### Iter 13 — DMG with custom background
-- Database-themed background image (placeholder generation script).
-- `create-dmg` invocation in `release.sh`.
 
 ### Iter 14+ — Polish & extras
 - Localization scaffolding (English first, Czech second).
