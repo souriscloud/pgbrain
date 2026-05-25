@@ -241,22 +241,33 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 - `.DS_Store` icon arrangement baked-in via `create-dmg`'s defaults — fine for now; revisit if QA wants pixel-perfect placement.
 - Light/dark adaptive background — `.dmg` window doesn't honor system appearance, so one fixed image is the right answer.
 
+### Iter 14 — Polish: saved queries + schema diff + i18n scaffold (2026-05-25)
+**Goal**: three high-leverage polish features without touching the scratchpad (gated on its imminent redo).
+
+- **Saved query library**:
+  - `SavedQuery` value type (`id`, `name`, `notes`, `sql`, timestamps) + `SavedQueryStore` `@Observable` singleton persisting to `~/Library/Application Support/pgBrain/saved-queries.json`.
+  - `SavedQueriesView` sheet: search-as-you-type, per-row Insert/Edit/Delete, "Save current scratchpad" captures the editor body into a new entry. Reached from a new books icon in the scratchpad header.
+- **Schema diff**:
+  - `SchemaDiff.diff(left:right:)` — pure value-type computation over `SchemaSnapshot`s. Returns added/removed/changed tables; per-changed-table reports added/removed/type-changed columns.
+  - `SchemaDiffView` sheet: pick another *currently-open* connection (`WindowManager.service(for:)` is the discovery surface), compare on demand, scrolling diff with green/red/orange categorisation. Reached from the sidebar header's "ellipsis.circle" menu.
+- **i18n scaffold**:
+  - `Localizable.xcstrings` with English + Czech for menu, welcome, and common-button strings; resource pipeline wired into `Package.swift` (`resources: [.process("Resources")]`).
+  - `L10n` enum centralises lookups (`L10n.Menu.about`, `L10n.Welcome.title`, …) so adding a key is one accessor + one `.xcstrings` entry. New strings should reach for `L10n.*` from now on.
+
+**Verified**: `swift build` ✓.
+
+**Deferred** (intentional):
+- Quick-look-style hover preview of a wide/json/text cell — needs an `NSPopover` on hover delay; revisit after the grid sees real use.
+- Per-connection `:var` substitution in scratchpads — gated on the upcoming scratchpad redo so we don't double-build it.
+- Czech translations for the *other* ~200 strings still in source — iter-14 ships the *pattern*; bulk migration happens once we know which strings are stable.
+
 ---
 
-## Next — Iter 14+: Polish (i18n scaffold, schema diff, saved queries, query vars)
+## Open Q — Sidebar perf & commandTag (next)
 
 ---
 
-## Backlog (rough order)
-
-### Iter 14+ — Polish & extras
-- Localization scaffolding (English first, Czech second).
-- Quick-look-style row preview on hover.
-- Schema diff tool.
-- Saved query library.
-- Per-connection custom variables (e.g. `:env_id` substitution before execution).
-
----
+## Backlog
 
 ## Open questions for later
 - **SQL syntax highlighting**: shipped iter-4 with a plain `NSTextView` (no highlighting). Pick a direction once we've felt the absence — TextKit-2 + hand-rolled Postgres lexer vs. CodeMirror-in-WKWebView. Native is more work but lower input latency and matches the rest of the chrome.

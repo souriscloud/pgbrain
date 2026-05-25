@@ -3,6 +3,7 @@ import SwiftUI
 struct ConnectionWindowContent: View {
     @Bindable var service: ConnectionService
     @State private var copySource: TableNode?
+    @State private var showSchemaDiff = false
 
     private var appearance: ConnectionAppearance {
         ConnectionAppearance(connection: service.connection)
@@ -26,6 +27,9 @@ struct ConnectionWindowContent: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(item: $copySource) { source in
             CrossDBCopyView(source: source, sourceService: service)
+        }
+        .sheet(isPresented: $showSchemaDiff) {
+            SchemaDiffView(source: service) { showSchemaDiff = false }
         }
     }
 
@@ -125,6 +129,7 @@ struct ConnectionWindowContent: View {
                 }
                 Divider()
                 Button("Reload schema") { Task { await service.loadSchema() } }
+                Button("Diff schemas…") { showSchemaDiff = true }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.caption)

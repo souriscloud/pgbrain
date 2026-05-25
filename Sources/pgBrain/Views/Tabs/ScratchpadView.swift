@@ -11,6 +11,7 @@ struct ScratchpadView: View {
     @State private var selection = NSRange(location: 0, length: 0)
     @State private var showHistory = false
     @State private var pendingScrollTarget: UUID?
+    @State private var showLibrary = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -76,6 +77,19 @@ struct ScratchpadView: View {
             }
             .buttonStyle(.borderless)
             .help(showHistory ? "Hide history panel" : "Show history panel")
+
+            Button {
+                showLibrary = true
+            } label: {
+                Image(systemName: "books.vertical")
+            }
+            .buttonStyle(.borderless)
+            .help("Saved query library")
+        }
+        .sheet(isPresented: $showLibrary) {
+            SavedQueriesView(scratchpad: scratchpad) {
+                showLibrary = false
+            }
         }
         .padding(.horizontal, Tokens.Spacing.md)
         .padding(.vertical, 6)

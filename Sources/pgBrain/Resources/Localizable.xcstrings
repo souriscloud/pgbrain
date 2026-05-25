@@ -1,0 +1,62 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "menu.about" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "About pgBrain" } },
+        "cs" : { "stringUnit" : { "state" : "translated", "value" : "O aplikaci pgBrain" } }
+      }
+    },
+    "menu.checkUpdates" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Check for Updates…" } },
+        "cs" : { "stringUnit" : { "state" : "translated", "value" : "Zkontrolovat aktualizace…" } }
+      }
+    },
+    "menu.quit" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Quit pgBrain" } },
+        "cs" : { "stringUnit" : { "state" : "translated", "value" : "Ukončit pgBrain" } }
+      }
+    },
+    "welcome.title" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pro PostgreSQL for macOS" } },
+        "cs" : { "stringUnit" : { "state" : "translated", "value" : "Profesionální PostgreSQL pro macOS" } }
+      }
+    },
+    "welcome.connections" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connections" } },
+        "cs" : { "stringUnit" : { "state" : "translated", "value" : "Připojení" } }
+      }
+    },
+    "common.cancel" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel" } },
+        "cs" : { "stringUnit" : { "state" : "translated", "value" : "Zrušit" } }
+      }
+    },
+    "common.save" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Save" } },
+        "cs" : { "stringUnit" : { "state" : "translated", "value" : "Uložit" } }
+      }
+    },
+    "common.close" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Close" } },
+        "cs" : { "stringUnit" : { "state" : "translated", "value" : "Zavřít" } }
+      }
+    }
+  },
+  "version" : "1.0"
+}
