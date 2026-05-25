@@ -59,14 +59,38 @@ enum QueryRunner {
 
     /// Inner runner without operation tracking — also used by the cross-DB
     /// copy path in iter-9 where the connection is checked out elsewhere.
+    ///
+    /// For statements classified as non-read-only by `SQLSafety` we use the
+    /// materialised `EventLoopFuture`-based `query` API, which surfaces the
+    /// libpq command tag ("UPDATE 12", "INSERT 0 5"). Non-SELECT statements
+    /// rarely return rows so the materialisation cost is trivial.
+    /// SELECTs stay on the streaming path so result sets bigger than `limit`
+    /// don't get buffered.
     static func runOnConnection(
         _ sql: String,
         on connection: PostgresConnection,
         limit: Int = defaultRowLimit
     ) async throws -> QueryResult {
         let started = Date()
-        let stream = try await connection.query(PostgresQuery(unsafeSQL: sql), logger: pgbrainQuietLogger)
+        let verdict = SQLSafety.classify(sql)
+        if verdict != .readOnly {
+            // Materialised path: gets command tag back via PostgresQueryResult.
+            let result = try await connection
+                .query(PostgresQuery(unsafeSQL: sql), logger: pgbrainQuietLogger)
+                .get()
+            let (columns, rows, truncated) = materialise(result.rows, limit: limit)
+            let page = RowsFetcher.Page(
+                columns: columns,
+                rows: rows,
+                truncated: truncated,
+                limit: limit,
+                elapsed: Date().timeIntervalSince(started)
+            )
+            let tag = formatCommandTag(result.metadata)
+            return QueryResult(page: page, commandTag: tag)
+        }
 
+        let stream = try await connection.query(PostgresQuery(unsafeSQL: sql), logger: pgbrainQuietLogger)
         var columns: [ColumnNode] = []
         var rows: [[String?]] = []
         var truncated = false
@@ -110,7 +134,49 @@ enum QueryRunner {
             limit: limit,
             elapsed: elapsed
         )
-        return QueryResult(page: page, commandTag: nil)
+        return QueryResult(page: page, commandTag: "SELECT \(rows.count)")
+    }
+
+    /// Walk an already-materialised `[PostgresRow]`, decoding each cell to
+    /// `String?` and rebuilding the column metadata from the first row.
+    private static func materialise(_ rows: [PostgresRow], limit: Int) -> (columns: [ColumnNode], rows: [[String?]], truncated: Bool) {
+        guard !rows.isEmpty else { return ([], [], false) }
+        let first = rows[0]
+        var columns: [ColumnNode] = []
+        for cell in first {
+            columns.append(ColumnNode(
+                name: cell.columnName,
+                typeName: pgTypeName(cell.dataType),
+                nullable: true,
+                ordinal: cell.columnIndex
+            ))
+        }
+        var values: [[String?]] = []
+        var truncated = false
+        for (i, row) in rows.enumerated() {
+            if i >= limit { truncated = true; break }
+            let random = PostgresRandomAccessRow(row)
+            var line: [String?] = []
+            line.reserveCapacity(columns.count)
+            for c in 0..<columns.count {
+                let cell = random[c]
+                line.append(cell.bytes == nil ? nil : try? cell.decode(String.self, context: .default))
+            }
+            values.append(line)
+        }
+        return (columns, values, truncated)
+    }
+
+    /// libpq-style tag from the parsed metadata: "UPDATE 12", "INSERT 0 5".
+    private static func formatCommandTag(_ md: PostgresQueryMetadata) -> String {
+        switch md.command {
+        case "INSERT":
+            return "INSERT \(md.oid ?? 0) \(md.rows ?? 0)"
+        case "SELECT", "DELETE", "UPDATE", "MOVE", "FETCH", "COPY":
+            return "\(md.command) \(md.rows ?? 0)"
+        default:
+            return md.command
+        }
     }
 
     /// Truncate `sql` to a one-line preview suitable for an OperationsCenter

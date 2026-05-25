@@ -4,6 +4,7 @@ struct ConnectionWindowContent: View {
     @Bindable var service: ConnectionService
     @State private var copySource: TableNode?
     @State private var showSchemaDiff = false
+    @State private var sidebarFilter: String = ""
 
     private var appearance: ConnectionAppearance {
         ConnectionAppearance(connection: service.connection)
@@ -64,8 +65,10 @@ struct ConnectionWindowContent: View {
             Divider().opacity(0.6)
             switch service.schemaState {
             case .loaded:
+                sidebarSearchField
                 SidebarOutlineView(
                     snapshot: service.schema,
+                    filterTerm: sidebarFilter,
                     onOpenTable: { service.workspace.openTable($0) },
                     onCopyTable: { copySource = $0 }
                 )
@@ -94,6 +97,31 @@ struct ConnectionWindowContent: View {
             }
         }
         .background(Color(nsColor: .underPageBackgroundColor))
+    }
+
+    private var sidebarSearchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            TextField("Filter tables", text: $sidebarFilter)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+            if !sidebarFilter.isEmpty {
+                Button {
+                    sidebarFilter = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .overlay(Divider().opacity(0.4), alignment: .bottom)
     }
 
     private var sidebarHeader: some View {

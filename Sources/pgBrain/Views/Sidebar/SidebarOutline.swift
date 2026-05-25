@@ -85,6 +85,9 @@ final class SidebarNode {
 
 struct SidebarOutlineView: NSViewRepresentable {
     let snapshot: SchemaSnapshot
+    /// When non-empty, only tables matching the term are shown (flat list).
+    /// Computed lazily through `SchemaIndex` for O(prefix + matches).
+    var filterTerm: String = ""
     let onOpenTable: (TableNode) -> Void
     var onCopyTable: ((TableNode) -> Void)? = nil
     var onExportTable: ((TableNode) -> Void)? = nil
@@ -93,23 +96,56 @@ struct SidebarOutlineView: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
         var root: SidebarNode
+        var filteredRoot: SidebarNode?  // non-nil = filter mode
+        var index: SchemaIndex
         let onOpenTable: (TableNode) -> Void
         let onCopyTable: ((TableNode) -> Void)?
         let onExportTable: ((TableNode) -> Void)?
         let onImportInto: ((TableNode) -> Void)?
 
+        var activeRoot: SidebarNode { filteredRoot ?? root }
+
         init(
             root: SidebarNode,
+            index: SchemaIndex,
             onOpenTable: @escaping (TableNode) -> Void,
             onCopyTable: ((TableNode) -> Void)?,
             onExportTable: ((TableNode) -> Void)?,
             onImportInto: ((TableNode) -> Void)?
         ) {
             self.root = root
+            self.index = index
             self.onOpenTable = onOpenTable
             self.onCopyTable = onCopyTable
             self.onExportTable = onExportTable
             self.onImportInto = onImportInto
+        }
+
+        /// Rebuild `filteredRoot` from `term` (empty = clear filter).
+        /// Filtered root is a synthetic "search" database with one schema
+        /// per matching table grouped by source schema.
+        func applyFilter(_ term: String) {
+            let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                filteredRoot = nil
+                return
+            }
+            let matches = index.matches(trimmed)
+            var bySchema: [String: [TableNode]] = [:]
+            for table in matches {
+                bySchema[table.schema, default: []].append(table)
+            }
+            let schemaNodes = bySchema.keys.sorted().map { name -> SidebarNode in
+                let tables = bySchema[name]!.sorted { $0.name < $1.name }
+                return SidebarNode(
+                    kind: .schema(name: name),
+                    children: tables.map { SidebarNode(kind: .table($0)) }
+                )
+            }
+            filteredRoot = SidebarNode(
+                kind: .database(name: "matches (\(matches.count))"),
+                children: schemaNodes
+            )
         }
 
         func menu(forRow row: Int, in outline: NSOutlineView) -> NSMenu? {
@@ -166,13 +202,13 @@ struct SidebarOutlineView: NSViewRepresentable {
         // MARK: NSOutlineViewDataSource
 
         func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-            guard let node = item as? SidebarNode else { return root.children.count }
+            guard let node = item as? SidebarNode else { return activeRoot.children.count }
             return node.children.count
         }
 
-        func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-            guard let node = item as? SidebarNode else { return root.children[index] }
-            return node.children[index]
+        func outlineView(_ outlineView: NSOutlineView, child childIndex: Int, ofItem item: Any?) -> Any {
+            guard let node = item as? SidebarNode else { return activeRoot.children[childIndex] }
+            return node.children[childIndex]
         }
 
         func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
@@ -215,6 +251,7 @@ struct SidebarOutlineView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(
             root: SidebarNode.build(from: snapshot),
+            index: SchemaIndex(snapshot: snapshot),
             onOpenTable: onOpenTable,
             onCopyTable: onCopyTable,
             onExportTable: onExportTable,
@@ -265,13 +302,25 @@ struct SidebarOutlineView: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let outline = scroll.documentView as? NSOutlineView else { return }
-        let newRoot = SidebarNode.build(from: snapshot)
-        context.coordinator.root = newRoot
+        // Snapshot changed?
+        if !snapshotMatchesIndex(context.coordinator.index, snapshot: snapshot) {
+            context.coordinator.root = SidebarNode.build(from: snapshot)
+            context.coordinator.index = SchemaIndex(snapshot: snapshot)
+        }
+        context.coordinator.applyFilter(filterTerm)
+        let active = context.coordinator.activeRoot
         outline.reloadData()
-        outline.expandItem(newRoot)
-        for schema in newRoot.children {
+        outline.expandItem(active)
+        for schema in active.children {
             outline.expandItem(schema)
         }
+    }
+
+    /// Cheap heuristic: rebuilds only when the database name or per-schema
+    /// table counts change. Saves a full SidebarNode rebuild on every
+    /// filter keystroke.
+    private func snapshotMatchesIndex(_ index: SchemaIndex, snapshot: SchemaSnapshot) -> Bool {
+        index.totalTables == snapshot.schemas.reduce(0) { $0 + $1.tables.count }
     }
 }
 

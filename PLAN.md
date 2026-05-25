@@ -261,16 +261,27 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 - Per-connection `:var` substitution in scratchpads — gated on the upcoming scratchpad redo so we don't double-build it.
 - Czech translations for the *other* ~200 strings still in source — iter-14 ships the *pattern*; bulk migration happens once we know which strings are stable.
 
+### Open Q — Sidebar perf at 10k+ tables (2026-05-25)
+**Goal**: search-as-you-type filtering that holds up on schemas the size of an EnterpriseDB extract.
+
+- **`SchemaIndex`** — substring trie over every `qualifiedName.lowercased()`. ~200k inserts for a 10k-table schema (~20ms on M-series). `matches(_:)` walks the trie in O(needle length) + match count and returns a sorted `[TableNode]`.
+- **`SidebarOutlineView`** — new `filterTerm: String` parameter. When non-empty, the coordinator rebuilds a synthetic root labelled `matches (N)` containing only matching tables grouped by their source schema; when empty, the full outline returns.
+- **`ConnectionWindowContent`** — magnifying-glass `TextField` ("Filter tables") above the sidebar header with an `xmark.circle.fill` clear button.
+- **Cheap reload heuristic** — `snapshotMatchesIndex` compares total-table counts so the `SidebarNode` + `SchemaIndex` rebuild only fires when the schema actually changes; filter keystrokes only rebuild the filtered subtree.
+- `NSOutlineView` was already row-virtualised, so raw display perf was never the bottleneck; the trie-backed filter is what unlocks 10k+ in practice.
+
+### Open Q — commandTag for non-SELECT (2026-05-25)
+**Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
+
+- `QueryRunner.runOnConnection` now uses `SQLSafety.classify` to split the path:
+  - `readOnly` → streaming `PostgresRowSequence` (unchanged); synthetic `SELECT N` tag from materialised row count.
+  - everything else → `PostgresConnection.query(...).get()` (materialised `EventLoopFuture` path), reads `PostgresQueryMetadata` for the real libpq tag.
+- `formatCommandTag` reconstructs `INSERT oid rows` / `<CMD> rows` / `<CMD>` from the parsed metadata.
+- Streaming SELECTs are untouched — no memory regression at large row counts. The materialised path is only taken for statements that typically return 0–few rows.
+
 ---
-
-## Open Q — Sidebar perf & commandTag (next)
-
----
-
-## Backlog
 
 ## Open questions for later
-- **SQL syntax highlighting**: shipped iter-4 with a plain `NSTextView` (no highlighting). Pick a direction once we've felt the absence — TextKit-2 + hand-rolled Postgres lexer vs. CodeMirror-in-WKWebView. Native is more work but lower input latency and matches the rest of the chrome.
-- **Sidebar tree perf**: at very large schemas (10k+ tables) `NSOutlineView` with lazy children works fine, but the search-as-you-type filter needs an index. Address when it bites.
-- **Cancellation**: cancelling a long `PostgresQuery` requires opening a side connection and `pg_cancel_backend(pid)`. The runner doesn't track backend PIDs yet — wire it in when the cancellation iter lands.
-- **`commandTag` for non-SELECT**: PostgresNIO's high-level streaming API doesn't expose the libpq-style command tag. To show "UPDATE 12" instead of "OK", drop to raw `PSQLChannel` or fork a thin wrapper around `query`.
+- **SQL syntax highlighting**: shipped iter-4 with a plain `NSTextView` (no highlighting). Held until the scratchpad redo so we don't double-build.
+- **`COPY ... TO STDOUT` (binary)**: PostgresNIO doesn't expose `COPY TO STDOUT` through the high-level API yet, so iter-8/iter-9 use `SELECT … ::text`. Drop to the raw channel when first user hits row-stream throughput limits.
+- **Scratchpad redo (next major area of work)**: per user — current `ScratchpadView` isn't the right model. Hold polish like `:var` substitution and per-keystroke autosave until the redo lands.
