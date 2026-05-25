@@ -204,6 +204,7 @@ struct ConnectionWindowContent: View {
 
 struct StatusFooter: View {
     @Bindable var service: ConnectionService
+    @State private var opsPopoverShown = false
 
     var body: some View {
         HStack(spacing: Tokens.Spacing.sm) {
@@ -231,6 +232,7 @@ struct StatusFooter: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer()
+            opsIndicator
             if case .connected(_, let since) = service.state {
                 Text("connected at \(since.formatted(date: .omitted, time: .shortened))")
                     .font(.caption).foregroundStyle(.tertiary)
@@ -239,6 +241,37 @@ struct StatusFooter: View {
         .padding(.horizontal, Tokens.Spacing.md)
         .padding(.vertical, 6)
         .background(Color(nsColor: .underPageBackgroundColor))
+    }
+
+    private var opsIndicator: some View {
+        let running = service.operations.runningCount
+        let total = service.operations.operations.count
+        let visible = running > 0 || total > 0
+        return Button {
+            opsPopoverShown.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                if running > 0 {
+                    ProgressView().controlSize(.mini)
+                    Text("\(running) running")
+                        .font(.caption.weight(.medium))
+                } else if total > 0 {
+                    Image(systemName: "checkmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("\(total)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .opacity(visible ? 1 : 0)
+        .disabled(!visible)
+        .help("Show running operations")
+        .popover(isPresented: $opsPopoverShown, arrowEdge: .bottom) {
+            OperationsPopover(operations: service.operations)
+        }
     }
 
     private var targetDescription: String {

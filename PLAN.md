@@ -111,11 +111,29 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 - Per-cell red border on the editable grid for PROD connections — added passive dot on the tab badge instead; cell-level treatment can wait until we have a clearer signal it's noisy enough to need it.
 - Confirm dialog on Apply-against-PROD in the data grid — UpdateApplier is intrinsically scoped to a single PK so it's strictly safer than scratchpad SQL; revisit if real usage proves otherwise.
 
+### Iter 7 — Operations popover + real cancellation (2026-05-25)
+**Goal**: every long-running query/update/schema fetch is visible from the status footer, with a working Cancel button that actually stops server-side work.
+
+- **`OperationsCenter`** — `@MainActor @Observable` per-`ConnectionService` registry. Each `Operation` has kind (query / update / schema / export / import), summary, status (`running / succeeded / failed / cancelled`), startedAt/finishedAt, `backendPID`, a Sendable `cancellationHandler`, and an owning `Task` handle.
+- **`OperationsHelpers.fetchBackendPID`** — one-shot `SELECT pg_backend_pid()` on a checked-out connection. Runners call this once when they enter `withConnection { … }` so the op gets a real PID.
+- **Cancellation flow** — `OperationsCenter.cancel(op)` cancels the owning Task and fires `cancellationHandler` on a detached Task. The handler checks out a *sister* connection from the same `PostgresClient` pool and runs `SELECT pg_cancel_backend($pid)`. This matches what psql does on ^C and works through pooling.
+- **Sendable boundary** — runners take `operationID: UUID` + `tracker: OperationsCenter` rather than the @MainActor `Operation` itself, then hop back to main with `Task { @MainActor in tracker.attachCancellation(...) }`. Avoids strict-concurrency races without `@unchecked Sendable` escape hatches.
+- **`QueryRunner.run`** — refactored to use `client.withConnection`, capture PID, register cancellation. New `summary(of:max:)` helper for popover labels. Inner `runOnConnection(_:on:limit:)` extracted for iter-9's cross-DB copy.
+- **`UpdateApplier.apply`** — adds `operationID`/`tracker` parameters; UPDATE batch becomes cancellable mid-transaction (Postgres rolls back automatically).
+- **`ConnectionService.loadSchema`** — also tracked (no cancellation handle — schema fetch fans out across parallel queries).
+- **`pgbrainQuietLogger`** — shared `SwiftLogNoOpLogHandler`-backed logger so we stop spinning up a new `Logger` per call. iter-11 Settings will let users flip it to a real logger.
+- **`OperationsPopover`** — anchored to a new "N running" indicator in the status footer. Per-row: status glyph, kind icon, PID (when known), one-line summary, elapsed, Cancel button while live, failure text inline. "Clear Finished" at the bottom. 380×280, runs in alphabetical-by-recency order (newest running first).
+- **Status footer indicator** — `ProgressView` + "N running" when live, plus a "total" badge after everything's done; hidden entirely when the center is empty.
+
+**Verified**: `swift build` ✓. Build now uses Swift 6 strict concurrency with the runner/tracker boundary, no `@unchecked` escape hatches.
+
+**Deferred**:
+- Per-statement cancellation inside the schema fetch fan-out — single batch op for now since the user rarely wants to cancel "loading schema".
+- Persisting the operations log across relaunches — popover only shows the current session.
+
 ---
 
-## Next — Iter 7: Status footer + active operations popover
-- Bottom-of-window footer: connection state, current schema, active query indicator, row count, last error.
-- Popover with cancellable list of running queries / imports / exports.
+## Next — Iter 8: Streaming export / import
 
 ---
 

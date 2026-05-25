@@ -1,8 +1,14 @@
 import Foundation
+import Logging
 import Observation
 import PostgresNIO
 import NIOCore
 import NIOSSL
+
+/// Shared no-op logger for the (currently very chatty) PostgresNIO query
+/// surface. Centralised so iter-11's Settings can swap it for a real logger
+/// behind a verbose flag.
+let pgbrainQuietLogger = Logger(label: "cloud.souris.pgbrain", factory: { _ in SwiftLogNoOpLogHandler() })
 
 /// One per ConnectionWindow. Owns a PostgresClient and exposes a UI-friendly
 /// state machine to SwiftUI views.
@@ -22,6 +28,7 @@ final class ConnectionService {
     private(set) var schema: SchemaSnapshot = .empty
     private(set) var schemaState: SchemaState = .idle
     let workspace = WorkspaceState()
+    let operations = OperationsCenter()
 
     enum SchemaState: Sendable, Equatable {
         case idle, loading, loaded, error(String)
@@ -104,11 +111,14 @@ final class ConnectionService {
     func loadSchema() async {
         guard let client else { return }
         schemaState = .loading
+        let op = operations.begin(kind: .schema, summary: "Loading schema for \(connection.database.isEmpty ? "default db" : connection.database)")
         do {
             schema = try await SchemaFetcher.fetch(client: client)
             schemaState = .loaded
+            operations.finish(op, status: .succeeded)
         } catch {
             schemaState = .error(error.localizedDescription)
+            operations.finish(op, status: .failed(error.localizedDescription))
         }
     }
 

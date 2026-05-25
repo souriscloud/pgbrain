@@ -38,12 +38,15 @@ enum UpdateApplier {
     /// Apply all `edits` against `table` using `client`. Resolves PK values by
     /// reading them out of `originalRows` (the snapshot the grid is showing).
     /// Throws on first failure — caller's transaction is already rolled back
-    /// by `withTransaction`.
+    /// by `withTransaction`. Pass `bind` to register a cancellable operation
+    /// so the user can cancel the in-flight UPDATE batch from the ops popover.
     static func apply(
         edits: [Edit],
         table: TableNode,
         originalRows: [[String?]],
-        client: PostgresClient
+        client: PostgresClient,
+        operationID: UUID? = nil,
+        tracker: OperationsCenter? = nil
     ) async throws {
         guard table.isEditable else { throw Failure.noPrimaryKey }
         let pkColumns = table.primaryKeyColumns
@@ -58,9 +61,24 @@ enum UpdateApplier {
             table.columns.enumerated().map { ($0.element.name, $0.offset) })
 
         let qualifiedTable = SQLIdent.qualified(schema: table.schema, name: table.name)
-        let logger = Logger(label: "cloud.souris.pgbrain.update", factory: { _ in SwiftLogNoOpLogHandler() })
+        let logger = pgbrainQuietLogger
 
         try await client.withTransaction(logger: logger) { connection in
+            if let opID = operationID, let tracker {
+                let pid = try await OperationsHelpers.fetchBackendPID(connection, logger: logger)
+                let cancelHandler: @Sendable () async -> Void = { [weak client] in
+                    guard let client else { return }
+                    _ = try? await client.withConnection { sister in
+                        _ = try await sister.query(
+                            PostgresQuery(unsafeSQL: "SELECT pg_cancel_backend(\(pid))"),
+                            logger: logger
+                        )
+                    }
+                }
+                Task { @MainActor in
+                    tracker.attachCancellation(toOperationID: opID, pid: pid, handler: cancelHandler)
+                }
+            }
             for edit in edits {
                 guard edit.rowIndex < originalRows.count else { continue }
                 let originalRow = originalRows[edit.rowIndex]

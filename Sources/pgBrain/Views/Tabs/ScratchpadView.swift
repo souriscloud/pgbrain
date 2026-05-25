@@ -158,14 +158,27 @@ struct ScratchpadView: View {
 
         let block = ResultBlock(statement: statement)
         scratchpad.addBlock(block)
-        Task { @MainActor in
+        let op = service.operations.begin(kind: .query, summary: QueryRunner.summary(of: statement))
+        let tracker = service.operations
+        let opID = op.id
+        let task = Task { @MainActor in
             do {
-                let result = try await QueryRunner.run(statement, on: client)
+                let result = try await QueryRunner.run(statement, on: client, operationID: opID, tracker: tracker)
                 block.outcome = .success(result)
+                service.operations.finish(op, status: .succeeded)
+            } catch is CancellationError {
+                block.outcome = .failure("Cancelled")
+                service.operations.finish(op, status: .cancelled)
             } catch {
-                block.outcome = .failure(error.localizedDescription)
+                let msg = error.localizedDescription
+                block.outcome = .failure(msg)
+                let status: OperationsCenter.Operation.Status = Task.isCancelled
+                    ? .cancelled
+                    : .failed(msg)
+                service.operations.finish(op, status: status)
             }
         }
+        op.taskHandle = task
     }
 
     private func sliceSelection(in buffer: String) -> String? {

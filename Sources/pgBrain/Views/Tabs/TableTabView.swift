@@ -236,13 +236,20 @@ final class RowsLoader {
         isApplying = true
         applyError = nil
         defer { isApplying = false }
+        let op = service.operations.begin(
+            kind: .update,
+            summary: "UPDATE \(table.qualifiedName) (\(edits.count) row\(edits.count == 1 ? "" : "s"))"
+        )
         do {
             try await UpdateApplier.apply(
                 edits: edits,
                 table: table,
                 originalRows: page.rows,
-                client: client
+                client: client,
+                operationID: op.id,
+                tracker: service.operations
             )
+            service.operations.finish(op, status: .succeeded)
             // Splice the applied values into the in-memory page so the grid
             // shows the new state without a round-trip refetch.
             for edit in edits {
@@ -252,8 +259,12 @@ final class RowsLoader {
             }
             state = .loaded(page)
             editBuffer.clear()
+        } catch is CancellationError {
+            applyError = "Cancelled"
+            service.operations.finish(op, status: .cancelled)
         } catch {
             applyError = error.localizedDescription
+            service.operations.finish(op, status: .failed(error.localizedDescription))
         }
     }
 }

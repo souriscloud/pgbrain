@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import PostgresNIO
 
 /// Output of a single query execution. Reuses the grid-friendly `RowsFetcher.Page`
@@ -18,21 +19,53 @@ struct QueryResult: Sendable {
     }
 }
 
-/// Runs ad-hoc SQL against an active `PostgresClient`. Iter-4 ships the
-/// happy-path single-statement runner; cancellation (via a sister connection
-/// + `pg_cancel_backend`) lands in a later iter.
+/// Runs ad-hoc SQL against an active `PostgresClient`. Iter-7 adds operation
+/// tracking + pg_cancel_backend-driven cancellation: when a `bind` Operation
+/// is passed, the runner checks out a connection from the pool, captures the
+/// backend PID, and registers a cancellation handler that fires
+/// `pg_cancel_backend($pid)` from a sister connection so user-clicked Cancel
+/// actually stops the server-side work.
 enum QueryRunner {
-    /// Default cap on rows pulled into memory per run. The runner reads
-    /// `limit + 1` rows to detect truncation, then stops draining the stream.
     static let defaultRowLimit = 1000
 
     static func run(
         _ sql: String,
         on client: PostgresClient,
+        limit: Int = defaultRowLimit,
+        operationID: UUID? = nil,
+        tracker: OperationsCenter? = nil
+    ) async throws -> QueryResult {
+        try await client.withConnection { connection in
+            if let opID = operationID, let tracker {
+                let pid = try await OperationsHelpers.fetchBackendPID(connection, logger: pgbrainQuietLogger)
+                let cancelHandler: @Sendable () async -> Void = { [weak client] in
+                    guard let client else { return }
+                    _ = try? await client.withConnection { sister in
+                        _ = try await sister.query(
+                            PostgresQuery(unsafeSQL: "SELECT pg_cancel_backend(\(pid))"),
+                            logger: pgbrainQuietLogger
+                        )
+                    }
+                }
+                // Hop back to main to wire the op without crossing the @MainActor
+                // boundary inside this nonisolated closure.
+                Task { @MainActor in
+                    tracker.attachCancellation(toOperationID: opID, pid: pid, handler: cancelHandler)
+                }
+            }
+            return try await runOnConnection(sql, on: connection, limit: limit)
+        }
+    }
+
+    /// Inner runner without operation tracking — also used by the cross-DB
+    /// copy path in iter-9 where the connection is checked out elsewhere.
+    static func runOnConnection(
+        _ sql: String,
+        on connection: PostgresConnection,
         limit: Int = defaultRowLimit
     ) async throws -> QueryResult {
         let started = Date()
-        let stream = try await client.query(PostgresQuery(unsafeSQL: sql))
+        let stream = try await connection.query(PostgresQuery(unsafeSQL: sql), logger: pgbrainQuietLogger)
 
         var columns: [ColumnNode] = []
         var rows: [[String?]] = []
@@ -41,9 +74,6 @@ enum QueryRunner {
 
         for try await row in stream {
             if columns.isEmpty {
-                // PostgresRow exposes column metadata only via its `PostgresCell`
-                // elements (each cell carries `columnName` + `dataType`). We walk
-                // the first row's cells once to materialise our `ColumnNode`s.
                 for cell in row {
                     columns.append(ColumnNode(
                         name: cell.columnName,
@@ -83,9 +113,16 @@ enum QueryRunner {
         return QueryResult(page: page, commandTag: nil)
     }
 
-    /// Stringify a `PostgresDataType` for display in the grid header. The
-    /// well-known OIDs cover ~everything we'll see; unknowns fall back to
-    /// "oid <n>" so the user can still recognise the column type.
+    /// Truncate `sql` to a one-line preview suitable for an OperationsCenter
+    /// summary or a popover row label.
+    static func summary(of sql: String, max: Int = 80) -> String {
+        let collapsed = sql
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return collapsed.count > max ? String(collapsed.prefix(max)) + "…" : collapsed
+    }
+
     private static func pgTypeName(_ type: PostgresDataType) -> String {
         switch type {
         case .bool: return "boolean"
