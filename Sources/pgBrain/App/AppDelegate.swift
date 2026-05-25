@@ -152,7 +152,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     case .scratchpad:
                         let pad = workspace.openScratchpad()
                         if let title = persisted.scratchpadTitle { pad.title = title }
-                        if let text = persisted.scratchpadText { pad.text = text }
+                        if let text = persisted.scratchpadText {
+                            let attributed = NSMutableAttributedString(string: text)
+                            attributed.addAttribute(
+                                .font,
+                                value: NSFont.monospacedSystemFont(ofSize: CGFloat(AppSettings.shared.editorFontSize), weight: .regular),
+                                range: NSRange(location: 0, length: attributed.length)
+                            )
+                            pad.textStorage.beginEditing()
+                            pad.textStorage.setAttributedString(attributed)
+                            pad.textStorage.endEditing()
+                        }
                     }
                     if snapshot.selectedTabIndex == idx, let last = workspace.tabs.last {
                         workspace.selectedID = last.id

@@ -8,7 +8,7 @@ import Observation
 final class WorkspaceState {
     enum TabKind: Equatable {
         case table(TableNode)
-        case scratchpad(Scratchpad)
+        case scratchpad(Notebook)
 
         static func == (lhs: TabKind, rhs: TabKind) -> Bool {
             switch (lhs, rhs) {
@@ -57,11 +57,11 @@ final class WorkspaceState {
     }
 
     /// Always opens a fresh scratchpad — unlike table tabs we don't dedupe,
-    /// since users may want multiple independent scratchpads side by side.
+    /// since users may want multiple independent notebooks side by side.
     @discardableResult
-    func openScratchpad() -> Scratchpad {
+    func openScratchpad() -> Notebook {
         scratchpadCounter += 1
-        let pad = Scratchpad(title: "Query \(scratchpadCounter)")
+        let pad = Notebook(title: "Query \(scratchpadCounter)")
         let tab = Tab(kind: .scratchpad(pad), title: pad.title)
         tabs.append(tab)
         selectedID = tab.id

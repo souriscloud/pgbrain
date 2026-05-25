@@ -270,6 +270,27 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 - **Cheap reload heuristic** — `snapshotMatchesIndex` compares total-table counts so the `SidebarNode` + `SchemaIndex` rebuild only fires when the schema actually changes; filter keystrokes only rebuild the filtered subtree.
 - `NSOutlineView` was already row-virtualised, so raw display perf was never the bottleneck; the trie-backed filter is what unlocks 10k+ in practice.
 
+### Iter 15 — Notebook scratchpad rebuild (2026-05-25)
+**Goal**: SQL and result widgets live inline in one flowing document, JetBrains-style green outline around the running range. Replaces the iter-4 stack-of-results model the user explicitly flagged as wrong.
+
+- **`Notebook`** — replaces `Scratchpad`. Owns a single `NSTextStorage`; an `[UUID: NotebookResult]` dict carries result data out-of-band so the storage only holds a single attachment character per result. `startResult(id:statement:)` either resets an existing entry (replace-in-place) or creates a new one.
+- **`NotebookResult`** — `@Observable` per-block status (`running / success / failure / cancelled`), `statement`, timestamps, `isCollapsed`. Mutable in place so SwiftUI binds re-render on status flips without dict churn.
+- **`ResultAttachment` + `ResultAttachmentViewProvider`** — `NSTextAttachment` subclass keyed by result UUID; view provider hosts a SwiftUI `InlineResultView` (status glyph, preview, elapsed, collapse, remove, and either `DataGridView` or a one-line command tag). Provider is `nonisolated final class … @unchecked Sendable` and bridges into `MainActor.assumeIsolated` via a small `ProviderBox` wrapper, since AppKit's `loadView` signature can't be marked `@MainActor`.
+- **`NotebookTextView`** — `NSTextView` subclass. Cmd+⏎ resolves the run target (selection wins over statement-under-caret via `SQLStatementSplitter`). Multi-statement selections split into N targets, each kicking off a separate run and inserting/replacing N attachments in document order. The **green run outline** is drawn in `draw(_:)` by querying the layout manager for the glyph bounds of `notebook.runningRange` and stroking a rounded rectangle with a faint green fill (cleared as soon as the batch finishes).
+- **Replace-or-insert** — `reuseOrInsertAttachment(at:)` walks past whitespace at the run-end cursor; if the next non-whitespace character is our attachment, it reuses its ID (result is replaced in place). Otherwise inserts a fresh attachment on its own line with leading/trailing newlines so users can keep typing. Multi-statement selections cascade the cursor past each attachment so a re-run with the same selection replaces all N widgets in order.
+- **Production confirmation + ops popover** — reuses iter-6's `SQLSafety` and iter-7's `OperationsCenter` unchanged.
+- **`SavedQueriesView`** — now binds to `Notebook`; "Insert" overwrites `textStorage` with the chosen SQL.
+- **`SessionState`** — persists notebook text only (results are transient by user request); restore creates a `Notebook` and seeds its `textStorage` with the saved text.
+- **`WorkspaceState.TabKind.scratchpad`** now holds a `Notebook` instead of the old `Scratchpad`. The tab name stays `.scratchpad` so existing session files keep restoring without migration.
+- Old `Scratchpad.swift` and `ScratchpadView.swift` deleted.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓.
+
+**Deferred** (intentional):
+- Live height-tracking for attachment widgets — fixed 260pt is the current attachment bounds; `DataGridView` itself caps at 320 so tall results just scroll. Add a layout pass when first user complains.
+- `:var` substitution — was deferred from iter-14; can now slot in cleanly since the notebook owns the text storage.
+- Syntax highlighting — still a separate decision (TextKit 2 lexer vs. CodeMirror); now unblocked because the editor is a single `NSTextView`.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

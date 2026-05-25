@@ -107,7 +107,7 @@ final class SessionStateStore {
                     return SessionState.Tab(
                         kind: .scratchpad,
                         scratchpadTitle: pad.title,
-                        scratchpadText: pad.text
+                        scratchpadText: pad.plainText
                     )
                 }
             }

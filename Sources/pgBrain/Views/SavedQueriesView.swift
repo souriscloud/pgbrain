@@ -4,7 +4,7 @@ import SwiftUI
 /// Inserts the chosen SQL into the host scratchpad. The "Save current
 /// scratchpad" button captures whatever's in the editor as a new entry.
 struct SavedQueriesView: View {
-    @Bindable var scratchpad: Scratchpad
+    @Bindable var notebook: Notebook
     let onClose: () -> Void
 
     @State private var store = SavedQueryStore.shared
@@ -35,12 +35,12 @@ struct SavedQueriesView: View {
             Image(systemName: "books.vertical")
             TextField("Search saved queries", text: $search)
                 .textFieldStyle(.roundedBorder)
-            Button("Save current scratchpad") {
-                let trimmed = scratchpad.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            Button("Save current notebook") {
+                let trimmed = notebook.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { return }
                 draft = SavedQuery(name: "Query \(store.queries.count + 1)", sql: trimmed)
             }
-            .disabled(scratchpad.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(notebook.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .padding(Tokens.Spacing.md)
     }
@@ -67,7 +67,16 @@ struct SavedQueriesView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 Button("Insert") {
-                    scratchpad.text = q.sql
+                    // Replace the document text wholesale. The text storage
+                    // is owned by the notebook so the live NSTextView picks
+                    // up the change immediately.
+                    let attributed = NSMutableAttributedString(string: q.sql)
+                    if let font = NSFont(name: "Menlo", size: CGFloat(AppSettings.shared.editorFontSize)) {
+                        attributed.addAttribute(.font, value: font, range: NSRange(location: 0, length: attributed.length))
+                    }
+                    notebook.textStorage.beginEditing()
+                    notebook.textStorage.setAttributedString(attributed)
+                    notebook.textStorage.endEditing()
                     onClose()
                 }
                 .buttonStyle(.borderedProminent)

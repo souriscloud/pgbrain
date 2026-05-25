@@ -220,7 +220,7 @@ struct ConnectionWindowContent: View {
                     TableTabView(table: table, service: service)
                         .id(table.id)
                 case .scratchpad(let pad):
-                    ScratchpadView(scratchpad: pad, service: service)
+                    NotebookView(notebook: pad, service: service)
                         .id(pad.id)
                 }
             } else {
