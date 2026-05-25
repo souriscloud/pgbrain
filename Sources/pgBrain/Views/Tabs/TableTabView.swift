@@ -295,12 +295,11 @@ final class RowsLoader {
             return
         }
         state = .loading
-        // Reloading the table invalidates any pending edits — their row
-        // indices reference the previous result set.
         editBuffer.clear()
         applyError = nil
+        let limit = AppSettings.shared.defaultRowLimit
         do {
-            let page = try await RowsFetcher.first(1000, from: table, client: client)
+            let page = try await RowsFetcher.first(limit, from: table, client: client)
             state = .loaded(page)
         } catch {
             state = .error(error.localizedDescription)

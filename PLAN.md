@@ -185,17 +185,30 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 - Restoring per-window grid scroll positions or selection ranges — needs additional state piped from `RowsLoader` / `EditBuffer`.
 - Restoring open scratchpad result blocks — they're transient by design; the SQL is what matters and that already round-trips.
 
+### Iter 11 — Settings window (2026-05-25)
+**Goal**: replace the iter-1 placeholder Settings scene with a real, useful preferences window driven by `AppSettings`.
+
+- **`SettingsView`** — standard macOS `TabView` of `General / Editor / Binaries / Updates`. 520×360.
+- **General** — toggles `restoreLastSession` (live binds to iter-10 launch flow), `Stepper` for `defaultRowLimit` (100-100k, step 100; wired into `RowsLoader.load`), `verbosePostgresLogging` stub.
+- **Editor** — `editorFontSize` stepper (10-22pt) for the future scratchpad redo.
+- **Binaries** — `pg_dump`, `pg_restore`, `psql` override paths with NSOpenPanel browse buttons. Each row runs `PgDumpCLI.locateBinary` in the background to show the auto-discovered path as a tooltip. Writes to the same `pgbrain.binaryOverride.*` keys iter-8 already reads.
+- **Updates** — `sparkleChannel` segmented picker (`stable` / `beta`) — captured now so iter-12 first-update is one click.
+- `AppSettings.defaultRowLimit` now drives `RowsLoader.load`, replacing the hardcoded 1000.
+
+**Verified**: `swift build` ✓.
+
+**Deferred**:
+- Theme picker (system / light / dark) — gated on Sequoia tinting redesign; current single-violet brand survives both modes.
+- Connection-level defaults (default SSL mode, default schema) — needs a separate "Connection defaults" section that defers to the per-connection editor.
+- `verbosePostgresLogging` live re-routing — `pgbrainQuietLogger` is a `let`; flipping to live re-routing means turning it into a computed property + a logger swap. Add when first user hits a wire bug.
+
 ---
 
-## Next — Iter 11: Settings window
+## Next — Iter 12: Sparkle + GitHub release pipeline
 
 ---
 
 ## Backlog (rough order)
-
-### Iter 11 — Settings window
-- Sections: General (restore on launch, theme), Connections (default SSL mode, pg_dump path), Editor (font, theme, tab size), Updates (Sparkle channel).
-- Backed by `UserDefaults` with typed property wrappers.
 
 ### Iter 12 — Sparkle + GitHub release pipeline
 - Embed Sparkle, code-sign EdDSA appcast.

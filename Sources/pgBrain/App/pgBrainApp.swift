@@ -6,7 +6,7 @@ struct pgBrainApp: App {
 
     var body: some Scene {
         Settings {
-            SettingsPlaceholderView()
+            SettingsView()
         }
         .commands {
             CommandGroup(replacing: .appInfo) {
