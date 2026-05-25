@@ -202,18 +202,38 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 - Connection-level defaults (default SSL mode, default schema) — needs a separate "Connection defaults" section that defers to the per-connection editor.
 - `verbosePostgresLogging` live re-routing — `pgbrainQuietLogger` is a `let`; flipping to live re-routing means turning it into a computed property + a logger swap. Add when first user hits a wire bug.
 
+### Iter 12 — Sparkle + release pipeline (2026-05-25)
+**Goal**: in-app auto-update via Sparkle, plus a one-command release script that handles version bump → build → sign → notarize → DMG → GitHub release.
+
+- **Sparkle dependency** — `Sparkle 2.6+` added to `Package.swift`. SPM integration handles linking. (Non-sandboxed runtime keeps the framework story straightforward; we'd need extra XPC bundling for sandboxed builds.)
+- **`UpdateController`** — `@MainActor` wrapper around `SPUStandardUpdaterController`. Initialised at app launch from `AppDelegate.applicationDidFinishLaunching`; `MenuBarController.onCheckUpdates` now routes through it. Implements `SPUUpdaterDelegate.feedURLString(for:)` so the iter-11 `AppSettings.sparkleChannel` flips between `appcast.xml` (stable) and `appcast-beta.xml` (beta) without restart.
+- **Info.plist Sparkle keys** — `SUFeedURL` (apps.souris.cloud/pgbrain/appcast.xml), `SUPublicEDKey` placeholder (must be set to the production EdDSA public key before first release), `SUEnableAutomaticChecks`, `SUScheduledCheckInterval = 86400` (daily).
+- **`scripts/bump.sh`** — semver bumper using `PlistBuddy`. Accepts `patch|minor|major|X.Y.Z`. Also increments `CFBundleVersion` (build number). Prints `<version> (build <n>)` to stdout for piping.
+- **`scripts/release.sh`** — end-to-end pipeline. Idempotent until step 5 (notarise). Stages:
+  1. `bump.sh`
+  2. `bundle.sh release`
+  3. `codesign --options runtime --timestamp --entitlements …` with `DEV_ID_APPLICATION_IDENTITY`
+  4. `xcrun notarytool submit --keychain-profile $NOTARY_PROFILE --wait` + `stapler staple` (skippable via `--skip-notarize`)
+  5. DMG build via `scripts/build-dmg.sh` (iter-13) with a `hdiutil` fallback
+  6. `sign_update` for the EdDSA appcast signature (uses `SPARKLE_PRIVATE_KEY_PATH`)
+  7. `gh release create` upload (skippable via `--skip-upload`)
+- All credentials are env-driven; nothing is checked in.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓. Sparkle initialises at launch; auto-update bypassed until the production EdDSA key + signed appcast.xml are in place.
+
+**Deferred (until first signed release)**:
+- Real `SUPublicEDKey` in Info.plist (requires running `sign_update --generate-key-pair` once and committing the public key).
+- `apps.souris.cloud/pgbrain/appcast.xml` hosting — the release script prints exactly what to paste in.
+- Sparkle's XPC bundling for a sandboxed build (we're hardened-runtime-only for now).
+- Channel-aware version pinning (e.g. force a downgrade between channels) — not needed until beta exists.
+
 ---
 
-## Next — Iter 12: Sparkle + GitHub release pipeline
+## Next — Iter 13: Custom DMG background
 
 ---
 
 ## Backlog (rough order)
-
-### Iter 12 — Sparkle + GitHub release pipeline
-- Embed Sparkle, code-sign EdDSA appcast.
-- `scripts/release.sh`: bump version, generate changelog from conventional commits, build + notarize, build DMG with custom background, upload to GitHub Releases, regenerate appcast.xml.
-- `scripts/bump.sh`: semver bump helper.
 
 ### Iter 13 — DMG with custom background
 - Database-themed background image (placeholder generation script).

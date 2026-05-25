@@ -19,6 +19,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar = MenuBarController(delegate: self)
         menuBar?.install()
 
+        // Boot Sparkle so the SPUUpdater can do its scheduled background
+        // check. The first reference initialises the singleton; the menu
+        // bar's "Check for Updates…" routes through the same instance.
+        _ = UpdateController.shared
+
         let restored = AppSettings.shared.restoreLastSession
             ? restoreSession()
             : false

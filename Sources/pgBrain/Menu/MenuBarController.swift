@@ -143,12 +143,7 @@ final class MenuBarController: NSObject {
     }
 
     @objc private func onCheckUpdates() {
-        // Stub — wired up to Sparkle in a later iteration.
-        let alert = NSAlert()
-        alert.messageText = "Updates coming soon"
-        alert.informativeText = "Sparkle auto-update is wired up in a later iteration."
-        alert.alertStyle = .informational
-        alert.runModal()
+        UpdateController.shared.checkForUpdates(self)
     }
 
     @objc private func onQuit() {
