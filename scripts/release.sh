@@ -214,13 +214,14 @@ PUB_DATE=$(LC_ALL=en_US date "+%a, %d %b %Y %H:%M:%S %z")
 
 # Insert a fresh <item> as the FIRST <item> in the channel — after the
 # channel metadata (title/description/link/language) but before any
-# existing items. Awk-based so we don't need xmlstarlet.
+# existing items. We splice via a temp file because BSD awk on macOS
+# rejects multi-line strings passed through -v.
 #   - If there's already an <item>, insert just before its opening tag
 #     (newest entries at the top, conventional for Sparkle appcasts).
 #   - Otherwise insert just before </channel>, which is after the
 #     channel metadata in our stub layout.
-TMP_APPCAST=$(mktemp)
-ITEM_BLOCK=$(cat <<XML
+ITEM_FILE=$(mktemp)
+cat > "$ITEM_FILE" <<XML
         <item>
             <title>$VERSION</title>
             <pubDate>$PUB_DATE</pubDate>
@@ -230,20 +231,30 @@ ITEM_BLOCK=$(cat <<XML
             <enclosure url="$DOWNLOAD_URL" length="$LENGTH" type="application/octet-stream" sparkle:edSignature="$ED_SIGNATURE"/>
         </item>
 XML
-)
+
+TMP_APPCAST=$(mktemp)
 HAS_EXISTING_ITEM=$(grep -c '<item>' appcast.xml || true)
 if [[ "$HAS_EXISTING_ITEM" -gt 0 ]]; then
-    awk -v block="$ITEM_BLOCK" '
-        /<item>/ && !inserted { print block; inserted = 1 }
+    awk -v itemfile="$ITEM_FILE" '
+        /<item>/ && !inserted {
+            while ((getline line < itemfile) > 0) print line
+            close(itemfile)
+            inserted = 1
+        }
         { print }
     ' appcast.xml > "$TMP_APPCAST"
 else
-    awk -v block="$ITEM_BLOCK" '
-        /<\/channel>/ && !inserted { print block; inserted = 1 }
+    awk -v itemfile="$ITEM_FILE" '
+        /<\/channel>/ && !inserted {
+            while ((getline line < itemfile) > 0) print line
+            close(itemfile)
+            inserted = 1
+        }
         { print }
     ' appcast.xml > "$TMP_APPCAST"
 fi
 mv "$TMP_APPCAST" appcast.xml
+rm -f "$ITEM_FILE"
 
 # ==========================================================================
 # STEP 9: COMMIT + PUSH
