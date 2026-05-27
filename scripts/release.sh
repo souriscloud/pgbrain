@@ -75,8 +75,19 @@ gh auth status >/dev/null 2>&1 || error "gh not authenticated. Run: gh auth logi
 if [[ $SKIP_NOTARIZE -eq 0 ]]; then
     security find-identity -v -p codesigning | grep -q "$CODESIGN_IDENTITY" \
         || error "Codesigning identity not found: $CODESIGN_IDENTITY"
-    xcrun notarytool history --keychain-profile "$NOTARYTOOL_PROFILE" >/dev/null 2>&1 \
-        || error "Notary profile '$NOTARYTOOL_PROFILE' not configured. Run: xcrun notarytool store-credentials \"$NOTARYTOOL_PROFILE\" --apple-id <email> --team-id $TEAM_ID --password <app-pw>"
+    # Capture actual stderr so an agreement / billing / team-status problem
+    # surfaces verbatim instead of getting flattened to "profile missing".
+    NOTARY_OUT=$(xcrun notarytool history --keychain-profile "$NOTARYTOOL_PROFILE" 2>&1 || true)
+    if echo "$NOTARY_OUT" | grep -qi "error"; then
+        echo "$NOTARY_OUT" >&2
+        if echo "$NOTARY_OUT" | grep -qi "agreement"; then
+            error "Apple Developer agreement needs signing. Open https://appstoreconnect.apple.com/agreements/ (and https://developer.apple.com/account → Agreements), accept the pending ones, then rerun."
+        elif echo "$NOTARY_OUT" | grep -qi "no keychain item"; then
+            error "Notary profile '$NOTARYTOOL_PROFILE' not configured. Run: xcrun notarytool store-credentials \"$NOTARYTOOL_PROFILE\" --apple-id <email> --team-id $TEAM_ID --password <app-pw>"
+        else
+            error "notarytool preflight failed — see message above."
+        fi
+    fi
 fi
 
 # Ensure the Sparkle dependency is fetched so the tools exist.
