@@ -1,0 +1,10 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>pgBrain</title>
+        <description>Native macOS PostgreSQL GUI</description>
+        <link>https://github.com/souriscloud/pgbrain</link>
+        <language>en</language>
+        <!-- Releases are appended here by scripts/release.sh. -->
+    </channel>
+</rss>

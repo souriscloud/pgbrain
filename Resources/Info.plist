@@ -36,14 +36,14 @@
     <false/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
-    <!-- Sparkle (iter-12). The feed URL points at the GitHub Releases
-         appcast; the public EdDSA key is required by Sparkle ≥ 2 to
-         verify signed updates. Both must be replaced with the production
-         values before the first signed release goes out. -->
+    <!-- Sparkle (iter-12). Appcast lives in the repo on GitHub; raw URL is
+         served by GitHub's CDN. The public EdDSA key matches the private
+         key in the developer's macOS Keychain (Sparkle's generate_keys
+         stores it there) — same key used across souris.cloud apps. -->
     <key>SUFeedURL</key>
-    <string>https://apps.souris.cloud/pgbrain/appcast.xml</string>
+    <string>https://raw.githubusercontent.com/souriscloud/pgbrain/main/appcast.xml</string>
     <key>SUPublicEDKey</key>
-    <string>REPLACE_WITH_BASE64_ED25519_PUBLIC_KEY</string>
+    <string>4uTQZEdMy3jrq7GANt1oiPJuTk1q5pKHJLf6xMjiWz8=</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
     <key>SUScheduledCheckInterval</key>

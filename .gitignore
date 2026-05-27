@@ -12,3 +12,4 @@ DerivedData/
 Resources/AppIcon.icns
 .env
 .env.local
+releases/

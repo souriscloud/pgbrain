@@ -219,13 +219,20 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
   7. `gh release create` upload (skippable via `--skip-upload`)
 - All credentials are env-driven; nothing is checked in.
 
-**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓. Sparkle initialises at launch; auto-update bypassed until the production EdDSA key + signed appcast.xml are in place.
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓. Sparkle initialises at launch; auto-update activates once the first signed release lands on GitHub.
 
-**Deferred (until first signed release)**:
-- Real `SUPublicEDKey` in Info.plist (requires running `sign_update --generate-key-pair` once and committing the public key).
-- `apps.souris.cloud/pgbrain/appcast.xml` hosting — the release script prints exactly what to paste in.
+**Resolved (2026-05-27)**:
+- `SUPublicEDKey` baked into `Info.plist` (`4uTQZEdMy3jrq7GANt1oiPJuTk1q5pKHJLf6xMjiWz8=`) — same EdDSA key Sparkle stores in the user's macOS Keychain via `generate_keys`. Shared with the other souris.cloud apps (VirtualMirror et al.) by design.
+- `SUFeedURL` repointed at `https://raw.githubusercontent.com/souriscloud/pgbrain/main/appcast.xml`. No external hosting needed — GitHub's raw CDN serves the file directly from the repo's default branch.
+- Empty `appcast.xml` committed at the repo root so the URL resolves immediately.
+- `scripts/release.sh` rewritten end-to-end to match the VirtualMirror flow: bump → bundle → codesign → notarize → DMG → notarize DMG → `sign_update` → append `<item>` to `appcast.xml` via awk → commit + push → `gh release create`. Idempotent before notarize; `--skip-notarize` + `--skip-upload` flags for dry runs.
+- `scripts/sparkle-tools.sh` locates the Sparkle CLI binaries from `.build/artifacts/sparkle/Sparkle/bin/` (SPM path, not DerivedData like the VM helper).
+- `scripts/.env.example` documents the four env values the release script needs (`TEAM_ID`, `CODESIGN_IDENTITY`, `NOTARYTOOL_PROFILE`, `GITHUB_REPO`); real `.env` is gitignored.
+
+**Still deferred** (won't affect first release):
 - Sparkle's XPC bundling for a sandboxed build (we're hardened-runtime-only for now).
-- Channel-aware version pinning (e.g. force a downgrade between channels) — not needed until beta exists.
+- Channel-aware appcast (`appcast-beta.xml`) — `UpdateController.feedURLString` already picks the right URL based on `AppSettings.sparkleChannel`; the beta file just doesn't exist yet.
+- Delta updates (`BinaryDelta` is bundled with Sparkle but the release script doesn't invoke it yet).
 
 ### Iter 13 — Custom DMG background (2026-05-25)
 **Goal**: ship the .dmg with branded chrome — gradient background, drag-to-Applications arrow, sized window.
