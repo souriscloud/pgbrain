@@ -64,6 +64,12 @@ final class ConnectionService {
         state = .closed
     }
 
+    /// Max time we wait for `SELECT version()` to come back before declaring
+    /// the connect attempt dead. PostgresNIO's `.require` TLS against a
+    /// server that doesn't speak TLS hangs silently with no error — without
+    /// this timeout the UI would stay on "Connecting…" forever.
+    private static let connectTimeoutSeconds: UInt64 = 15
+
     private func connect() async {
         let password = Keychain.password(for: connection.id) ?? ""
         let tls: PostgresClient.Configuration.TLS
@@ -91,12 +97,29 @@ final class ConnectionService {
         }
         self.clientTask = task
 
+        let timeout = Self.connectTimeoutSeconds
+        let host = connection.host
+        let sslLabel = connection.sslMode.rawValue
         do {
-            var version = "PostgreSQL"
-            let rows = try await client.query("SELECT version()")
-            for try await (v) in rows.decode(String.self) {
-                version = v
-                break
+            let version: String = try await withThrowingTaskGroup(of: String.self) { group in
+                group.addTask {
+                    var v = "PostgreSQL"
+                    let rows = try await client.query("SELECT version()")
+                    for try await row in rows.decode(String.self) {
+                        v = row
+                        break
+                    }
+                    return v
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: timeout * 1_000_000_000)
+                    // This text is what shows up in the connection error
+                    // bubble — make it actionable.
+                    throw ConnectError.timedOut(host: host, sslMode: sslLabel, seconds: Int(timeout))
+                }
+                let first = try await group.next()!
+                group.cancelAll()
+                return first
             }
             self.state = .connected(version: version, since: Date())
             await self.loadSchema()
@@ -105,6 +128,24 @@ final class ConnectionService {
             task.cancel()
             self.clientTask = nil
             self.client = nil
+        }
+    }
+
+    enum ConnectError: LocalizedError {
+        case timedOut(host: String, sslMode: String, seconds: Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .timedOut(let host, let sslMode, let seconds):
+                return """
+                Couldn't connect to \(host) within \(seconds)s (SSL mode: \(sslMode)).
+
+                Common causes:
+                  • Host is unreachable (wrong address, firewall, VPN down)
+                  • Server isn't listening on the port
+                  • SSL mode set to require/verify-* but server doesn't speak TLS — try "prefer"
+                """
+            }
         }
     }
 

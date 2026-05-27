@@ -216,6 +216,8 @@ struct ConnectionEditorView: View {
             tls: tls
         )
         let client = PostgresClient(configuration: config)
+        // Hard 10s timeout so a wrong host / mismatched SSL mode surfaces
+        // as a real error instead of leaving the user staring at a spinner.
         return await withTaskGroup(of: ProbeResult?.self, returning: ProbeResult.self) { group in
             group.addTask { await client.run(); return nil }
             group.addTask {
@@ -228,6 +230,10 @@ struct ConnectionEditorView: View {
                 } catch {
                     return .failure(error.localizedDescription)
                 }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                return .failure("Timed out after 10s. If SSL mode is require/verify-*, try \"prefer\" — some servers don't speak TLS.")
             }
             var outcome: ProbeResult = .failure("Unknown error")
             for await result in group {
