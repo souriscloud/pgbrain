@@ -5,6 +5,10 @@ This file is read at the start of every Claude Code session in this repo. Keep i
 ## Product in one line
 Native macOS PostgreSQL GUI that copies JetBrains DataGrip's professional flow (windows-per-connection, tabs, data grids, SQL scratchpad) while feeling Mac-native (SwiftUI chrome, AppKit grids, system menu/dock/window decorations).
 
+## Sibling docs
+- **PLAN.md** — iteration-by-iteration changelog (what's done, what's next).
+- **RELEASE.md** — release runbook. Read before running `scripts/release.sh`. Covers prereqs, the 10 steps the script performs, flags, troubleshooting, and what Claude already knows when the user asks for a release.
+
 ## Foundational decisions (locked 2026-05-20)
 | | |
 |---|---|

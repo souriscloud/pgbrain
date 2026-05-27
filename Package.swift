@@ -27,6 +27,18 @@ let package = Package(
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency"),
                 .swiftLanguageMode(.v6)
+            ],
+            linkerSettings: [
+                // Required so dyld finds the embedded Sparkle.framework that
+                // bundle.sh copies into Contents/Frameworks/. Without this
+                // rpath, the app crashes at launch with
+                //   Library not loaded: @rpath/Sparkle.framework/Versions/B/Sparkle
+                // because the SPM-built executable only carries
+                // @loader_path + /usr/lib/swift rpaths.
+                .unsafeFlags([
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@executable_path/../Frameworks",
+                ])
             ]
         )
     ]

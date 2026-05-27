@@ -36,16 +36,21 @@ struct AboutView: View {
             }
 
             HStack(spacing: Tokens.Spacing.sm) {
-                Link(destination: URL(string: "https://apps.souris.cloud")!) {
+                Link(destination: URL(string: "https://apps.souris.cloud/apps/pgbrain")!) {
                     Label("Website", systemImage: "globe")
                 }
                 .buttonStyle(.bordered)
 
-                Link(destination: URL(string: "https://github.com/sponsors")!) {
-                    Label("Donate", systemImage: "heart.fill")
+                Link(destination: URL(string: "https://github.com/souriscloud/pgbrain")!) {
+                    Label("GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
                 }
                 .buttonStyle(.bordered)
-                .tint(Tokens.Brand.danger)
+
+                Link(destination: URL(string: "https://ko-fi.com/souriscloud")!) {
+                    Label("Support", systemImage: "heart.fill")
+                }
+                .buttonStyle(.bordered)
+                .tint(.pink)
             }
             .padding(.top, Tokens.Spacing.xs)
 
