@@ -212,25 +212,37 @@ cp "$DMG_BUILD_PATH" "$RELEASES_DIR/$DMG_FILE"
 DOWNLOAD_URL="https://github.com/$GITHUB_REPO/releases/download/v$VERSION/$DMG_FILE"
 PUB_DATE=$(LC_ALL=en_US date "+%a, %d %b %Y %H:%M:%S %z")
 
-# Insert a fresh <item> at the top of <channel>. Awk-based so we don't need
-# xmlstarlet or a full XML parser.
+# Insert a fresh <item> as the FIRST <item> in the channel — after the
+# channel metadata (title/description/link/language) but before any
+# existing items. Awk-based so we don't need xmlstarlet.
+#   - If there's already an <item>, insert just before its opening tag
+#     (newest entries at the top, conventional for Sparkle appcasts).
+#   - Otherwise insert just before </channel>, which is after the
+#     channel metadata in our stub layout.
 TMP_APPCAST=$(mktemp)
-awk -v ver="$VERSION" -v pub="$PUB_DATE" -v url="$DOWNLOAD_URL" -v len="$LENGTH" -v sig="$ED_SIGNATURE" '
-/<channel>/ && !inserted {
-    print
-    print "        <item>"
-    print "            <title>" ver "</title>"
-    print "            <pubDate>" pub "</pubDate>"
-    print "            <sparkle:shortVersionString>" ver "</sparkle:shortVersionString>"
-    print "            <sparkle:version>" ver "</sparkle:version>"
-    print "            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>"
-    print "            <enclosure url=\"" url "\" length=\"" len "\" type=\"application/octet-stream\" sparkle:edSignature=\"" sig "\"/>"
-    print "        </item>"
-    inserted = 1
-    next
-}
-{ print }
-' appcast.xml > "$TMP_APPCAST"
+ITEM_BLOCK=$(cat <<XML
+        <item>
+            <title>$VERSION</title>
+            <pubDate>$PUB_DATE</pubDate>
+            <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+            <sparkle:version>$VERSION</sparkle:version>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure url="$DOWNLOAD_URL" length="$LENGTH" type="application/octet-stream" sparkle:edSignature="$ED_SIGNATURE"/>
+        </item>
+XML
+)
+HAS_EXISTING_ITEM=$(grep -c '<item>' appcast.xml || true)
+if [[ "$HAS_EXISTING_ITEM" -gt 0 ]]; then
+    awk -v block="$ITEM_BLOCK" '
+        /<item>/ && !inserted { print block; inserted = 1 }
+        { print }
+    ' appcast.xml > "$TMP_APPCAST"
+else
+    awk -v block="$ITEM_BLOCK" '
+        /<\/channel>/ && !inserted { print block; inserted = 1 }
+        { print }
+    ' appcast.xml > "$TMP_APPCAST"
+fi
 mv "$TMP_APPCAST" appcast.xml
 
 # ==========================================================================
