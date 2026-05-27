@@ -118,7 +118,21 @@ info "Step 2/10: Building release + bundling .app"
 # ==========================================================================
 if [[ $SKIP_NOTARIZE -eq 0 ]]; then
     info "Step 3/10: Codesigning with $CODESIGN_IDENTITY"
-    codesign --force --deep --options runtime --timestamp \
+    # Sign nested Sparkle helpers first (deepest → shallowest), then the
+    # main app last. --deep is deprecated; this is the modern approach
+    # Apple's notary service expects.
+    SPARKLE_VERSION_DIR="${APP_PATH}/Contents/Frameworks/Sparkle.framework/Versions/B"
+    for target in \
+        "${SPARKLE_VERSION_DIR}/XPCServices/Downloader.xpc" \
+        "${SPARKLE_VERSION_DIR}/XPCServices/Installer.xpc" \
+        "${SPARKLE_VERSION_DIR}/Autoupdate" \
+        "${SPARKLE_VERSION_DIR}/Updater.app" \
+        "${APP_PATH}/Contents/Frameworks/Sparkle.framework"
+    do
+        [[ -e "$target" ]] || continue
+        codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$target"
+    done
+    codesign --force --options runtime --timestamp \
         --entitlements Resources/pgBrain.entitlements \
         --sign "$CODESIGN_IDENTITY" \
         "$APP_PATH"
