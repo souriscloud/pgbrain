@@ -1,6 +1,14 @@
 <?xml version="1.0" standalone="yes"?>
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
+        <item>
+            <title>0.0.2</title>
+            <pubDate>Wed, 27 May 2026 23:32:23 +0200</pubDate>
+            <sparkle:shortVersionString>0.0.2</sparkle:shortVersionString>
+            <sparkle:version>0.0.2</sparkle:version>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.0.2/pgBrain-0.0.2.dmg" length="9315627" type="application/octet-stream" sparkle:edSignature="uY4cdVRT3OAOYXAeaolEq9SBr7logFRnyC7T002eY4FAOAZ+5kPTUmgtgqAWgeOUiSVlMpuqXcb2CaVENpMODw=="/>
+        </item>
         <title>pgBrain</title>
         <description>Native macOS PostgreSQL GUI</description>
         <link>https://github.com/souriscloud/pgbrain</link>

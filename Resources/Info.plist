@@ -2,51 +2,47 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleExecutable</key>
-    <string>pgBrain</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIdentifier</key>
-    <string>cloud.souris.pgbrain</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>pgBrain</string>
-    <key>CFBundleDisplayName</key>
-    <string>pgBrain</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.0.1</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>CFBundleSignature</key>
-    <string>????</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.developer-tools</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>© Souris.CLOUD</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSSupportsAutomaticTermination</key>
-    <false/>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <!-- Sparkle (iter-12). Appcast lives in the repo on GitHub; raw URL is
-         served by GitHub's CDN. The public EdDSA key matches the private
-         key in the developer's macOS Keychain (Sparkle's generate_keys
-         stores it there) — same key used across souris.cloud apps. -->
-    <key>SUFeedURL</key>
-    <string>https://raw.githubusercontent.com/souriscloud/pgbrain/main/appcast.xml</string>
-    <key>SUPublicEDKey</key>
-    <string>4uTQZEdMy3jrq7GANt1oiPJuTk1q5pKHJLf6xMjiWz8=</string>
-    <key>SUEnableAutomaticChecks</key>
-    <true/>
-    <key>SUScheduledCheckInterval</key>
-    <integer>86400</integer>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>pgBrain</string>
+	<key>CFBundleExecutable</key>
+	<string>pgBrain</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>cloud.souris.pgbrain</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>pgBrain</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.0.2</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>2</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>© Souris.CLOUD</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/souriscloud/pgbrain/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>4uTQZEdMy3jrq7GANt1oiPJuTk1q5pKHJLf6xMjiWz8=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>
