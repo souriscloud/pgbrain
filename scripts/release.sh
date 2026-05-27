@@ -110,6 +110,10 @@ success "Preflight passed"
 info "Step 1/10: Bumping version ($BUMP_KIND)"
 NEW=$(./scripts/bump.sh "$BUMP_KIND")
 VERSION=$(echo "$NEW" | awk '{print $1}')
+# CFBundleVersion (build number) — Sparkle compares <sparkle:version> as a
+# monotonic integer build, NOT as the marketing version. Reading it back
+# directly from Info.plist after bump.sh has incremented it.
+BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")
 
 if git rev-parse "v$VERSION" >/dev/null 2>&1; then
     git checkout -- "$PLIST" || true
@@ -225,8 +229,8 @@ cat > "$ITEM_FILE" <<XML
         <item>
             <title>$VERSION</title>
             <pubDate>$PUB_DATE</pubDate>
+            <sparkle:version>$BUILD</sparkle:version>
             <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
-            <sparkle:version>$VERSION</sparkle:version>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <enclosure url="$DOWNLOAD_URL" length="$LENGTH" type="application/octet-stream" sparkle:edSignature="$ED_SIGNATURE"/>
         </item>
