@@ -102,6 +102,28 @@ Fixed in the awk script: items insert before the first existing `<item>` (newest
 
 ---
 
+## Before running release.sh — mandatory smoke test
+
+Two production releases (v0.0.2 and v0.0.3) shipped with crashes that 30 seconds of clicking would have caught. Don't skip this:
+
+```bash
+./scripts/bundle.sh release
+open build/pgBrain.app
+```
+
+Then **manually**:
+1. Welcome window appears → click **New Connection** → fill in any host → click **Save**.
+2. Double-click the row to open the connection window.
+3. Wait 1–2 seconds — close the connection window. (This is what tripped v0.0.3's `SessionStateStore.scheduleSnapshot` isolation crash.)
+4. Open **About pgBrain** from the menu bar.
+5. Right-click the menu-bar icon → **Quit**.
+
+If the app survives all five steps without crashing, you've covered: launch, sheet present, ConnectionService init, window register, SessionStateStore debounce fire, window close, menu bar interaction, quit. That's where every recent regression has lived.
+
+Only then run `./scripts/release.sh patch`.
+
+---
+
 ## After a release
 
 - Check https://github.com/souriscloud/pgbrain/releases/latest looks right.

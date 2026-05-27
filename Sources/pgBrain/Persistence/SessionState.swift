@@ -59,8 +59,14 @@ final class SessionStateStore {
     static let shared = SessionStateStore()
 
     private let url: URL
+    /// Disk-write queue. Used only inside `snapshotAndPersist` for the
+    /// actual JSON file write — the *debounce* is now a Task that stays on
+    /// the main actor so Swift 6's isolation runtime check doesn't fire
+    /// when crossing back from a non-main DispatchQueue into a `@MainActor`
+    /// closure (that would trap as
+    /// `dispatch_assert_queue` from `_swift_task_checkIsolatedSwift`).
     private let writeQueue = DispatchQueue(label: "cloud.souris.pgbrain.session", qos: .utility)
-    private var debounceItem: DispatchWorkItem?
+    private var debounceTask: Task<Void, Never>?
     private(set) var lastLoaded: SessionState?
 
     private init() {
@@ -76,17 +82,17 @@ final class SessionStateStore {
     }
 
     /// Capture the current set of open windows + their tab state from the
-    /// shared `AppDelegate.windowManager`. Schedule a debounced write to
-    /// `state.json`.
+    /// shared `AppDelegate.windowManager`. Debounces via a single Task —
+    /// repeat calls within `delay` cancel the previous one. The actual
+    /// disk write is hopped to `writeQueue` from inside
+    /// `snapshotAndPersist`.
     func scheduleSnapshot(delay: TimeInterval = 0.5) {
-        debounceItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            Task { @MainActor in
-                self?.snapshotAndPersist()
-            }
+        debounceTask?.cancel()
+        debounceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            if Task.isCancelled { return }
+            self?.snapshotAndPersist()
         }
-        debounceItem = item
-        writeQueue.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     private func snapshotAndPersist() {
