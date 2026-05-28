@@ -13,10 +13,18 @@ struct ConnectionEditorView: View {
     let onSave: (Connection, String) -> Void
     let onCancel: () -> Void
 
-    init(connection: Connection?, onSave: @escaping (Connection, String) -> Void, onCancel: @escaping () -> Void) {
+    init(
+        connection: Connection?,
+        initialPassword: String? = nil,
+        onSave: @escaping (Connection, String) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
         let initial = connection ?? Connection(name: "Local Postgres", host: "localhost", database: "postgres", username: NSUserName())
         _connection = State(initialValue: initial)
-        _password = State(initialValue: Keychain.password(for: initial.id) ?? "")
+        // `initialPassword` wins (used by the Welcome paste-import
+        // path so the user sees the pasted secret before they hit
+        // Save). Falls back to the Keychain entry for `.edit`.
+        _password = State(initialValue: initialPassword ?? Keychain.password(for: initial.id) ?? "")
         self.onSave = onSave
         self.onCancel = onCancel
     }
@@ -51,8 +59,43 @@ struct ConnectionEditorView: View {
                     .clipShape(RoundedRectangle(cornerRadius: Tokens.Corner.chip))
             }
             Spacer()
+            // Quick-import: paste a pgBrain exchange JSON from the
+            // clipboard and the editor's fields fill in. Button is
+            // dimmed when the pasteboard doesn't carry a recognisable
+            // payload. ⌘V on this button also triggers the same path
+            // (any-key for accessibility).
+            Button {
+                pasteFromClipboard()
+            } label: {
+                Label("Paste", systemImage: "doc.on.clipboard")
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Paste a pgBrain exchange JSON from the clipboard to fill the fields")
+            .keyboardShortcut("v", modifiers: [.command, .shift])
         }
         .padding(Tokens.Spacing.lg)
+    }
+
+    /// Look at the pasteboard for the canonical exchange JSON. If
+    /// found, copy each field into the bound `connection`. We don't
+    /// auto-fire on the editor opening — too magical — but ⌘⇧V or the
+    /// header button both reach this path.
+    private func pasteFromClipboard() {
+        guard let raw = NSPasteboard.general.string(forType: .string),
+              let imported = ConnectionExchange.parse(raw)
+        else { return }
+        // Preserve the existing id (so "Edit…" doesn't clobber the
+        // saved connection's identity), but copy everything else.
+        let existingID = connection.id
+        connection = imported.connection
+        connection.id = existingID
+        if let pw = imported.password {
+            // Drop into the editor's local password field so the user
+            // sees what was imported before they hit Save.
+            password = pw
+        }
     }
 
     private var form: some View {

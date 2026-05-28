@@ -80,7 +80,11 @@ private struct TypedEditor: View {
         self.onSetNull = onSetNull
         self.onCancel = onCancel
         let raw = initialValue ?? ""
-        _text = State(initialValue: raw)
+        // Open JSON values pre-prettified so multi-key objects are
+        // readable. Falls through to the raw text when parsing fails
+        // (invalid JSON / partial draft) — never destructive.
+        let initial = (kind == .json) ? (JSONFormatter.pretty(raw) ?? raw) : raw
+        _text = State(initialValue: initial)
         _date = State(initialValue: Self.parseDate(raw) ?? Date())
         _bool = State(initialValue: Self.parseBool(raw) ?? false)
     }
@@ -148,9 +152,25 @@ private struct TypedEditor: View {
                 .datePickerStyle(.field)
         case .json:
             VStack(alignment: .leading, spacing: 4) {
-                Text("JSON")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                HStack(spacing: 6) {
+                    Text("JSON")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    jsonValidityChip
+                    Spacer()
+                    Button("Prettify") {
+                        if let pretty = JSONFormatter.pretty(text) { text = pretty }
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .disabled(JSONFormatter.isValid(text) == false)
+                    Button("Minify") {
+                        if let compact = JSONFormatter.compact(text) { text = compact }
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .disabled(JSONFormatter.isValid(text) == false)
+                }
                 TextEditor(text: $text)
                     .font(.system(.body, design: .monospaced))
                     .scrollContentBackground(.hidden)
@@ -188,8 +208,35 @@ private struct TypedEditor: View {
             let f = DateFormatter()
             f.dateFormat = "yyyy-MM-dd HH:mm:ss"
             onSave(f.string(from: date))
+        case .json:
+            // Strip the editor's display whitespace before persisting.
+            // The grid keeps a single compact line in storage; rendering
+            // back-formats on next open. Invalid JSON falls through to
+            // raw save so the server returns a clear parse error
+            // instead of us silently dropping the user's text.
+            onSave(JSONFormatter.compact(text) ?? text)
         default:
             onSave(text)
+        }
+    }
+
+    /// "✓ Valid" / "⚠ Invalid" tag next to the JSON label. Empty text
+    /// shows nothing — we don't want to scream at a blank editor.
+    @ViewBuilder
+    private var jsonValidityChip: some View {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            if JSONFormatter.isValid(text) {
+                Label("Valid", systemImage: "checkmark.circle.fill")
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+            } else {
+                Label("Invalid", systemImage: "exclamationmark.triangle.fill")
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
         }
     }
 

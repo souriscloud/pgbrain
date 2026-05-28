@@ -18,12 +18,44 @@ struct DataGridView: NSViewRepresentable {
     /// rendering paints them with a fading green tint for a few seconds
     /// so the user can see exactly what landed.
     var appliedHighlights: Set<EditBuffer.CellKey> = []
+    /// Maps each visible grid row index back to its index in the
+    /// unfiltered loaded page — so edits + applies still target the
+    /// correct underlying row when a filter is active. Identity map
+    /// `[0,1,2…]` when no filter is applied.
+    var sourceRowIndices: [Int] = []
+    /// Returns the desired arrow indicator for a header column based on
+    /// the parent's active `ORDER BY` clause. Passed as a function
+    /// (rather than a precomputed dict) so the parent can derive it
+    /// however it wants — a parser, a regex, or a per-column lookup.
+    var sortDirectionFor: ((String) -> TypedHeaderCell.SortDirection)? = nil
+    /// Header click handler — receives the column name and the next
+    /// desired direction (cycle is owned by the coordinator).
+    var onHeaderClick: ((String, TypedHeaderCell.SortDirection) -> Void)? = nil
+    /// Row-level actions surfaced via the right-click menu. Receivers
+    /// produce SQL into the user's clipboard.
+    var onCopyRowAsInsert: ((Int) -> Void)? = nil
+    var onCopyRowAsDelete: ((Int) -> Void)? = nil
+    var onDuplicateRow: ((Int) -> Void)? = nil
 
     @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         var page: RowsFetcher.Page
         var editBuffer: EditBuffer?
         var appliedHighlights: Set<EditBuffer.CellKey> = []
+        var sourceRowIndices: [Int] = []
+        var sortDirectionFor: ((String) -> TypedHeaderCell.SortDirection)?
+        var onHeaderClick: ((String, TypedHeaderCell.SortDirection) -> Void)?
+        var onCopyRowAsInsert: ((Int) -> Void)?
+        var onCopyRowAsDelete: ((Int) -> Void)?
+        var onDuplicateRow: ((Int) -> Void)?
+
+        /// Keyboard-focused cell (visible-row index + data-column index,
+        /// where data-column-index excludes the row-gutter column 0).
+        /// The grid draws a violet ring around this cell and arrow keys
+        /// move it.
+        var focusedRow: Int? = nil
+        var focusedDataCol: Int? = nil
+
         weak var tableView: NSTableView?
         @ObservationIgnored var observationTask: Task<Void, Never>?
 
@@ -31,6 +63,11 @@ struct DataGridView: NSViewRepresentable {
             self.page = page
             self.editBuffer = editBuffer
         }
+
+        /// Identifier of the synthetic leftmost row-number column. The
+        /// data columns use stable keyed identifiers; this one is special
+        /// and gets a dedicated cell view.
+        static let gutterColumnID = "__pgbrain_row_index__"
 
         // Map column identifier → index for O(1) row lookup.
         private var indexByID: [String: Int] = [:]
@@ -44,18 +81,36 @@ struct DataGridView: NSViewRepresentable {
 
         func numberOfRows(in tableView: NSTableView) -> Int { page.rows.count }
 
+        /// Source-row index for a visible row, falling back to identity
+        /// when no filter is active so callers can always read this.
+        func sourceIndex(forVisibleRow row: Int) -> Int {
+            if row >= 0, row < sourceRowIndices.count { return sourceRowIndices[row] }
+            return row
+        }
+
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-            guard let columnID = tableColumn?.identifier.rawValue,
-                  let colIdx = indexByID[columnID] else { return nil }
+            let columnID = tableColumn?.identifier.rawValue ?? ""
+            if columnID == Self.gutterColumnID {
+                let cell = reuseGutterCell(in: tableView)
+                cell.configure(
+                    rowNumber: sourceIndex(forVisibleRow: row) + 1,
+                    isFocused: focusedRow == row
+                )
+                return cell
+            }
+            guard let colIdx = indexByID[columnID] else { return nil }
             let column = page.columns[colIdx]
+            let sourceRow = sourceIndex(forVisibleRow: row)
             let original = page.rows[row][colIdx]
             let cell = reuseCell(in: tableView)
-            let isApplied = appliedHighlights.contains(EditBuffer.CellKey(row: row, column: colIdx))
+            let isApplied = appliedHighlights.contains(EditBuffer.CellKey(row: sourceRow, column: colIdx))
+            let isFocused = focusedRow == row && focusedDataCol == colIdx
             cell.configure(
-                value: effectiveValue(row: row, col: colIdx, original: original),
+                value: effectiveValue(sourceRow: sourceRow, col: colIdx, original: original),
                 column: column,
-                isDirty: editBuffer?.isDirty(row: row, column: colIdx) ?? false,
+                isDirty: editBuffer?.isDirty(row: sourceRow, column: colIdx) ?? false,
                 isRecentlyApplied: isApplied,
+                isFocused: isFocused,
                 editable: editBuffer != nil
             )
             // Inline edit removed; popover is the only edit path.
@@ -63,14 +118,109 @@ struct DataGridView: NSViewRepresentable {
             return cell
         }
 
-        func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { 22 }
+        func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { 24 }
+
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            let id = NSUserInterfaceItemIdentifier("HoverRow")
+            if let v = tableView.makeView(withIdentifier: id, owner: self) as? HoverableRowView {
+                return v
+            }
+            let v = HoverableRowView()
+            v.identifier = id
+            return v
+        }
+
+        // MARK: - Sort header clicks
+
+        func tableView(_ tableView: NSTableView, didClick tableColumn: NSTableColumn) {
+            guard let onHeaderClick else { return }
+            let id = tableColumn.identifier.rawValue
+            if id == Self.gutterColumnID { return }
+            guard let colIdx = indexByID[id] else { return }
+            let name = page.columns[colIdx].name
+            // Cycle: unsorted → asc → desc → unsorted, derived from the
+            // current direction the parent reports for this column.
+            let current = sortDirectionFor?(name) ?? .none
+            let next: TypedHeaderCell.SortDirection
+            switch current {
+            case .none:       next = .ascending
+            case .ascending:  next = .descending
+            case .descending: next = .none
+            }
+            onHeaderClick(name, next)
+        }
+
+        // MARK: - Cell focus / keyboard nav
+
+        func moveFocus(rowDelta: Int, colDelta: Int) {
+            guard let table = tableView, page.rows.count > 0 else { return }
+            let rowCount = page.rows.count
+            let colCount = page.columns.count
+            // First press lands on (0, 0) if nothing is focused yet.
+            var r = focusedRow ?? -1
+            var c = focusedDataCol ?? -1
+            if r < 0 || c < 0 { r = 0; c = 0 } else { r += rowDelta; c += colDelta }
+            r = max(0, min(rowCount - 1, r))
+            c = max(0, min(colCount - 1, c))
+            setFocus(row: r, col: c, in: table)
+        }
+
+        func setFocus(row: Int, col: Int, in table: NSTableView) {
+            let oldRow = focusedRow
+            let oldCol = focusedDataCol
+            focusedRow = row
+            focusedDataCol = col
+            // Repaint the previously- and newly-focused rows so the ring
+            // moves cleanly. Repainting the gutter is part of this too —
+            // the gutter row number gets a tint when its row is focused.
+            var dirty: IndexSet = IndexSet()
+            if let or = oldRow { dirty.insert(or) }
+            dirty.insert(row)
+            let allCols = IndexSet(integersIn: 0..<table.numberOfColumns)
+            table.reloadData(forRowIndexes: dirty, columnIndexes: allCols)
+            // Scroll into view (data column index +1 to account for gutter).
+            table.scrollRowToVisible(row)
+            if col + 1 < table.numberOfColumns { table.scrollColumnToVisible(col + 1) }
+            _ = oldCol
+        }
+
+        func openEditorForFocus() {
+            guard let buffer = editBuffer, let table = tableView,
+                  let row = focusedRow, let col = focusedDataCol
+            else { return }
+            presentEditor(row: sourceIndex(forVisibleRow: row), col: col, in: table, buffer: buffer)
+        }
+
+        /// Serialise the current row selection (or the focused cell's row
+        /// if no selection) as TSV — values tab-separated, rows
+        /// newline-separated, NULL rendered as the empty string. Used by
+        /// ⌘C on the table view.
+        func copyAsTSV() -> String? {
+            guard let table = tableView else { return nil }
+            let selected = table.selectedRowIndexes
+            let rows: [Int] = selected.isEmpty
+                ? (focusedRow.map { [$0] } ?? [])
+                : Array(selected)
+            guard !rows.isEmpty else { return nil }
+            var out: [String] = []
+            for vis in rows {
+                guard vis >= 0, vis < page.rows.count else { continue }
+                let cells = page.rows[vis].map { $0?.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ") ?? "" }
+                out.append(cells.joined(separator: "\t"))
+            }
+            return out.joined(separator: "\n")
+        }
 
         @objc func handleDoubleClick(_ sender: Any?) {
             guard let buffer = editBuffer, let table = tableView else { return }
             let row = table.clickedRow
-            let col = table.clickedColumn
-            guard row >= 0, col >= 0 else { return }
-            presentEditor(row: row, col: col, in: table, buffer: buffer)
+            let clickedCol = table.clickedColumn
+            guard row >= 0, clickedCol >= 0 else { return }
+            // Clicked-column is in *table column space* (gutter is 0);
+            // translate to data column.
+            let dataCol = clickedCol - 1
+            guard dataCol >= 0, dataCol < page.columns.count else { return }
+            presentEditor(row: sourceIndex(forVisibleRow: row), col: dataCol, in: table, buffer: buffer)
         }
 
         /// Show the type-aware popover editor over the clicked cell. Replaces
@@ -95,13 +245,16 @@ struct DataGridView: NSViewRepresentable {
         }
 
         /// Builds the right-click context menu for the cell under the
-        /// pointer. Copy works in both editable and read-only mode; Set
-        /// NULL / Edit only when the grid is editable.
-        func contextMenu(forRow row: Int, col: Int) -> NSMenu? {
-            guard row >= 0, col >= 0, col < page.columns.count, row < page.rows.count else { return nil }
-            let column = page.columns[col]
-            let original = page.rows[row][col]
-            let displayed: String? = editBuffer?.value(row: row, column: col).flatMap { $0 } ?? original
+        /// pointer. `visibleRow` is the index in the (possibly filtered)
+        /// view; `dataCol` is the index in `page.columns`. We translate
+        /// `visibleRow` to its source-row immediately so subsequent
+        /// actions target the underlying data row.
+        func contextMenu(forVisibleRow visibleRow: Int, dataCol: Int) -> NSMenu? {
+            guard visibleRow >= 0, dataCol >= 0, dataCol < page.columns.count, visibleRow < page.rows.count else { return nil }
+            let sourceRow = sourceIndex(forVisibleRow: visibleRow)
+            let column = page.columns[dataCol]
+            let original = page.rows[visibleRow][dataCol]
+            let displayed: String? = editBuffer?.value(row: sourceRow, column: dataCol).flatMap { $0 } ?? original
 
             let menu = NSMenu()
             let copy = NSMenuItem(title: "Copy value", action: #selector(handleCopy(_:)), keyEquivalent: "")
@@ -114,16 +267,31 @@ struct DataGridView: NSViewRepresentable {
             copyName.representedObject = column.name
             menu.addItem(copyName)
 
+            // Row-level actions live on the same menu when the grid has
+            // a primary key + edit buffer (i.e. this is a real table).
             if editBuffer != nil {
                 menu.addItem(.separator())
-                let edit = NSMenuItem(title: "Edit…", action: #selector(handleEditMenu(_:)), keyEquivalent: "")
+                let asInsert = NSMenuItem(title: "Copy row as INSERT", action: #selector(handleRowInsert(_:)), keyEquivalent: "")
+                asInsert.target = self
+                asInsert.representedObject = sourceRow
+                menu.addItem(asInsert)
+                let asDelete = NSMenuItem(title: "Copy row as DELETE", action: #selector(handleRowDelete(_:)), keyEquivalent: "")
+                asDelete.target = self
+                asDelete.representedObject = sourceRow
+                menu.addItem(asDelete)
+                let dup = NSMenuItem(title: "Duplicate row (INSERT to clipboard)", action: #selector(handleRowDuplicate(_:)), keyEquivalent: "")
+                dup.target = self
+                dup.representedObject = sourceRow
+                menu.addItem(dup)
+                menu.addItem(.separator())
+                let edit = NSMenuItem(title: "Edit cell…", action: #selector(handleEditMenu(_:)), keyEquivalent: "")
                 edit.target = self
-                edit.representedObject = CellLocator(row: row, col: col)
+                edit.representedObject = CellLocator(row: sourceRow, col: dataCol)
                 menu.addItem(edit)
                 if column.nullable {
                     let setNull = NSMenuItem(title: "Set NULL", action: #selector(handleSetNull(_:)), keyEquivalent: "")
                     setNull.target = self
-                    setNull.representedObject = CellLocator(row: row, col: col)
+                    setNull.representedObject = CellLocator(row: sourceRow, col: dataCol)
                     menu.addItem(setNull)
                 }
             }
@@ -149,23 +317,36 @@ struct DataGridView: NSViewRepresentable {
 
         @objc private func handleSetNull(_ sender: NSMenuItem) {
             guard let loc = sender.representedObject as? CellLocator,
-                  let buffer = editBuffer else { return }
-            let original = page.rows[loc.row][loc.col]
+                  let _ = editBuffer else { return }
+            // `loc.row` is already a source-row index — see contextMenu.
+            // Walk the visible rows to find the original cell value.
+            let visibleRow = sourceRowIndices.firstIndex(of: loc.row) ?? loc.row
+            let original = page.rows[visibleRow][loc.col]
             commit(row: loc.row, col: loc.col, original: original, newValue: nil)
             tableView?.reloadData()
         }
 
-        /// When the buffer has a pending edit for this cell, show it (which
-        /// may be `nil` for an explicit Set NULL). Otherwise fall back to
-        /// the server value. The earlier implementation used
-        /// `flatMap({ $0 })` on a `String??`, which collapses
-        /// `.some(.none)` (Set NULL) back to `.none` and made the cell
-        /// silently keep showing the old value until Apply landed.
-        private func effectiveValue(row: Int, col: Int, original: String?) -> String? {
+        @objc private func handleRowInsert(_ sender: NSMenuItem) {
+            guard let r = sender.representedObject as? Int else { return }
+            onCopyRowAsInsert?(r)
+        }
+
+        @objc private func handleRowDelete(_ sender: NSMenuItem) {
+            guard let r = sender.representedObject as? Int else { return }
+            onCopyRowAsDelete?(r)
+        }
+
+        @objc private func handleRowDuplicate(_ sender: NSMenuItem) {
+            guard let r = sender.representedObject as? Int else { return }
+            onDuplicateRow?(r)
+        }
+
+        /// When the buffer has a pending edit for the source row, show it
+        /// (which may be `nil` for an explicit Set NULL). Otherwise fall
+        /// back to the server value.
+        private func effectiveValue(sourceRow: Int, col: Int, original: String?) -> String? {
             guard let buffer = editBuffer else { return original }
-            // `buffer.value` returns String??: outer .some/.none = is-dirty,
-            // inner .some/.none = the pending value (.none meaning NULL).
-            if case .some(let pending) = buffer.value(row: row, column: col) {
+            if case .some(let pending) = buffer.value(row: sourceRow, column: col) {
                 return pending
             }
             return original
@@ -198,10 +379,16 @@ struct DataGridView: NSViewRepresentable {
             reloadRow(row)
         }
 
-        private func reloadRow(_ row: Int) {
-            guard let table = tableView, row >= 0, row < table.numberOfRows else { return }
+        private func reloadRow(_ sourceRow: Int) {
+            guard let table = tableView else { return }
+            // Find the visible row that maps to this source row.
+            let visibleRow: Int = {
+                if sourceRowIndices.isEmpty { return sourceRow }
+                return sourceRowIndices.firstIndex(of: sourceRow) ?? sourceRow
+            }()
+            guard visibleRow >= 0, visibleRow < table.numberOfRows else { return }
             let cols = IndexSet(integersIn: 0..<table.numberOfColumns)
-            table.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: cols)
+            table.reloadData(forRowIndexes: IndexSet(integer: visibleRow), columnIndexes: cols)
         }
 
         private func reuseCell(in tableView: NSTableView) -> DataCellView {
@@ -213,6 +400,16 @@ struct DataGridView: NSViewRepresentable {
             v.identifier = id
             return v
         }
+
+        private func reuseGutterCell(in tableView: NSTableView) -> RowNumberCellView {
+            let id = NSUserInterfaceItemIdentifier("RowNumberCell")
+            if let reused = tableView.makeView(withIdentifier: id, owner: self) as? RowNumberCellView {
+                return reused
+            }
+            let v = RowNumberCellView()
+            v.identifier = id
+            return v
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -221,22 +418,47 @@ struct DataGridView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let table = EditableTableView()
-        table.usesAlternatingRowBackgroundColors = true
+        // Modern look: skip the system "alternating row backgrounds"
+        // (loud against dark mode, looks like a Tiger-era table) and
+        // turn off NSTableView's built-in solid-blue selection bar in
+        // favour of the soft tint our HoverableRowView paints itself.
+        table.usesAlternatingRowBackgroundColors = false
         table.gridStyleMask = [.solidHorizontalGridLineMask]
-        table.gridColor = NSColor.separatorColor.withAlphaComponent(0.25)
+        table.gridColor = NSColor.separatorColor.withAlphaComponent(0.18)
         table.allowsColumnReordering = true
         table.allowsColumnResizing = true
         table.columnAutoresizingStyle = .noColumnAutoresizing
         table.allowsMultipleSelection = true
+        // Keep `selectionHighlightStyle` at its default (`.regular`):
+        // forcing `.none` here disabled NSTableView's hit-test path
+        // on macOS 15, which silently broke double-click editing.
+        // `HoverableRowView` still overrides `drawSelection(in:)` to
+        // paint a soft accent wash instead of the system blue bar, so
+        // the visuals stay modern even though the selection model is
+        // the standard one.
         // Small horizontal gap so column boundaries read as boundaries
         // instead of letting cells touch and look like one mash.
-        table.intercellSpacing = NSSize(width: 6, height: 0)
+        table.intercellSpacing = NSSize(width: 8, height: 0)
         table.rowSizeStyle = .custom
-        table.style = .inset
+        table.style = .plain
+        table.backgroundColor = .clear
         table.headerView = TypedHeaderView()
         table.editBufferProvider = { [weak coord = context.coordinator] in coord?.editBuffer }
-        table.contextMenuProvider = { [weak coord = context.coordinator] row, col in
-            coord?.contextMenu(forRow: row, col: col)
+        table.contextMenuProvider = { [weak coord = context.coordinator] visibleRow, tableCol in
+            // tableCol is in *table-column space* (gutter = 0); we want
+            // a data-column index. Empty area / gutter column returns nil.
+            let dataCol = tableCol - 1
+            guard dataCol >= 0 else { return nil }
+            return coord?.contextMenu(forVisibleRow: visibleRow, dataCol: dataCol)
+        }
+        table.onArrowMove = { [weak coord = context.coordinator] rdelta, cdelta in
+            coord?.moveFocus(rowDelta: rdelta, colDelta: cdelta)
+        }
+        table.onEnterKey = { [weak coord = context.coordinator] in
+            coord?.openEditorForFocus()
+        }
+        table.tsvCopyProvider = { [weak coord = context.coordinator] in
+            coord?.copyAsTSV()
         }
 
         applyColumns(to: table, coordinator: context.coordinator)
@@ -246,6 +468,7 @@ struct DataGridView: NSViewRepresentable {
         table.doubleAction = #selector(Coordinator.handleDoubleClick(_:))
         context.coordinator.rebuildIndex()
         context.coordinator.tableView = table
+        propagateState(to: context.coordinator)
 
         let scroll = NSScrollView()
         scroll.documentView = table
@@ -256,6 +479,15 @@ struct DataGridView: NSViewRepresentable {
         return scroll
     }
 
+    private func propagateState(to coordinator: Coordinator) {
+        coordinator.sourceRowIndices = sourceRowIndices
+        coordinator.sortDirectionFor = sortDirectionFor
+        coordinator.onHeaderClick = onHeaderClick
+        coordinator.onCopyRowAsInsert = onCopyRowAsInsert
+        coordinator.onCopyRowAsDelete = onCopyRowAsDelete
+        coordinator.onDuplicateRow = onDuplicateRow
+    }
+
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let table = scroll.documentView as? EditableTableView else { return }
         let identityChanged = !columnsMatch(coordinator: context.coordinator, new: page.columns)
@@ -264,17 +496,66 @@ struct DataGridView: NSViewRepresentable {
         context.coordinator.editBuffer = editBuffer
         context.coordinator.appliedHighlights = appliedHighlights
         context.coordinator.rebuildIndex()
+        propagateState(to: context.coordinator)
+        // Clear focus on identity / row-count changes — anchoring it to
+        // a row that's no longer present would be confusing.
+        if identityChanged || sourceRowIndices.count != table.numberOfRows {
+            context.coordinator.focusedRow = nil
+            context.coordinator.focusedDataCol = nil
+        }
         table.editBufferProvider = { [weak coord = context.coordinator] in coord?.editBuffer }
-        table.contextMenuProvider = { [weak coord = context.coordinator] row, col in
-            coord?.contextMenu(forRow: row, col: col)
+        table.contextMenuProvider = { [weak coord = context.coordinator] visibleRow, tableCol in
+            let dataCol = tableCol - 1
+            guard dataCol >= 0 else { return nil }
+            return coord?.contextMenu(forVisibleRow: visibleRow, dataCol: dataCol)
+        }
+        table.onArrowMove = { [weak coord = context.coordinator] rdelta, cdelta in
+            coord?.moveFocus(rowDelta: rdelta, colDelta: cdelta)
+        }
+        table.onEnterKey = { [weak coord = context.coordinator] in
+            coord?.openEditorForFocus()
+        }
+        table.tsvCopyProvider = { [weak coord = context.coordinator] in
+            coord?.copyAsTSV()
         }
         if identityChanged || editableChanged {
             // Remove all columns and re-add — happens on tab swap or when
             // the editability of the grid flips.
             for col in table.tableColumns { table.removeTableColumn(col) }
             applyColumns(to: table, coordinator: context.coordinator)
+        } else {
+            // Refresh header arrows in case the parent's ORDER BY moved.
+            updateHeaderSortIndicators(table: table)
         }
         table.reloadData()
+    }
+
+    private func updateHeaderSortIndicators(table: NSTableView) {
+        // Build a fresh TypedHeaderCell with the new sort direction
+        // baked in. We can't mutate the existing cell — it has no
+        // Swift fields by design (see the type's doc comment for the
+        // NSCell-copy crash this avoids).
+        for (i, tableCol) in table.tableColumns.enumerated() {
+            if tableCol.identifier.rawValue == Coordinator.gutterColumnID { continue }
+            let dataIdx = i - 1
+            guard dataIdx >= 0, dataIdx < page.columns.count else { continue }
+            let col = page.columns[dataIdx]
+            let kind = ColumnTypeKind.from(typeName: col.typeName)
+            tableCol.headerCell = TypedHeaderCell(
+                title: col.name,
+                typeLabel: col.typeName,
+                alignment: headerAlignment(for: kind),
+                sortDirection: sortDirectionFor?(col.name) ?? .none
+            )
+        }
+        table.headerView?.needsDisplay = true
+    }
+
+    private func nameForColumn(identifier: String) -> String {
+        if let underscore = identifier.firstIndex(of: "_") {
+            return String(identifier[identifier.index(after: underscore)...])
+        }
+        return identifier
     }
 
     private func columnsMatch(coordinator: Coordinator, new: [ColumnNode]) -> Bool {
@@ -283,6 +564,17 @@ struct DataGridView: NSViewRepresentable {
     }
 
     private func applyColumns(to table: NSTableView, coordinator: Coordinator) {
+        // Gutter first — fixed width, no resize, no reorder. The header
+        // cell is empty since this column isn't a data column.
+        let gutter = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(Coordinator.gutterColumnID))
+        gutter.minWidth = 48
+        gutter.width = 48
+        gutter.maxWidth = 64
+        gutter.isEditable = false
+        gutter.headerCell = NSTableHeaderCell(textCell: "")
+        gutter.resizingMask = []
+        table.addTableColumn(gutter)
+
         let editable = coordinator.editBuffer != nil
         for (i, col) in page.columns.enumerated() {
             let identifier = NSUserInterfaceItemIdentifier("\(i)_\(col.name)")
@@ -293,13 +585,16 @@ struct DataGridView: NSViewRepresentable {
             column.isEditable = editable
             let kind = ColumnTypeKind.from(typeName: col.typeName)
             // Custom header cell: column name on top, PG type as small
-            // uppercase tag underneath. Far more scannable than a single
-            // title row when you have 15+ columns.
-            column.headerCell = TypedHeaderCell(
+            // uppercase tag underneath, with an optional sort glyph.
+            // Sort direction is baked in at construction — NSCell
+            // copies don't carry Swift fields (see TypedHeaderCell).
+            let cell = TypedHeaderCell(
                 title: col.name,
                 typeLabel: col.typeName,
-                alignment: headerAlignment(for: kind)
+                alignment: headerAlignment(for: kind),
+                sortDirection: sortDirectionFor?(col.name) ?? .none
             )
+            column.headerCell = cell
             table.addTableColumn(column)
         }
     }
@@ -336,18 +631,51 @@ final class EditableTableView: NSTableView {
     /// can read the current page + edit buffer without us re-plumbing
     /// state into this subclass.
     var contextMenuProvider: ((Int, Int) -> NSMenu?)?
+    /// Keyboard navigation hook — called with (rowDelta, colDelta).
+    var onArrowMove: ((Int, Int) -> Void)?
+    /// Called when Return/Enter is pressed on the focused cell.
+    var onEnterKey: (() -> Void)?
+    /// Called to produce TSV for the current selection; result lands on
+    /// the system pasteboard.
+    var tsvCopyProvider: (() -> String?)?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let isCmdZ = event.modifierFlags.contains(.command)
-            && !event.modifierFlags.contains(.shift)
-            && (event.charactersIgnoringModifiers ?? "") == "z"
-        if isCmdZ, let buffer = editBufferProvider?(), buffer.canUndo {
-            _ = buffer.undo()
-            reloadData()
-            return true
+        let chars = event.charactersIgnoringModifiers ?? ""
+        let cmd = event.modifierFlags.contains(.command)
+        let shift = event.modifierFlags.contains(.shift)
+        if cmd, !shift, chars == "z" {
+            if let buffer = editBufferProvider?(), buffer.canUndo {
+                _ = buffer.undo()
+                reloadData()
+                return true
+            }
+        }
+        // ⌘C → TSV of the current selection (rows × visible data columns).
+        if cmd, !shift, chars == "c" {
+            if let tsv = tsvCopyProvider?(), !tsv.isEmpty {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(tsv, forType: .string)
+                return true
+            }
         }
         return super.performKeyEquivalent(with: event)
     }
+
+    override func keyDown(with event: NSEvent) {
+        // Arrow keys move the cell-focus; Enter opens the popover.
+        switch event.keyCode {
+        case 123: onArrowMove?(0, -1); return  // ←
+        case 124: onArrowMove?(0, 1);  return  // →
+        case 125: onArrowMove?(1, 0);  return  // ↓
+        case 126: onArrowMove?(-1, 0); return  // ↑
+        case 36, 76:  // Return / numpad Enter
+            onEnterKey?(); return
+        default: break
+        }
+        super.keyDown(with: event)
+    }
+
+    override var acceptsFirstResponder: Bool { true }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let point = convert(event.locationInWindow, from: nil)
@@ -362,6 +690,104 @@ final class EditableTableView: NSTableView {
     }
 }
 
+/// Row view that paints subtle hover + selection tints. NSTableView's
+/// built-in `.inset` selection is a loud solid-blue bar (very
+/// pre-modern); we run with `selectionHighlightStyle = .none` and
+/// draw both states ourselves with soft accent washes that read well
+/// in light and dark mode alike.
+final class HoverableRowView: NSTableRowView {
+    private var isHovered = false {
+        didSet { if oldValue != isHovered { needsDisplay = true } }
+    }
+    private var trackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea { removeTrackingArea(existing) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self, userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    override func drawBackground(in dirtyRect: NSRect) {
+        super.drawBackground(in: dirtyRect)
+        if isHovered && !isSelected {
+            NSColor.controlAccentColor.withAlphaComponent(0.06).setFill()
+            bounds.fill()
+        }
+    }
+
+    /// Replace the system's solid-blue selection bar with a soft accent
+    /// wash + a 2pt leading strip. NSTableView still drives selection
+    /// state (so double-click editing and arrow nav keep working);
+    /// we just intercept the paint here for a modern look.
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard isSelected else { return }
+        NSColor.controlAccentColor.withAlphaComponent(0.14).setFill()
+        bounds.fill()
+        NSColor.controlAccentColor.withAlphaComponent(0.85).setFill()
+        NSRect(x: 0, y: 0, width: 2, height: bounds.height).fill()
+    }
+}
+
+/// Fixed-width leftmost column showing the 1-based row number. Mirrors
+/// the JetBrains gutter — secondary background, monospaced digits,
+/// right-aligned. Highlights when its row carries the keyboard focus.
+final class RowNumberCellView: NSTableCellView {
+    private let label = NSTextField(labelWithString: "")
+    private var isFocused = false {
+        didSet { needsDisplay = true }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        label.textColor = .tertiaryLabelColor
+        label.alignment = .right
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(rowNumber: Int, isFocused: Bool) {
+        label.stringValue = String(rowNumber)
+        self.isFocused = isFocused
+        label.textColor = isFocused ? .labelColor : .tertiaryLabelColor
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // Subtle gutter band — barely-tinted relative to the data
+        // area, just enough to read as "row index". The old version
+        // used a 50%-blended controlBackgroundColor which came out
+        // near-black on dark mode and dominated the table.
+        NSColor.separatorColor.withAlphaComponent(0.06).setFill()
+        bounds.fill()
+        // Right-edge separator.
+        NSColor.separatorColor.withAlphaComponent(0.35).setFill()
+        NSRect(x: bounds.maxX - 0.5, y: 0, width: 0.5, height: bounds.height).fill()
+        if isFocused {
+            // Brand-violet accent strip on the right edge of the gutter.
+            #colorLiteral(red: 0.42, green: 0.32, blue: 0.86, alpha: 0.85).setFill()
+            NSRect(x: bounds.maxX - 2, y: 0, width: 2, height: bounds.height).fill()
+        }
+        super.draw(dirtyRect)
+    }
+}
+
 /// One reusable cell view that styles itself based on the column kind and
 /// whether the host grid is editable. Editing uses a borderless text field
 /// the table view promotes to first responder on double-click.
@@ -373,6 +799,7 @@ private final class DataCellView: NSTableCellView, NSTextFieldDelegate {
     private var isCancelling = false
     private var isDirty = false
     private var isRecentlyApplied = false
+    private var isFocused = false
     var onCommit: ((String) -> Void)?
 
     override init(frame frameRect: NSRect) {
@@ -422,11 +849,19 @@ private final class DataCellView: NSTableCellView, NSTextFieldDelegate {
             NSColor.systemGreen.setFill()
             NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
         }
+        if isFocused {
+            // Cell-level focus ring drawn inside the bounds so it isn't
+            // clipped by the intercell spacing. Brand violet.
+            let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 3, yRadius: 3)
+            path.lineWidth = 1.5
+            #colorLiteral(red: 0.42, green: 0.32, blue: 0.86, alpha: 0.9).setStroke()
+            path.stroke()
+        }
     }
 
     private var rawForEditor: String = ""
 
-    func configure(value: String?, column: ColumnNode, isDirty: Bool, isRecentlyApplied: Bool, editable: Bool) {
+    func configure(value: String?, column: ColumnNode, isDirty: Bool, isRecentlyApplied: Bool, isFocused: Bool, editable: Bool) {
         currentKind = ColumnTypeKind.from(typeName: column.typeName)
         currentValueIsNull = (value == nil)
         // Inline editing disabled — popover handles all edits. Cell stays
@@ -435,6 +870,7 @@ private final class DataCellView: NSTableCellView, NSTextFieldDelegate {
         field.isSelectable = true
         self.isDirty = isDirty
         self.isRecentlyApplied = isRecentlyApplied
+        self.isFocused = isFocused
         needsDisplay = true
 
         // Bake alignment into a paragraph style attached to the whole
@@ -451,6 +887,16 @@ private final class DataCellView: NSTableCellView, NSTextFieldDelegate {
         field.attributedStringValue = mutable
         lastConfiguredText = mutable.string
         rawForEditor = rendered.rawForEditor
+        // Hover-tooltip the full value when the rendered string is long
+        // enough to plausibly truncate. Cheaper than a real layout pass
+        // and free for the user — AppKit only shows the tooltip on a
+        // dwell, so short cells aren't bothered.
+        let full = rendered.rawForEditor
+        if full.count > 32 || full.contains("\n") {
+            self.toolTip = full
+        } else {
+            self.toolTip = nil
+        }
     }
 
     func controlTextDidBeginEditing(_ notif: Notification) {
@@ -546,21 +992,52 @@ private extension NSFont {
 /// every redraw and the default `NSCopying` doesn't carry custom Swift
 /// fields, so those copies pointed at freed memory and crashed on the
 /// second draw.
+/// Two-line header cell — bold column name on top, small uppercase PG
+/// type tag underneath, optional sort arrow on the trailing edge of the
+/// name line. **Deliberately stores zero Swift fields**: NSTableView
+/// copies header cells via `NSCell.copy(with:)` during draw cycles, and
+/// Swift stored properties on a subclass don't carry across that copy
+/// (the copy's memory for our fields is uninitialised). Touching them
+/// in a deinit chain crashes with EXC_BAD_ACCESS in `outlined destroy
+/// of String`. Everything goes into `attributedStringValue` (a real
+/// NSCell ivar that NSCopying handles correctly); sort-direction
+/// changes are applied by *replacing* the cell (see
+/// `updateHeaderSortIndicators`), not by mutating one.
 final class TypedHeaderCell: NSTableHeaderCell {
-    init(title: String, typeLabel: String, alignment: NSTextAlignment) {
+    enum SortDirection {
+        case none, ascending, descending
+        var glyph: String {
+            switch self {
+            case .none:       ""
+            case .ascending:  "  ↑"
+            case .descending: "  ↓"
+            }
+        }
+    }
+
+    init(title: String, typeLabel: String, alignment: NSTextAlignment, sortDirection: SortDirection = .none) {
         super.init(textCell: "")
         self.alignment = alignment
         let attr = NSMutableAttributedString()
         let nameAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
-            .foregroundColor: NSColor.labelColor,
+            .foregroundColor: sortDirection == .none
+                ? NSColor.labelColor
+                : #colorLiteral(red: 0.42, green: 0.32, blue: 0.86, alpha: 1.0),
         ]
         let typeAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: 9, weight: .medium),
             .foregroundColor: NSColor.tertiaryLabelColor,
             .kern: NSNumber(value: 0.4),
         ]
+        let glyphAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: #colorLiteral(red: 0.42, green: 0.32, blue: 0.86, alpha: 1.0),
+        ]
         attr.append(NSAttributedString(string: title, attributes: nameAttrs))
+        if sortDirection != .none {
+            attr.append(NSAttributedString(string: sortDirection.glyph, attributes: glyphAttrs))
+        }
         attr.append(NSAttributedString(string: "\n", attributes: nameAttrs))
         attr.append(NSAttributedString(string: typeLabel.uppercased(), attributes: typeAttrs))
         let para = NSMutableParagraphStyle()
@@ -574,7 +1051,10 @@ final class TypedHeaderCell: NSTableHeaderCell {
     required init(coder: NSCoder) { fatalError() }
 }
 
-/// Header view sized for two-line cells (column name + type tag).
+/// Header view sized for the two-line title cells (column name +
+/// uppercase PG type tag). The JetBrains-style WHERE / ORDER BY strip
+/// lives in `TableTabView` above the grid — not inside the header — so
+/// it can be a single full-width split instead of one input per column.
 final class TypedHeaderView: NSTableHeaderView {
     override var intrinsicContentSize: NSSize {
         NSSize(width: NSView.noIntrinsicMetric, height: 36)

@@ -7,12 +7,18 @@ struct WelcomeView: View {
 
     private enum EditorTarget: Identifiable {
         case new
+        /// Brand-new connection pre-filled from a pasted pgBrain
+        /// exchange payload (clipboard ⌘V on the Welcome screen).
+        /// Password is carried alongside so the Keychain write happens
+        /// on Save, just like the standard `.new` path.
+        case imported(Connection, password: String?)
         case edit(Connection)
 
         var id: String {
             switch self {
-            case .new: return "new"
-            case .edit(let c): return c.id.uuidString
+            case .new:                 return "new"
+            case .imported(let c, _):  return "imported-\(c.id.uuidString)"
+            case .edit(let c):         return c.id.uuidString
             }
         }
     }
@@ -36,10 +42,18 @@ struct WelcomeView: View {
         .frame(minWidth: Tokens.Window.welcomeSize.width,
                minHeight: Tokens.Window.welcomeSize.height)
         .sheet(item: $editorTarget) { target in
+            // `.imported` re-uses the same editor as `.new`, but
+            // pre-seeds connection + password from the exchange JSON.
+            let prefill: (Connection?, String?) = {
+                switch target {
+                case .new:                    return (nil, nil)
+                case .imported(let c, let p): return (c, p)
+                case .edit(let c):            return (c, nil)
+                }
+            }()
             ConnectionEditorView(
-                connection: {
-                    if case .edit(let c) = target { return c } else { return nil }
-                }(),
+                connection: prefill.0,
+                initialPassword: prefill.1,
                 onSave: { conn, password in
                     store.upsert(conn)
                     if !password.isEmpty {
@@ -50,6 +64,30 @@ struct WelcomeView: View {
                 onCancel: { editorTarget = nil }
             )
         }
+        .background(pasteShortcut)
+    }
+
+    /// Hidden ⌘V button — when the system clipboard carries a pgBrain
+    /// exchange JSON, opens the editor pre-filled. When it carries
+    /// anything else, the action is a no-op so paste keeps working in
+    /// whatever text field has focus (SwiftUI's keyboardShortcut
+    /// system gives focused controls precedence over hidden buttons,
+    /// but the no-op fallback covers the edge case where the Welcome
+    /// window is key but no field is focused).
+    @ViewBuilder
+    private var pasteShortcut: some View {
+        Button {
+            handlePasteAttempt()
+        } label: { EmptyView() }
+        .keyboardShortcut("v", modifiers: .command)
+        .hidden()
+    }
+
+    private func handlePasteAttempt() {
+        guard let raw = NSPasteboard.general.string(forType: .string),
+              let imported = ConnectionExchange.parse(raw)
+        else { return }
+        editorTarget = .imported(imported.connection, password: imported.password)
     }
 
     private var brandPane: some View {
@@ -162,6 +200,20 @@ struct WelcomeView: View {
                         Button("Open") { open(connection) }
                         Button("Edit…") { editorTarget = .edit(connection) }
                         Divider()
+                        Menu("Copy as") {
+                            ForEach(ConnectionExchange.Format.allCases) { fmt in
+                                Button(fmt.label) {
+                                    copyConnection(connection, format: fmt, includePassword: false)
+                                }
+                            }
+                            Divider()
+                            ForEach(ConnectionExchange.Format.allCases) { fmt in
+                                Button("\(fmt.label) — include password") {
+                                    copyConnection(connection, format: fmt, includePassword: true)
+                                }
+                            }
+                        }
+                        Divider()
                         Button("Delete", role: .destructive) {
                             store.remove(connection)
                             if selection == connection.id { selection = nil }
@@ -175,6 +227,15 @@ struct WelcomeView: View {
 
     private func open(_ connection: Connection) {
         AppDelegate.shared?.openConnection(connection)
+    }
+
+    /// Render `connection` in `format` and put the result on the
+    /// system pasteboard. Passwords stay out of the clipboard unless
+    /// the user picked the "include password" variant.
+    private func copyConnection(_ connection: Connection, format: ConnectionExchange.Format, includePassword: Bool) {
+        let text = ConnectionExchange.render(connection, format: format, includePassword: includePassword)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 }
 

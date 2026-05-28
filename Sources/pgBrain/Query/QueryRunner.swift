@@ -110,7 +110,7 @@ enum QueryRunner {
                 columns: columns,
                 rows: rows,
                 truncated: truncated,
-                limit: limit,
+                limit: limit, offset: 0,
                 elapsed: Date().timeIntervalSince(started)
             )
             let tag = formatCommandTag(result.metadata)
@@ -158,7 +158,7 @@ enum QueryRunner {
             columns: columns,
             rows: rows,
             truncated: truncated,
-            limit: limit,
+            limit: limit, offset: 0,
             elapsed: elapsed
         )
         return QueryResult(page: page, commandTag: "SELECT \(rows.count)")

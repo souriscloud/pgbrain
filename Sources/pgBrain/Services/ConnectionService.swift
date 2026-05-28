@@ -26,8 +26,28 @@ final class ConnectionService {
 
     let connection: Connection
     private(set) var state: State = .idle
+    /// Per-tab loader cache. Keeping these on the service (not in
+    /// `@State` on the tab view) makes switching tabs free — the row
+    /// page stays in memory and the user only re-fetches when they
+    /// hit the refresh button or ⌘R explicitly.
+    @ObservationIgnored private var loaderCache: [UUID: RowsLoader] = [:]
+    @ObservationIgnored private var inspectorCache: [UUID: InspectorLoader] = [:]
+    /// Raw schema as returned by the server — every namespace included.
+    /// Most callers should prefer `visibleSchema`, which strips schemas
+    /// the user has hidden via the sidebar's "Schemas" menu.
     private(set) var schema: SchemaSnapshot = .empty
     private(set) var schemaState: SchemaState = .idle
+
+    /// `schema` with hidden namespaces removed. Drives the sidebar
+    /// tree, the command palette tables/schemas categories, and the
+    /// SQL completion provider so hiding is a single source of truth.
+    var visibleSchema: SchemaSnapshot {
+        let hidden = SchemaVisibility.shared.hidden(for: connection.id)
+        if hidden.isEmpty { return schema }
+        var snap = schema
+        snap.schemas.removeAll { hidden.contains($0.name) }
+        return snap
+    }
     let workspace = WorkspaceState()
     let operations = OperationsCenter()
 
@@ -40,10 +60,38 @@ final class ConnectionService {
 
     init(connection: Connection) {
         self.connection = connection
+        // Prune cached loaders/inspectors when their tab disappears
+        // — otherwise closed-tab loaders leak for the workspace's
+        // lifetime and re-opening the same table would reuse a stale
+        // edit buffer.
+        workspace.onTabClosed = { [weak self] id in
+            self?.loaderCache.removeValue(forKey: id)
+            self?.inspectorCache.removeValue(forKey: id)
+        }
     }
 
     deinit {
         clientTask?.cancel()
+    }
+
+    /// Fetch (or lazily create) the row loader for a `.table` tab.
+    /// Same `tab.id` always returns the same instance so switching
+    /// away from + back to a tab doesn't re-fetch.
+    func loader(for tab: WorkspaceState.Tab, table: TableNode) -> RowsLoader {
+        if let cached = loaderCache[tab.id] { return cached }
+        let loader = RowsLoader(table: table, service: self)
+        loaderCache[tab.id] = loader
+        return loader
+    }
+
+    /// Inspector cache — same caching contract as `loader(for:table:)`.
+    /// The Structure / DDL panes draw from this so flipping panes
+    /// doesn't re-issue the catalog queries.
+    func inspector(for tab: WorkspaceState.Tab, table: TableNode) -> InspectorLoader {
+        if let cached = inspectorCache[tab.id] { return cached }
+        let inspector = InspectorLoader(table: table, service: self)
+        inspectorCache[tab.id] = inspector
+        return inspector
     }
 
     func start() {

@@ -10,9 +10,10 @@ enum SchemaFetcher {
         async let relations = fetchRelations(client: client)
         async let columns = fetchColumns(client: client)
         async let pks = fetchPrimaryKeys(client: client)
+        async let funcs = fetchFunctions(client: client)
 
-        let (db, rels, cols, primaryKeys) = try await (dbName, relations, columns, pks)
-        return assemble(databaseName: db, relations: rels, columns: cols, primaryKeys: primaryKeys)
+        let (db, rels, cols, primaryKeys, functions) = try await (dbName, relations, columns, pks, funcs)
+        return assemble(databaseName: db, relations: rels, columns: cols, primaryKeys: primaryKeys, functions: functions)
     }
 
     private static func currentDatabase(client: PostgresClient) async throws -> String {
@@ -126,11 +127,53 @@ enum SchemaFetcher {
         return out
     }
 
+    /// User-defined functions/procedures via `pg_proc`. Skips anything
+    /// living in `pg_catalog` / `information_schema` so we don't drown
+    /// completions in built-ins. `pg_get_function_arguments` /
+    /// `pg_get_function_result` give us already-pretty-printed
+    /// argument and return-type strings, including DEFAULTs and
+    /// `SETOF`, which matches what we'd want to surface in hover.
+    private static func fetchFunctions(client: PostgresClient) async throws -> [FunctionNode] {
+        let sql: PostgresQuery = """
+        SELECT n.nspname,
+               p.proname,
+               p.prokind::text,
+               pg_get_function_arguments(p.oid),
+               pg_get_function_result(p.oid)
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+          AND n.nspname NOT LIKE 'pg_temp_%'
+          AND n.nspname NOT LIKE 'pg_toast%'
+        ORDER BY n.nspname, p.proname
+        """
+        let rows = try await client.query(sql)
+        var out: [FunctionNode] = []
+        for try await (schema, name, kindChar, args, ret) in rows.decode((String, String, String, String, String).self) {
+            let kind: FunctionNode.Kind
+            switch kindChar {
+            case "p": kind = .procedure
+            case "a": kind = .aggregate
+            case "w": kind = .window
+            default:  kind = .function
+            }
+            out.append(FunctionNode(
+                schema: schema,
+                name: name,
+                kind: kind,
+                arguments: "(\(args))",
+                returnType: ret
+            ))
+        }
+        return out
+    }
+
     private static func assemble(
         databaseName: String,
         relations: [Relation],
         columns: [ColumnRow],
-        primaryKeys: [PrimaryKeyRow]
+        primaryKeys: [PrimaryKeyRow],
+        functions: [FunctionNode]
     ) -> SchemaSnapshot {
         // Bucket columns by (schema, table) once for O(1) lookup during merge.
         var colsByTable: [String: [ColumnNode]] = [:]
@@ -162,6 +205,16 @@ enum SchemaFetcher {
             } else {
                 indexBySchema[r.schema] = schemas.count
                 schemas.append(SchemaNode(name: r.schema, tables: [table]))
+            }
+        }
+        // Attach functions to their owning schema (or create the
+        // schema entry if it had no relations).
+        for f in functions {
+            if let i = indexBySchema[f.schema] {
+                schemas[i].functions.append(f)
+            } else {
+                indexBySchema[f.schema] = schemas.count
+                schemas.append(SchemaNode(name: f.schema, tables: [], functions: [f]))
             }
         }
         return SchemaSnapshot(databaseName: databaseName, schemas: schemas)

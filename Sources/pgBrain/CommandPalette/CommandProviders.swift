@@ -128,6 +128,34 @@ enum CommandProviders {
                 action: { service.operations.cancel(op) }
             ))
         }
+
+        // Active-tab actions: rename + colour pick. Both reduce to a
+        // single palette entry — the rename hands off to an inline
+        // TextField on the tab chip, the colour picker opens a
+        // confirmationDialog with all options. Earlier versions
+        // spammed 10 colour rows into every palette open which made
+        // unrelated queries (`rename tab`) get drowned out.
+        if let selID = service.workspace.selectedID,
+           let active = service.workspace.tabs.first(where: { $0.id == selID }) {
+            items.append(CommandItem(
+                id: "action.renameTab",
+                icon: "pencil",
+                title: "Rename Tab…",
+                subtitle: "Current tab: \(active.title)",
+                category: .action,
+                shortcut: nil,
+                action: { active.requestedRename = true }
+            ))
+            items.append(CommandItem(
+                id: "action.colorTab",
+                icon: "paintpalette",
+                title: "Color Tab…",
+                subtitle: "Pick a tag colour for: \(active.title)",
+                category: .action,
+                shortcut: nil,
+                action: { active.requestedColorPicker = true }
+            ))
+        }
         return items
     }
 
@@ -152,7 +180,7 @@ enum CommandProviders {
 
     private static func tables(service: ConnectionService) -> [CommandItem] {
         var out: [CommandItem] = []
-        for schema in service.schema.schemas {
+        for schema in service.visibleSchema.schemas {
             for table in schema.tables {
                 let captured = table
                 out.append(CommandItem(
@@ -188,7 +216,7 @@ enum CommandProviders {
             shortcut: nil,
             action: { pad.searchPath = nil }
         ))
-        for schema in service.schema.schemas {
+        for schema in service.visibleSchema.schemas {
             let name = schema.name
             out.append(CommandItem(
                 id: "schema.set.\(name)",

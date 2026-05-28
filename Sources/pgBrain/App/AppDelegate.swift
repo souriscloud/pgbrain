@@ -84,6 +84,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         aboutWindow?.center()
     }
 
+    /// Bring the nth open connection window forward. `index` is
+    /// 0-based; out-of-range is a no-op. Powers the per-window
+    /// ⌃1..⌃9 shortcuts that switch between connections without
+    /// having to mouse over to the menu bar.
+    func focusConnectionWindow(at index: Int) {
+        let entries = windowManager.entries
+        guard entries.indices.contains(index) else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        entries[index].window.makeKeyAndOrderFront(nil)
+    }
+
     func bringAnyWindowToFront() {
         if let entry = windowManager.connectionWindows.first {
             NSApp.activate(ignoringOtherApps: true)
@@ -164,6 +175,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 .tables.first(where: { $0.name == name })
                         else { continue }
                         workspace.openTable(live)
+                        // Carry the per-tab WHERE + ORDER BY + color +
+                        // custom title onto the newly opened Tab so the
+                        // table view picks them up on its first appear.
+                        if let opened = workspace.tabs.last {
+                            opened.tableWhereClause = persisted.tableWhereClause ?? ""
+                            opened.tableOrderByClause = persisted.tableOrderByClause ?? ""
+                            opened.color = persisted.colorTag.flatMap { Connection.ColorTag(rawValue: $0) }
+                            if let custom = persisted.tabTitle { opened.title = custom }
+                        }
                     case .scratchpad:
                         let pad = workspace.openScratchpad()
                         if let title = persisted.scratchpadTitle { pad.title = title }
@@ -172,6 +192,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             firstSql.text = text
                         }
                         pad.searchPath = persisted.scratchpadSearchPath
+                        if let opened = workspace.tabs.last {
+                            opened.color = persisted.colorTag.flatMap { Connection.ColorTag(rawValue: $0) }
+                            // openScratchpad() seeded tab.title from
+                            // pad.title's default ("Query N"); push the
+                            // user's renamed title onto the chip too,
+                            // otherwise the strip shows the default
+                            // while the underlying Notebook carries the
+                            // correct name.
+                            if let custom = persisted.tabTitle {
+                                opened.title = custom
+                            } else if let scratchTitle = persisted.scratchpadTitle {
+                                opened.title = scratchTitle
+                            }
+                        }
                     }
                     if snapshot.selectedTabIndex == idx, let last = workspace.tabs.last {
                         workspace.selectedID = last.id

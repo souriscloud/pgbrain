@@ -102,7 +102,7 @@ struct NotebookView: View {
     /// of `SELECT * FROM analytics.users`).
     @ViewBuilder
     private var schemaPicker: some View {
-        let schemas = service.schema.schemas.map(\.name)
+        let schemas = service.visibleSchema.schemas.map(\.name)
         Menu {
             Button {
                 notebook.searchPath = nil
@@ -187,7 +187,15 @@ private struct SqlCellView: View {
             onFocus: { focusedCellID = cell.id },
             onJumpToAdjacent: { direction in
                 jumpToAdjacentSqlCell(direction: direction)
-            }
+            },
+            completions: { partial, fullText, caretIndex in
+                SQLCompletionProvider.completions(
+                    for: partial,
+                    in: service.visibleSchema,
+                    context: .scratchpad(fullText: fullText, caretIndex: caretIndex)
+                )
+            },
+            schema: { service.visibleSchema }
         )
         .frame(minHeight: 30)
         .padding(.horizontal, Tokens.Spacing.md)
@@ -232,6 +240,13 @@ private struct SqlCellEditor: NSViewRepresentable {
     /// Called when the caret tries to move past the cell's first/last line:
     /// +1 for down (jump to next SQL cell), -1 for up.
     let onJumpToAdjacent: (Int) -> Void
+    /// Returns ranked completion strings for the partial identifier
+    /// preceding the caret. We pass through the full cell text + caret
+    /// so the provider can derive context (FROM-vs-WHERE etc.) instead
+    /// of always returning the union of everything.
+    let completions: (_ partial: String, _ fullText: String, _ caretIndex: Int) -> [String]
+    /// Live schema snapshot — used by hover-to-identify tooltips.
+    let schema: () -> SchemaSnapshot
 
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -239,22 +254,50 @@ private struct SqlCellEditor: NSViewRepresentable {
         var onRun: (NSRange?) -> Void
         var onFocus: () -> Void
         var onJumpToAdjacent: (Int) -> Void
+        var completions: (_ partial: String, _ fullText: String, _ caretIndex: Int) -> [String]
+        /// Provider for the live schema — used by hover-to-identify to
+        /// build tooltip content without keeping a strong reference to
+        /// the connection service inside the AppKit subclass.
+        var currentSchema: (() -> SchemaSnapshot)?
 
-        init(text: Binding<String>, onRun: @escaping (NSRange?) -> Void, onFocus: @escaping () -> Void, onJumpToAdjacent: @escaping (Int) -> Void) {
+        init(text: Binding<String>, onRun: @escaping (NSRange?) -> Void, onFocus: @escaping () -> Void, onJumpToAdjacent: @escaping (Int) -> Void, completions: @escaping (String, String, Int) -> [String]) {
             self.text = text
             self.onRun = onRun
             self.onFocus = onFocus
             self.onJumpToAdjacent = onJumpToAdjacent
+            self.completions = completions
         }
 
         func textDidChange(_ notif: Notification) {
             guard let tv = notif.object as? NSTextView else { return }
             text.wrappedValue = tv.string
         }
+
+        /// AppKit calls this when the text view's `complete(_:)` runs —
+        /// either via Esc, our ⌃Space binding, or the system's
+        /// completion driver. We supply schema-aware completions.
+        func textView(_ textView: NSTextView, completions words: [String], forPartialWordRange charRange: NSRange, indexOfSelectedItem index: UnsafeMutablePointer<Int>?) -> [String] {
+            let ns = textView.string as NSString
+            guard charRange.location >= 0, charRange.location + charRange.length <= ns.length else { return words }
+            let partial = ns.substring(with: charRange)
+            // Pass the *full* cell text + the partial's start position so
+            // the provider can derive context from what's to the left of
+            // the caret (FROM / WHERE / ORDER BY / qualifier-dot etc.).
+            let ours = completions(partial, ns as String, charRange.location)
+            // Show the first match preselected so Enter / Tab inserts it.
+            index?.pointee = ours.isEmpty ? -1 : 0
+            return ours.isEmpty ? words : ours
+        }
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, onRun: onRun, onFocus: onFocus, onJumpToAdjacent: onJumpToAdjacent)
+        let c = Coordinator(text: $text, onRun: onRun, onFocus: onFocus, onJumpToAdjacent: onJumpToAdjacent, completions: completions)
+        c.currentSchema = schema
+        return c
+    }
+
+    func updateCoordinator(_ coordinator: Coordinator) {
+        coordinator.currentSchema = schema
     }
 
     func makeNSView(context: Context) -> SqlCellNSTextView {
@@ -274,6 +317,10 @@ private struct SqlCellEditor: NSViewRepresentable {
         tv.textContainer?.lineFragmentPadding = 0
         tv.textContainerInset = .zero
         tv.delegate = context.coordinator
+        // Live SQL syntax highlighting — re-paints on every edit
+        // through the text-storage delegate. The shared singleton
+        // re-uses the keyword/function sets across cells.
+        tv.textStorage?.delegate = SQLHighlighter.shared
         tv.onRun = { [weak tv] in
             guard let tv else { return }
             let sel = tv.selectedRange()
@@ -284,7 +331,13 @@ private struct SqlCellEditor: NSViewRepresentable {
             context.coordinator.onJumpToAdjacent(direction)
         }
         tv.onBecomeFirstResponder = { context.coordinator.onFocus() }
+        tv.schemaProvider = { [weak coord = context.coordinator] in coord?.currentSchema?() }
         tv.string = text
+        // Highlight the initial contents — the delegate's edit hook only
+        // fires for subsequent mutations.
+        if let storage = tv.textStorage {
+            SQLHighlighter.shared.highlight(storage)
+        }
         return tv
     }
 
@@ -316,11 +369,37 @@ final class SqlCellNSTextView: NSTextView {
     var onRun: (() -> Void)?
     var onJumpToAdjacent: ((Int) -> Void)?
     var onBecomeFirstResponder: (() -> Void)?
+    /// Used by hover-to-identify to look up tables / columns under the
+    /// mouse. Returns nil when no schema is available.
+    var schemaProvider: (() -> SchemaSnapshot?)?
+
+    /// Tracks the storage length on the previous tick so `didChangeText`
+    /// can tell insertions from deletions. Auto-complete only fires on
+    /// forward typing — never on backspace.
+    private var previousStringLength: Int = 0
+    /// Debounce token for the as-you-type completion popup. Subsequent
+    /// keystrokes cancel the pending fire so we don't open 5 popups in
+    /// a row, and only the last word-character keystroke triggers.
+    private var completionDebounce: Task<Void, Never>?
+
+    /// Tracking area for hover-to-identify. Recreated whenever bounds
+    /// change so the area stays the size of the visible cell.
+    private var hoverTracking: NSTrackingArea?
 
     override func keyDown(with event: NSEvent) {
         // ⌘↩ → run.
         if event.modifierFlags.contains(.command), event.keyCode == 36 {
             onRun?()
+            return
+        }
+        // Manual intellisense trigger. macOS already binds plain Esc
+        // to `complete:` on NSTextView, so we don't need to handle it
+        // here — but ⌥Esc is a common JetBrains/Xcode-on-Mac alias and
+        // worth binding explicitly. ⌘Space conflicts with Spotlight
+        // and ⌃Space conflicts with the system input-source switcher,
+        // so neither is wired here.
+        if event.modifierFlags.contains(.option), event.keyCode == 53 {
+            self.complete(nil)
             return
         }
         // ⌥↓ / ⌥↑ → unconditional jump to next/previous SQL cell,
@@ -365,6 +444,112 @@ final class SqlCellNSTextView: NSTextView {
     override func didChangeText() {
         super.didChangeText()
         invalidateIntrinsicContentSize()
+        // Smart as-you-type: only fire when the text grew (insertion,
+        // not delete), the last char is an identifier char, the
+        // identifier prefix is ≥2 chars, and we've waited 180ms since
+        // the previous keystroke (debounce). Anything else cancels.
+        let currentLength = (string as NSString).length
+        let grew = currentLength > previousStringLength
+        previousStringLength = currentLength
+        completionDebounce?.cancel()
+        guard grew else { return }
+        let ns = string as NSString
+        let caret = selectedRange().location
+        guard caret > 0, caret <= ns.length else { return }
+        let lastChar = ns.character(at: caret - 1)
+        guard isWordChar(lastChar) else { return }
+        guard currentIdentifierPrefixLength() >= 2 else { return }
+        completionDebounce = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            if Task.isCancelled { return }
+            guard let self else { return }
+            // Re-check the prefix on fire — the user may have deleted
+            // chars in the debounce window.
+            if self.currentIdentifierPrefixLength() >= 2 {
+                self.complete(nil)
+            }
+        }
+    }
+
+    private func isWordChar(_ c: unichar) -> Bool {
+        (c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A) ||
+        (c >= 0x30 && c <= 0x39) || c == 0x5F
+    }
+
+    /// Length of the identifier-like character run ending at the caret
+    /// (letters, digits, underscores). Zero if the caret isn't on a
+    /// word boundary so we suppress the popup after whitespace or
+    /// punctuation.
+    private func currentIdentifierPrefixLength() -> Int {
+        let ns = string as NSString
+        let caret = selectedRange().location
+        guard caret > 0, caret <= ns.length else { return 0 }
+        var i = caret
+        while i > 0, isWordChar(ns.character(at: i - 1)) { i -= 1 }
+        return caret - i
+    }
+
+    // MARK: - Hover-to-identify
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = hoverTracking { removeTrackingArea(existing) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .activeInActiveApp, .inVisibleRect],
+            owner: self, userInfo: nil
+        )
+        addTrackingArea(area)
+        hoverTracking = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        // characterIndexForInsertion gives a between-glyph index, but
+        // for hover we want the char UNDER the cursor — clamp left if
+        // we're past the last identifier char.
+        let point = convert(event.locationInWindow, from: nil)
+        let index = characterIndexForInsertion(at: point)
+        let info = hoverInfo(charIndex: index)
+        if self.toolTip != info { self.toolTip = info }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        if self.toolTip != nil { self.toolTip = nil }
+    }
+
+    /// Resolve the identifier under `charIndex` (or just before it) and
+    /// build a short description from the live schema. Returns nil when
+    /// the cursor is on whitespace / punctuation / an unknown word so
+    /// AppKit doesn't show a useless tooltip.
+    private func hoverInfo(charIndex: Int) -> String? {
+        // `schemaProvider?()` is `SchemaSnapshot??` — optional chaining
+        // on a function call that itself returns Optional. A single
+        // `guard let` only peels one layer, leaving `schema:
+        // SchemaSnapshot?`, which silently never matched any identifier
+        // (and the file still compiled because Swift inferred the
+        // wrong type at the call site). Flatten via `.flatMap` so the
+        // bound `schema` is the non-optional we actually need.
+        guard let schema: SchemaSnapshot = schemaProvider.flatMap({ $0() })
+        else { return nil }
+        let ns = string as NSString
+        var idx = max(0, min(charIndex, ns.length - 1))
+        if idx < 0 || idx >= ns.length { return nil }
+        // If we're past a word, characterIndexForInsertion lands one
+        // past — back up one so the resolver finds the identifier.
+        if !isWordChar(ns.character(at: idx)) {
+            if idx > 0, isWordChar(ns.character(at: idx - 1)) { idx -= 1 }
+            else { return nil }
+        }
+        // Walk both directions to find identifier bounds.
+        var left = idx
+        while left > 0, isWordChar(ns.character(at: left - 1)) { left -= 1 }
+        var right = idx
+        while right + 1 < ns.length, isWordChar(ns.character(at: right + 1)) { right += 1 }
+        let word = ns.substring(with: NSRange(location: left, length: right - left + 1))
+        guard !word.isEmpty else { return nil }
+        return SQLHoverResolver.describe(identifier: word, in: schema)
     }
 
     /// True if the caret is on the visually first (top) line of the cell.

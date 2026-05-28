@@ -23,6 +23,10 @@ struct SessionState: Codable {
         /// For `.table` — `schema.name` identifying the source table.
         var tableSchema: String?
         var tableName: String?
+        /// Raw `WHERE` body for `.table` tabs (no leading keyword).
+        var tableWhereClause: String?
+        /// Raw `ORDER BY` body for `.table` tabs.
+        var tableOrderByClause: String?
         /// For `.scratchpad` — title + buffer text. Sensitive (the user's
         /// drafted SQL) but acceptable given it's in the user's own
         /// Application Support directory.
@@ -32,6 +36,13 @@ struct SessionState: Codable {
         /// connection's default. Optional so existing on-disk state
         /// without this field decodes cleanly.
         var scratchpadSearchPath: String?
+        /// Tab color tag (any tab kind). Optional so older snapshots
+        /// still decode cleanly.
+        var colorTag: String?
+        /// User-renamed tab title (any tab kind). For scratchpads we
+        /// also keep `scratchpadTitle` in sync because the saved-
+        /// queries panel reads it from the Notebook directly.
+        var tabTitle: String?
     }
 
     struct CodableRect: Codable {
@@ -111,14 +122,20 @@ final class SessionStateStore {
                     return SessionState.Tab(
                         kind: .table,
                         tableSchema: t.schema,
-                        tableName: t.name
+                        tableName: t.name,
+                        tableWhereClause: tab.tableWhereClause.isEmpty ? nil : tab.tableWhereClause,
+                        tableOrderByClause: tab.tableOrderByClause.isEmpty ? nil : tab.tableOrderByClause,
+                        colorTag: tab.color?.rawValue,
+                        tabTitle: tab.title == t.qualifiedName ? nil : tab.title
                     )
                 case .scratchpad(let pad):
                     return SessionState.Tab(
                         kind: .scratchpad,
                         scratchpadTitle: pad.title,
                         scratchpadText: pad.plainText,
-                        scratchpadSearchPath: pad.searchPath
+                        scratchpadSearchPath: pad.searchPath,
+                        colorTag: tab.color?.rawValue,
+                        tabTitle: tab.title == pad.title ? nil : tab.title
                     )
                 }
             }

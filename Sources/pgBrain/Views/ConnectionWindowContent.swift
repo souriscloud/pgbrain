@@ -5,6 +5,12 @@ struct ConnectionWindowContent: View {
     @State private var copySource: TableNode?
     @State private var showSchemaDiff = false
     @State private var sidebarFilter: String = ""
+    @State private var sidebarVisible: Bool = true
+
+    /// Convenience pass-through to `service.visibleSchema` so views
+    /// in this file can read the filtered snapshot without re-doing
+    /// the SchemaVisibility lookup on every render.
+    private var visibleSchema: SchemaSnapshot { service.visibleSchema }
 
     private var appearance: ConnectionAppearance {
         ConnectionAppearance(connection: service.connection)
@@ -51,10 +57,125 @@ struct ConnectionWindowContent: View {
     @ViewBuilder
     private var connectedWorkspace: some View {
         HSplitView {
-            sidebarPane
-                .frame(minWidth: 220, idealWidth: 260, maxWidth: 420)
+            if sidebarVisible {
+                sidebarPane
+                    // HSplitView remembers per-session manual resizes,
+                    // but its first-open width was being computed from
+                    // `idealWidth = 260` plus column content padding,
+                    // ending up much wider than ⌘B-toggled re-show
+                    // (which honours the minWidth). Tightened the
+                    // ideal so the default matches the toggled width.
+                    .frame(minWidth: 200, idealWidth: 220, maxWidth: 420)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+            }
             workspacePane
                 .frame(minWidth: 400, maxWidth: .infinity)
+        }
+        .background(keyboardShortcuts)
+        .animation(.easeInOut(duration: 0.18), value: sidebarVisible)
+    }
+
+    /// Hidden buttons that own the per-window keyboard shortcuts.
+    /// Living in this view means the bindings only fire when a
+    /// connection window is key — they go silent on the Welcome /
+    /// About windows automatically. Same hidden-button trick the
+    /// table-tab uses for ⌘F.
+    @ViewBuilder
+    private var keyboardShortcuts: some View {
+        Group {
+            shortcut("w", modifiers: .command, action: closeCurrentTabOrWindow)
+            // ⌘⇧W bypasses the tab-first rule and closes the window
+            // outright — matches Safari / Chrome's "Close Window"
+            // shortcut when tabs are open.
+            shortcut("w", modifiers: [.command, .shift]) {
+                NSApp.keyWindow?.performClose(nil)
+            }
+            shortcut("t", modifiers: .command) { _ = service.workspace.openScratchpad() }
+            // Tab navigation — bind multiple aliases so Safari /
+            // Chrome / VSCode / JetBrains muscle memory all work.
+            shortcut(.rightArrow, modifiers: [.command, .option]) { service.workspace.nextTab() }
+            shortcut(.leftArrow,  modifiers: [.command, .option]) { service.workspace.previousTab() }
+            shortcut("]", modifiers: [.command, .shift]) { service.workspace.nextTab() }
+            shortcut("[", modifiers: [.command, .shift]) { service.workspace.previousTab() }
+            shortcut(.tab, modifiers: .control) { service.workspace.nextTab() }
+            shortcut(.tab, modifiers: [.control, .shift]) { service.workspace.previousTab() }
+            // ⌘1..⌘8 → jump to tab N (1-indexed). ⌘9 jumps to the
+            // last tab, matching Safari/Chrome.
+            ForEach(1...8, id: \.self) { i in
+                shortcut(KeyEquivalent(Character(String(i))), modifiers: .command) {
+                    service.workspace.selectTab(at: i - 1)
+                }
+            }
+            shortcut("9", modifiers: .command) {
+                service.workspace.selectTab(at: service.workspace.tabs.count - 1)
+            }
+            // ⌃1..⌃9 switch between *connection windows* — same
+            // n-indexed convention as ⌘1..⌘9 for tabs, just one
+            // ring up. ⌃9 jumps to the last open window.
+            ForEach(1...8, id: \.self) { i in
+                shortcut(KeyEquivalent(Character(String(i))), modifiers: .control) {
+                    AppDelegate.shared?.focusConnectionWindow(at: i - 1)
+                }
+            }
+            shortcut("9", modifiers: .control) {
+                if let count = AppDelegate.shared?.windowManager.entries.count, count > 0 {
+                    AppDelegate.shared?.focusConnectionWindow(at: count - 1)
+                }
+            }
+            // ⌘R reloads the *current tab*'s data — table tab
+            // re-fetches rows + inspector, scratchpad re-runs the
+            // active cell. Schema reload remains in the ellipsis
+            // menu since it's a heavier, rarer action. ⌘⇧R reloads
+            // the schema for users who prefer the IDE convention.
+            shortcut("r", modifiers: .command) { reloadActiveTab() }
+            shortcut("r", modifiers: [.command, .shift]) {
+                Task { await service.loadSchema() }
+            }
+            // ⌘B toggles the sidebar — VSCode / Code muscle memory.
+            shortcut("b", modifiers: .command) {
+                sidebarVisible.toggle()
+            }
+        }
+        .hidden()
+    }
+
+    @ViewBuilder
+    private func shortcut(_ key: KeyEquivalent, modifiers: EventModifiers, action: @escaping () -> Void) -> some View {
+        Button(action: action) { EmptyView() }
+            .keyboardShortcut(key, modifiers: modifiers)
+    }
+
+    /// ⌘W routing: close the current tab first; only close the
+    /// window when no tabs are open. Matches Safari / Chrome / Code.
+    private func closeCurrentTabOrWindow() {
+        if !service.workspace.tabs.isEmpty {
+            service.workspace.closeCurrentTab()
+        } else {
+            NSApp.keyWindow?.performClose(nil)
+        }
+    }
+
+    /// ⌘R hook: re-fetch whatever the active tab is showing. Table
+    /// tabs reload rows (and the inspector if it had been visited);
+    /// no-op for tabs that don't have a meaningful "reload" notion.
+    private func reloadActiveTab() {
+        guard let id = service.workspace.selectedID,
+              let tab = service.workspace.tabs.first(where: { $0.id == id })
+        else { return }
+        switch tab.kind {
+        case .table(let t):
+            let loader = service.loader(for: tab, table: t)
+            let inspector = service.inspector(for: tab, table: t)
+            Task {
+                await loader.load()
+                if case .loaded = inspector.state {
+                    await inspector.load()
+                }
+            }
+        case .scratchpad:
+            // No-op for scratchpads — Cmd+⏎ in a cell is the
+            // canonical "run" path.
+            break
         }
     }
 
@@ -67,10 +188,12 @@ struct ConnectionWindowContent: View {
             case .loaded:
                 sidebarSearchField
                 SidebarOutlineView(
-                    snapshot: service.schema,
+                    snapshot: visibleSchema,
                     filterTerm: sidebarFilter,
                     onOpenTable: { service.workspace.openTable($0) },
-                    onCopyTable: { copySource = $0 }
+                    onCopyTable: { copySource = $0 },
+                    onShowStructure: { service.workspace.openTable($0, focusPane: .structure) },
+                    onShowDDL: { service.workspace.openTable($0, focusPane: .ddl) }
                 )
             case .loading, .idle:
                 VStack(spacing: Tokens.Spacing.sm) {
@@ -158,6 +281,32 @@ struct ConnectionWindowContent: View {
                 Divider()
                 Button("Reload schema") { Task { await service.loadSchema() } }
                 Button("Diff schemas…") { showSchemaDiff = true }
+                Divider()
+                // Schema-visibility toggles. Hidden schemas disappear
+                // from the sidebar tree AND completion suggestions
+                // until re-enabled here.
+                Menu("Schemas") {
+                    let connID = service.connection.id
+                    let hidden = SchemaVisibility.shared.hidden(for: connID)
+                    let names = service.schema.schemas.map(\.name).sorted()
+                    if names.isEmpty {
+                        Text("(no schemas yet)").foregroundStyle(.secondary)
+                    } else {
+                        ForEach(names, id: \.self) { name in
+                            Button {
+                                SchemaVisibility.shared.toggle(schema: name, connectionID: connID)
+                            } label: {
+                                Label(name, systemImage: hidden.contains(name) ? "" : "checkmark")
+                            }
+                        }
+                        if !hidden.isEmpty {
+                            Divider()
+                            Button("Show all schemas") {
+                                SchemaVisibility.shared.clear(connectionID: connID)
+                            }
+                        }
+                    }
+                }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.caption)
@@ -217,7 +366,7 @@ struct ConnectionWindowContent: View {
             if let selected = service.workspace.selectedTab {
                 switch selected.kind {
                 case .table(let table):
-                    TableTabView(table: table, service: service)
+                    TableTabView(table: table, tab: selected, service: service)
                         .id(table.id)
                 case .scratchpad(let pad):
                     NotebookView(notebook: pad, service: service)

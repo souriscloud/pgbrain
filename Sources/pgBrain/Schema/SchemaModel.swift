@@ -13,7 +13,35 @@ struct SchemaSnapshot: Equatable, Sendable {
 struct SchemaNode: Equatable, Identifiable, Sendable {
     var name: String
     var tables: [TableNode]
+    /// User-defined functions/procedures living in this schema. Filled
+    /// from `pg_proc` on schema load (skipping anything in
+    /// `pg_catalog` / `information_schema`).
+    var functions: [FunctionNode] = []
     var id: String { name }
+}
+
+/// A user-defined function or procedure. Just enough metadata to drive
+/// completion suggestions + hover tooltips; we deliberately don't try
+/// to surface the body or overload-resolve at edit time.
+struct FunctionNode: Equatable, Identifiable, Sendable {
+    enum Kind: String, Equatable, Sendable {
+        case function     // `f` — returns a value
+        case procedure    // `p` — CALL-able, side-effecting
+        case aggregate    // `a`
+        case window       // `w`
+    }
+    var schema: String
+    var name: String
+    var kind: Kind
+    /// Pretty-printed argument list (`(text, integer DEFAULT 0)`).
+    var arguments: String
+    /// Pretty-printed return type (`integer`, `SETOF text`). Empty for
+    /// procedures.
+    var returnType: String
+    var id: String { "\(schema).\(name)(\(arguments))" }
+
+    var signature: String { "\(name)\(arguments)" }
+    var qualifiedSignature: String { "\(schema).\(signature)" }
 }
 
 struct TableNode: Equatable, Identifiable, Sendable {

@@ -92,6 +92,8 @@ struct SidebarOutlineView: NSViewRepresentable {
     var onCopyTable: ((TableNode) -> Void)? = nil
     var onExportTable: ((TableNode) -> Void)? = nil
     var onImportInto: ((TableNode) -> Void)? = nil
+    var onShowStructure: ((TableNode) -> Void)? = nil
+    var onShowDDL: ((TableNode) -> Void)? = nil
 
     @MainActor
     final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
@@ -102,6 +104,8 @@ struct SidebarOutlineView: NSViewRepresentable {
         let onCopyTable: ((TableNode) -> Void)?
         let onExportTable: ((TableNode) -> Void)?
         let onImportInto: ((TableNode) -> Void)?
+        let onShowStructure: ((TableNode) -> Void)?
+        let onShowDDL: ((TableNode) -> Void)?
 
         var activeRoot: SidebarNode { filteredRoot ?? root }
 
@@ -111,7 +115,9 @@ struct SidebarOutlineView: NSViewRepresentable {
             onOpenTable: @escaping (TableNode) -> Void,
             onCopyTable: ((TableNode) -> Void)?,
             onExportTable: ((TableNode) -> Void)?,
-            onImportInto: ((TableNode) -> Void)?
+            onImportInto: ((TableNode) -> Void)?,
+            onShowStructure: ((TableNode) -> Void)?,
+            onShowDDL: ((TableNode) -> Void)?
         ) {
             self.root = root
             self.index = index
@@ -119,6 +125,8 @@ struct SidebarOutlineView: NSViewRepresentable {
             self.onCopyTable = onCopyTable
             self.onExportTable = onExportTable
             self.onImportInto = onImportInto
+            self.onShowStructure = onShowStructure
+            self.onShowDDL = onShowDDL
         }
 
         /// Rebuild `filteredRoot` from `term` (empty = clear filter).
@@ -157,6 +165,18 @@ struct SidebarOutlineView: NSViewRepresentable {
             open.target = self
             open.representedObject = table
             menu.addItem(open)
+            if onShowStructure != nil {
+                let struc = NSMenuItem(title: "Show Structure", action: #selector(handleShowStructure(_:)), keyEquivalent: "")
+                struc.target = self
+                struc.representedObject = table
+                menu.addItem(struc)
+            }
+            if onShowDDL != nil {
+                let ddl = NSMenuItem(title: "Show CREATE SQL", action: #selector(handleShowDDL(_:)), keyEquivalent: "")
+                ddl.target = self
+                ddl.representedObject = table
+                menu.addItem(ddl)
+            }
             menu.addItem(.separator())
             if onCopyTable != nil {
                 let copy = NSMenuItem(title: "Copy table to…", action: #selector(handleCopy(_:)), keyEquivalent: "")
@@ -197,6 +217,16 @@ struct SidebarOutlineView: NSViewRepresentable {
         @objc private func handleImport(_ sender: NSMenuItem) {
             guard let table = sender.representedObject as? TableNode else { return }
             onImportInto?(table)
+        }
+
+        @objc private func handleShowStructure(_ sender: NSMenuItem) {
+            guard let table = sender.representedObject as? TableNode else { return }
+            onShowStructure?(table)
+        }
+
+        @objc private func handleShowDDL(_ sender: NSMenuItem) {
+            guard let table = sender.representedObject as? TableNode else { return }
+            onShowDDL?(table)
         }
 
         // MARK: NSOutlineViewDataSource
@@ -255,7 +285,9 @@ struct SidebarOutlineView: NSViewRepresentable {
             onOpenTable: onOpenTable,
             onCopyTable: onCopyTable,
             onExportTable: onExportTable,
-            onImportInto: onImportInto
+            onImportInto: onImportInto,
+            onShowStructure: onShowStructure,
+            onShowDDL: onShowDDL
         )
     }
 
