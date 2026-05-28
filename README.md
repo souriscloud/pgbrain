@@ -12,18 +12,44 @@ JetBrains tools are powerful but feel like a Java app glued to your menu bar. Th
 
 ## What's in the box
 
-- 🪟 **One window per connection.** Connection windows, multi-tab workspaces, JetBrains-style tab strip with drag-reorder.
-- 🗂️ **Schema sidebar.** Tree of database → schemas → tables → columns. Trie-indexed filter that holds up on 10k+ tables.
-- 📋 **Editable data grid.** Double-click any cell with a PK, type a new value, hit Apply — runs as a single transaction with server-side type casts. ⌘Z for one-step undo on pending edits.
-- 📝 **Notebook scratchpad.** SQL and result widgets live inline in one flowing document. Cmd+⏎ runs the statement under your caret (or your selection) and inlines the result right after it. Green outline marks the running range. Re-running replaces in place; new contexts add new widgets. JetBrains feel, Jupyter ergonomics.
-- 🛑 **Production guardrails.** Mark a connection as PROD → red chrome everywhere. Unscoped `DELETE`/`UPDATE`/`TRUNCATE`/DDL prompts before it runs.
-- ⏯️ **Real cancellation.** Status footer shows in-flight operations. Cancel actually stops the server-side query via a sister-connection `pg_cancel_backend(pid)` — same trick `psql` uses on `^C`.
-- ↔️ **Cross-DB copy.** Pipe a table from one connection to another via streaming `SELECT` → `COPY FROM STDIN`. Worst-case memory: one 64 KB buffer, regardless of row count.
-- 📤📥 **Streaming export/import.** Full-table CSV/JSON/SQL export for any size table (memory stays flat). CSV import with header→column mapping. `pg_dump` wrapper that auto-discovers your binary.
-- 🔁 **State restoration.** Quit, relaunch, find every window and tab right where you left it — scratchpad SQL included.
-- 🎨 **Per-connection color tags + PROD flag** visible on every surface — sidebar, tab strip, status footer, menu bar window list.
-- 📚 **Saved query library.** Snippets cross-cut all connections; search-as-you-type.
-- 🪞 **Schema diff** between any two open connections.
+### Windows, tabs & navigation
+- 🪟 **One window per connection.** Connection windows, multi-tab workspaces, JetBrains-style tab strip with drag-reorder, renameable + colour-taggable tabs.
+- 🗂️ **Schema sidebar.** Tree of database → schemas → tables → columns → functions. Trie-indexed filter that holds up on 10k+ tables. Per-connection schema-visibility toggles.
+- ⌨️ **Command palette (⌘K).** Fuzzy-ranked across connections, tabs, tables, functions, schemas, ERDs, and every action.
+- 🧭 **IDE keyboard model.** ⌘T new scratchpad, ⌘1–9 tab jump, ⌃1–9 window jump, ⌘B sidebar, ⌘R reload, ⌘F find — the muscle memory you already have.
+- 💾 **Saved workspaces + state restoration.** Snapshot a tab set, or just quit and relaunch to find every window and tab where you left it.
+
+### Reading & editing data
+- 📋 **Editable data grid.** Double-click any cell with a PK, edit, Apply — one transaction with server-side type casts. ⌘Z undo, type-aware editors (date pickers, bool toggles, JSON), per-column width memory.
+- 📇 **Row form view.** Flip any grid to a single-row vertical form with ←/→ stepping — edits share the grid's dirty set.
+- 🔎 **Filter, sort, paginate.** WHERE/ORDER BY strip with autocomplete, sortable headers, keyset-friendly paging, filter-to-cell, distinct-values popover per column, FK ⌘-click navigation.
+- 📊 **Pivot & chart.** Pivot any result (row/col/value + agg) or chart it (bar/line/point) without leaving the result block.
+- 🪄 **Generate test data.** Per-column strategies → one `INSERT … SELECT generate_series` with a live SQL preview.
+
+### The notebook scratchpad
+- 📝 **Inline results.** SQL and result widgets in one flowing document. Cmd+⏎ runs the statement under your caret; the result inlines right after it. JetBrains feel, Jupyter ergonomics.
+- 🐘 **psql slash commands.** `\dt`, `\d table`, `\df`, `\du`, `\l`, `\dn`, `\dx` … translated to catalog queries inline.
+- 🔁 **Run-as-transaction.** Wrap a multi-statement run in BEGIN/COMMIT — any error rolls the whole batch back.
+- ✨ **Editor niceties.** Syntax highlighting, schema-aware autocomplete + hover, bracket/quote auto-pairing, auto-indent, Format SQL, `EXPLAIN`/`EXPLAIN ANALYZE` plan viewer, find/replace, snippets with `$cursor$` placeholders, open/save `.sql`.
+- 📜 **Query history + result diff.** Every statement logged with timing; diff the last two results side-by-side.
+
+### DBA & schema management
+- 🏗️ **Structure pane.** Columns, constraints, indexes, triggers (enable/disable/drop), partitions, comments editor — plus a Copy-ready `CREATE` script.
+- ✏️ **Edit objects.** Function/procedure editor (`pg_get_functiondef` round-trip), view/matview editor, column ALTER (rename/type/drop/add), schema + database CRUD, sequence inspector (setval/nextval/restart).
+- 🧹 **Maintenance.** VACUUM / ANALYZE / REINDEX / TRUNCATE / REFRESH MATERIALIZED VIEW from the sidebar, tracked in the ops popover.
+- 🗺️ **ERD diagram.** Draggable table boxes, FK lines, double-click to open.
+- 🔗 **Find usages.** Locate a table across every function body, view definition, and trigger.
+- 🔐 **Roles & grants.** Browse `pg_roles`, view per-table grants, GRANT/REVOKE editor.
+- 📈 **Live activity panels.** Sessions, locks, index usage, `pg_stat_statements`, size dashboard, replication (pubs/subs/slots), foreign tables/FDW.
+- 📡 **LISTEN/NOTIFY console.** Subscribe to a channel, watch payloads stream in, send NOTIFYs back.
+
+### Safety, transport & ops
+- 🛑 **Production guardrails.** Mark a connection PROD → red chrome everywhere; unscoped `DELETE`/`UPDATE`/`TRUNCATE`/DDL prompts before it runs.
+- 🔒 **SSH tunnels.** Per-connection local-forward via the system `ssh` (agent or key-file auth).
+- ⏯️ **Real cancellation.** Cancel actually stops the server-side query via a sister-connection `pg_cancel_backend(pid)` — same trick `psql` uses on `^C`.
+- ↔️ **Cross-DB copy.** Stream a table between connections via `SELECT` → `COPY FROM STDIN`. Flat memory regardless of row count.
+- 📤📥 **Streaming export/import.** CSV/JSON/SQL export at any size; CSV/JSON import with header→column mapping; auto-discovering `pg_dump` wrapper.
+- 🔔 **Long-query notifications.** Background queries over 30s ping you when they finish.
 - ⚙️ **Sparkle auto-update.** Signed + notarized; updates land daily without a click.
 
 ## Download
