@@ -23,34 +23,51 @@ enum CellFormat {
 
     static func render(value: String?, column: ColumnNode) -> Rendered {
         let kind = ColumnTypeKind.from(typeName: column.typeName)
-        guard let raw = value else {
-            return Rendered(
+        let raw: Rendered
+        if let v = value {
+            switch kind {
+            case .integer:           raw = integer(v, kind: kind)
+            case .number:            raw = number(v, kind: kind)
+            case .bool:              raw = boolean(v)
+            case .date:              raw = dateOnly(v)
+            case .timestamp:         raw = timestamp(v)
+            case .json:              raw = json(v)
+            case .uuid:              raw = uuid(v)
+            case .bytes:             raw = bytes(v)
+            case .text, .unknown:    raw = text(v, kind: kind)
+            }
+        } else {
+            raw = Rendered(
                 attributed: nullString(),
                 alignment: alignment(for: kind),
                 font: italicFont(),
                 rawForEditor: ""
             )
         }
-        switch kind {
-        case .integer:
-            return integer(raw, kind: kind)
-        case .number:
-            return number(raw, kind: kind)
-        case .bool:
-            return boolean(raw)
-        case .date:
-            return dateOnly(raw)
-        case .timestamp:
-            return timestamp(raw)
-        case .json:
-            return json(raw)
-        case .uuid:
-            return uuid(raw)
-        case .bytes:
-            return bytes(raw)
-        case .text, .unknown:
-            return text(raw, kind: kind)
+        // Bake the paragraph style into the attributed string once,
+        // here at render time. The data grid caches the result so
+        // every cell-recycle on scroll skips this work entirely.
+        return Self.withParagraphStyle(raw)
+    }
+
+    /// Wrap `r.attributed` with a paragraph style carrying its
+    /// alignment + truncation rule, returning a Rendered that the
+    /// grid can hand straight to `field.attributedStringValue`.
+    private static func withParagraphStyle(_ r: Rendered) -> Rendered {
+        let mutable = NSMutableAttributedString(attributedString: r.attributed)
+        let para = NSMutableParagraphStyle()
+        para.alignment = r.alignment
+        para.lineBreakMode = .byTruncatingTail
+        if mutable.length > 0 {
+            mutable.addAttribute(.paragraphStyle, value: para,
+                                 range: NSRange(location: 0, length: mutable.length))
         }
+        return Rendered(
+            attributed: mutable,
+            alignment: r.alignment,
+            font: r.font,
+            rawForEditor: r.rawForEditor
+        )
     }
 
     // MARK: - Per-kind renderers

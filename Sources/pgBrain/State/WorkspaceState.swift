@@ -54,6 +54,12 @@ final class WorkspaceState {
         /// a colour-picker dialog for this tab. Same consume-on-use
         /// contract as `requestedRename`.
         var requestedColorPicker: Bool = false
+        /// Pulse signal for FK navigation: set after pushing a new
+        /// WHERE clause onto `tableWhereClause` so an already-mounted
+        /// `TableTabView` re-syncs its loader and re-fetches. The
+        /// `.task(id:)` modifier only fires on tab creation, so we
+        /// need a separate kick for the "tab already exists" case.
+        var requestedFilterReload: Bool = false
         /// Persisted raw WHERE / ORDER BY clauses for `.table` tabs —
         /// just the bodies, no leading keyword. Empty = no clause.
         /// Survives session restore via `SessionState.Tab`.

@@ -5,15 +5,71 @@ import PostgresNIO
 /// one for relations, one for columns, then merged in Swift. Cheaper than
 /// `information_schema` and gives us `format_type()` for free.
 enum SchemaFetcher {
+    /// Shallow schema fetch — schemas + table names + PKs + functions
+    /// + FKs. **Columns are deliberately omitted** because the
+    /// pg_attribute join is the single slowest piece of the catalog
+    /// scan on big DBs (5k-table schemas produce ~100k attribute
+    /// rows). `ConnectionService.loadSchema` runs `fetchColumnsAll`
+    /// in the background after this returns to enrich every table
+    /// with its column list; consumers that need columns *now* (the
+    /// table opener) call `fetchColumns(for:)` for a single-table
+    /// fast path.
     static func fetch(client: PostgresClient) async throws -> SchemaSnapshot {
         async let dbName = currentDatabase(client: client)
         async let relations = fetchRelations(client: client)
-        async let columns = fetchColumns(client: client)
         async let pks = fetchPrimaryKeys(client: client)
         async let funcs = fetchFunctions(client: client)
+        async let fks = fetchForeignKeys(client: client)
 
-        let (db, rels, cols, primaryKeys, functions) = try await (dbName, relations, columns, pks, funcs)
-        return assemble(databaseName: db, relations: rels, columns: cols, primaryKeys: primaryKeys, functions: functions)
+        let (db, rels, primaryKeys, functions, foreignKeys) =
+            try await (dbName, relations, pks, funcs, fks)
+        return assemble(
+            databaseName: db, relations: rels, columns: [],
+            primaryKeys: primaryKeys, functions: functions,
+            foreignKeys: foreignKeys
+        )
+    }
+
+    /// Background enrichment — runs the bulk pg_attribute query and
+    /// returns column rows for every relation. Caller folds these
+    /// into the existing snapshot via `merging(columns:)`.
+    static func fetchColumnsAll(client: PostgresClient) async throws -> SchemaSnapshot.ColumnMap {
+        let rows = try await fetchColumns(client: client)
+        var map: SchemaSnapshot.ColumnMap = [:]
+        for c in rows {
+            let key = "\(c.schema)\u{1F}\(c.table)"
+            map[key, default: []].append(
+                ColumnNode(name: c.name, typeName: c.typeName, nullable: !c.notNull, ordinal: c.ordinal)
+            )
+        }
+        return map
+    }
+
+    /// Single-table column fetch. Filtered server-side via
+    /// `pg_class.oid = '<schema>.<table>'::regclass` so we don't have
+    /// to filter 100k rows in Swift just to get a few dozen for the
+    /// table the user is opening.
+    static func fetchColumns(for schema: String, table: String, client: PostgresClient) async throws -> [ColumnNode] {
+        let sql: PostgresQuery = """
+        SELECT a.attname,
+               format_type(a.atttypid, a.atttypmod),
+               a.attnotnull,
+               a.attnum::int
+        FROM pg_attribute a
+        JOIN pg_class c ON c.oid = a.attrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = \(schema)
+          AND c.relname = \(table)
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+        ORDER BY a.attnum
+        """
+        let rows = try await client.query(sql)
+        var out: [ColumnNode] = []
+        for try await (name, typeName, notNull, ordinal) in rows.decode((String, String, Bool, Int).self) {
+            out.append(ColumnNode(name: name, typeName: typeName, nullable: !notNull, ordinal: ordinal))
+        }
+        return out
     }
 
     private static func currentDatabase(client: PostgresClient) async throws -> String {
@@ -168,12 +224,60 @@ enum SchemaFetcher {
         return out
     }
 
+    private struct ForeignKeyRow: Sendable {
+        let localSchema: String
+        let localTable: String
+        let localColumn: String
+        let refSchema: String
+        let refTable: String
+        let refColumn: String
+    }
+
+    /// Single-column foreign keys via `pg_constraint`. We restrict to
+    /// `array_length(conkey, 1) = 1` so multi-column FKs don't pollute
+    /// the table — they'd need multi-cell navigation logic the grid
+    /// doesn't have yet.
+    private static func fetchForeignKeys(client: PostgresClient) async throws -> [ForeignKeyRow] {
+        let sql: PostgresQuery = """
+        SELECT n1.nspname,
+               c1.relname,
+               a1.attname,
+               n2.nspname,
+               c2.relname,
+               a2.attname
+        FROM pg_constraint con
+        JOIN pg_class c1 ON c1.oid = con.conrelid
+        JOIN pg_namespace n1 ON n1.oid = c1.relnamespace
+        JOIN pg_attribute a1 ON a1.attrelid = con.conrelid AND a1.attnum = con.conkey[1]
+        JOIN pg_class c2 ON c2.oid = con.confrelid
+        JOIN pg_namespace n2 ON n2.oid = c2.relnamespace
+        JOIN pg_attribute a2 ON a2.attrelid = con.confrelid AND a2.attnum = con.confkey[1]
+        WHERE con.contype = 'f'
+          AND array_length(con.conkey, 1) = 1
+          AND n1.nspname NOT IN ('pg_catalog','information_schema')
+          AND n1.nspname NOT LIKE 'pg_temp_%'
+          AND n1.nspname NOT LIKE 'pg_toast%'
+        ORDER BY n1.nspname, c1.relname, a1.attname
+        """
+        let rows = try await client.query(sql)
+        var out: [ForeignKeyRow] = []
+        for try await (lschema, ltable, lcol, rschema, rtable, rcol)
+            in rows.decode((String, String, String, String, String, String).self) {
+            out.append(ForeignKeyRow(
+                localSchema: lschema, localTable: ltable, localColumn: lcol,
+                refSchema: rschema, refTable: rtable, refColumn: rcol
+            ))
+        }
+        return out
+    }
+
     private static func assemble(
         databaseName: String,
         relations: [Relation],
         columns: [ColumnRow],
         primaryKeys: [PrimaryKeyRow],
-        functions: [FunctionNode]
+        functions: [FunctionNode],
+        foreignKeys: [ForeignKeyRow]
     ) -> SchemaSnapshot {
         // Bucket columns by (schema, table) once for O(1) lookup during merge.
         var colsByTable: [String: [ColumnNode]] = [:]
@@ -192,6 +296,18 @@ enum SchemaFetcher {
             pksByTable[key, default: []].append(pk.columnName)
         }
 
+        // Bucket foreign keys by (schema, table).
+        var fksByTable: [String: [ForeignKey]] = [:]
+        for fk in foreignKeys {
+            let key = "\(fk.localSchema)\u{1F}\(fk.localTable)"
+            fksByTable[key, default: []].append(ForeignKey(
+                localColumn: fk.localColumn,
+                refSchema: fk.refSchema,
+                refTable: fk.refTable,
+                refColumn: fk.refColumn
+            ))
+        }
+
         // Group relations by schema in original (ordered) iteration.
         var schemas: [SchemaNode] = []
         var indexBySchema: [String: Int] = [:]
@@ -199,7 +315,8 @@ enum SchemaFetcher {
             let key = "\(r.schema)\u{1F}\(r.name)"
             let cols = colsByTable[key] ?? []
             let pk = pksByTable[key] ?? []
-            let table = TableNode(schema: r.schema, name: r.name, kind: r.kind, columns: cols, primaryKey: pk)
+            let fks = fksByTable[key] ?? []
+            let table = TableNode(schema: r.schema, name: r.name, kind: r.kind, columns: cols, primaryKey: pk, foreignKeys: fks)
             if let i = indexBySchema[r.schema] {
                 schemas[i].tables.append(table)
             } else {

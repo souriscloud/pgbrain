@@ -79,6 +79,17 @@ struct TableTabView: View {
             SessionStateStore.shared.scheduleSnapshot()
         }
         .onChange(of: tab.requestedPane) { _, _ in consumeRequestedPane() }
+        // FK navigation can land on a tab that's already mounted;
+        // `.task(id:)` only fires on creation, so this pulse drives
+        // the re-load when the new WHERE clause arrives.
+        .onChange(of: tab.requestedFilterReload) { _, want in
+            guard want else { return }
+            loader.filter.whereClause = tab.tableWhereClause
+            loader.filter.orderByClause = tab.tableOrderByClause
+            loader.pageOffset = 0
+            tab.requestedFilterReload = false
+            Task { await loader.load() }
+        }
         .onChange(of: pane) { _, new in
             // Same cache-first contract — inspector only fetches on
             // the first switch to Structure / DDL; cached afterwards.
@@ -467,6 +478,127 @@ struct TableTabView: View {
     }
 
     private enum RowSQLKind { case insert, delete, duplicate }
+    private enum SelectionFormat { case markdown, slack }
+
+    /// ⌘-click handler: if the clicked cell is on an FK column,
+    /// open the parent table with `WHERE pk = value` pre-applied.
+    /// Non-FK columns silently ignore the click — we don't want to
+    /// repurpose ⌘-click into something noisy.
+    private func navigateForeignKey(row sourceRow: Int, col dataCol: Int) {
+        guard case .loaded(let page) = loader.state,
+              sourceRow >= 0, sourceRow < page.rows.count,
+              dataCol < page.columns.count
+        else { return }
+        let localColumn = page.columns[dataCol].name
+        guard let fk = table.foreignKeys.first(where: { $0.localColumn == localColumn }) else {
+            return
+        }
+        guard let refTable = service.schema.schemas
+                .first(where: { $0.name == fk.refSchema })?
+                .tables.first(where: { $0.name == fk.refTable })
+        else { return }
+        // Compose `"col" = value` honouring the parent column's type.
+        let raw = page.rows[sourceRow][dataCol]
+        let refColumn = refTable.columns.first(where: { $0.name == fk.refColumn })
+        let typeName = refColumn?.typeName ?? "text"
+        let clause: String = raw == nil
+            ? "\(SQLIdent.quote(fk.refColumn)) IS NULL"
+            : "\(SQLIdent.quote(fk.refColumn)) = \(sqlLiteral(raw, typeName: typeName))"
+
+        let existing = service.workspace.tabs.first(where: {
+            if case .table(let t) = $0.kind { return t.id == refTable.id }
+            return false
+        })
+        service.workspace.openTable(refTable)
+        // openTable focuses the existing tab when one exists. Set the
+        // WHERE clause on that tab + pulse the reload signal so the
+        // already-mounted TableTabView re-fetches with the new filter.
+        let opened = existing ?? service.workspace.tabs.first(where: {
+            if case .table(let t) = $0.kind { return t.id == refTable.id }
+            return false
+        })
+        opened?.tableWhereClause = clause
+        opened?.requestedFilterReload = true
+    }
+
+    /// "Filter to this cell's value": AND a `col = lit` (or
+    /// `col IS NULL`) fragment onto the existing WHERE clause.
+    /// Idempotent — running it twice on the same cell produces a
+    /// duplicate AND but PG short-circuits it.
+    private func filterToCell(row sourceRow: Int, col dataCol: Int) {
+        guard case .loaded(let page) = loader.state,
+              sourceRow >= 0, sourceRow < page.rows.count,
+              dataCol < page.columns.count
+        else { return }
+        let column = page.columns[dataCol]
+        let raw = page.rows[sourceRow][dataCol]
+        let fragment: String = {
+            if raw == nil { return "\(SQLIdent.quote(column.name)) IS NULL" }
+            let lit = sqlLiteral(raw, typeName: column.typeName)
+            return "\(SQLIdent.quote(column.name)) = \(lit)"
+        }()
+        appendToWhere(fragment)
+    }
+
+    private func filterColumn(col dataCol: Int, mode: ColumnFilterMode) {
+        guard case .loaded(let page) = loader.state, dataCol < page.columns.count else { return }
+        let name = SQLIdent.quote(page.columns[dataCol].name)
+        let fragment = mode == .isNull ? "\(name) IS NULL" : "\(name) IS NOT NULL"
+        appendToWhere(fragment)
+    }
+
+    private func appendToWhere(_ fragment: String) {
+        let current = loader.filter.whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
+        loader.filter.whereClause = current.isEmpty ? fragment : "(\(current)) AND (\(fragment))"
+        loader.pageOffset = 0
+        Task { await loader.load() }
+    }
+
+    /// Serialise the current row selection (or all visible rows if
+    /// nothing's selected) as either GitHub-flavoured Markdown table
+    /// or a Slack-style ``` block with tab-separated columns.
+    private func copySelection(as format: SelectionFormat) {
+        guard let (visible, _) = loader.filteredPage() else { return }
+        // No selection state up here — use the whole visible page.
+        // A future tweak could let the grid pass selected rows.
+        let columns = visible.columns.map(\.name)
+        let rows = visible.rows.map { row in
+            row.map { $0?.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "|", with: "\\|") ?? "" }
+        }
+        let payload: String
+        switch format {
+        case .markdown:
+            var lines: [String] = []
+            lines.append("| " + columns.joined(separator: " | ") + " |")
+            lines.append("| " + columns.map { _ in "---" }.joined(separator: " | ") + " |")
+            for row in rows {
+                lines.append("| " + row.joined(separator: " | ") + " |")
+            }
+            payload = lines.joined(separator: "\n")
+        case .slack:
+            // Right-pad each cell to the column's widest value so the
+            // monospaced Slack code block aligns visually.
+            var widths = columns.map { $0.count }
+            for row in rows {
+                for (i, cell) in row.enumerated() where i < widths.count {
+                    widths[i] = max(widths[i], cell.count)
+                }
+            }
+            func line(_ cells: [String]) -> String {
+                cells.enumerated().map { i, c in
+                    c.padding(toLength: widths[i], withPad: " ", startingAt: 0)
+                }.joined(separator: "  ")
+            }
+            var lines: [String] = ["```"]
+            lines.append(line(columns))
+            lines.append(line(widths.map { String(repeating: "-", count: $0) }))
+            for row in rows { lines.append(line(row)) }
+            lines.append("```")
+            payload = lines.joined(separator: "\n")
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(payload, forType: .string)
+    }
 
     /// Build SQL for a single source row and put it on the clipboard.
     /// The source row index is into `loader.state`'s underlying page,
@@ -634,7 +766,18 @@ struct TableTabView: View {
                             },
                             onCopyRowAsInsert: { row in copySQL(.insert, for: row) },
                             onCopyRowAsDelete: { row in copySQL(.delete, for: row) },
-                            onDuplicateRow: { row in copySQL(.duplicate, for: row) }
+                            onDuplicateRow: { row in copySQL(.duplicate, for: row) },
+                            onFilterEqualsCell: { row, col in
+                                filterToCell(row: row, col: col)
+                            },
+                            onFilterColumn: { col, mode in
+                                filterColumn(col: col, mode: mode)
+                            },
+                            onCopyAsMarkdown: { copySelection(as: .markdown) },
+                            onCopyAsSlack:    { copySelection(as: .slack) },
+                            onCommandClickCell: { row, col in
+                                navigateForeignKey(row: row, col: col)
+                            }
                         )
                         pagerStrip(visible: visible)
                     }
@@ -718,7 +861,10 @@ final class RowsLoader {
         case error(String)
     }
 
-    let table: TableNode
+    /// Effective table — captured at init from the snapshot but
+    /// re-assigned the first time `load()` runs so we pick up
+    /// columns the background enrichment populated in the meantime.
+    private(set) var table: TableNode
     @ObservationIgnored let service: ConnectionService
     private(set) var state: State = .idle
 
@@ -814,6 +960,14 @@ final class RowsLoader {
         guard let client = service.client else {
             state = .error("Not connected.")
             return
+        }
+        // Phase-2 schema enrichment may not have populated this
+        // table's columns yet (or this connection might have
+        // landed on a shallow snapshot). Ensure them before we
+        // build the SELECT — RowsFetcher uses table.columns to
+        // construct the projection.
+        if table.columns.isEmpty {
+            table = await service.ensureColumns(for: table)
         }
         let hadLoadedPage: Bool
         if case .loaded = state {

@@ -18,6 +18,12 @@ struct NotebookView: View {
 
     @State private var showLibrary = false
     @State private var focusedCellID: UUID?
+    @State private var explainRequest: ExplainSheetState?
+
+    struct ExplainSheetState: Identifiable {
+        let id = UUID()
+        let sql: String
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -60,6 +66,29 @@ struct NotebookView: View {
         .sheet(isPresented: $showLibrary) {
             SavedQueriesView(notebook: notebook) {
                 showLibrary = false
+            }
+        }
+        .sheet(item: $explainRequest) { state in
+            ExplainPlanView(
+                initialSQL: state.sql,
+                runExplain: { analyze in
+                    guard let client = service.client else {
+                        return .failure(Explain.ExplainError.empty)
+                    }
+                    do {
+                        let node = try await Explain.run(sql: state.sql, analyze: analyze, on: client)
+                        return .success(node)
+                    } catch {
+                        return .failure(error)
+                    }
+                },
+                onClose: { explainRequest = nil }
+            )
+        }
+        .onChange(of: notebook.requestedExplainSQL) { _, sql in
+            if let sql, !sql.isEmpty {
+                explainRequest = ExplainSheetState(sql: sql)
+                notebook.requestedExplainSQL = nil
             }
         }
     }
@@ -195,7 +224,10 @@ private struct SqlCellView: View {
                     context: .scratchpad(fullText: fullText, caretIndex: caretIndex)
                 )
             },
-            schema: { service.visibleSchema }
+            schema: { service.visibleSchema },
+            onExplain: { sql in
+                notebook.requestedExplainSQL = sql
+            }
         )
         .frame(minHeight: 30)
         .padding(.horizontal, Tokens.Spacing.md)
@@ -247,6 +279,9 @@ private struct SqlCellEditor: NSViewRepresentable {
     let completions: (_ partial: String, _ fullText: String, _ caretIndex: Int) -> [String]
     /// Live schema snapshot — used by hover-to-identify tooltips.
     let schema: () -> SchemaSnapshot
+    /// Host hook for `Explain Statement` — opens the EXPLAIN sheet
+    /// on the notebook.
+    let onExplain: (String) -> Void
 
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -332,6 +367,7 @@ private struct SqlCellEditor: NSViewRepresentable {
         }
         tv.onBecomeFirstResponder = { context.coordinator.onFocus() }
         tv.schemaProvider = { [weak coord = context.coordinator] in coord?.currentSchema?() }
+        tv.onExplainRequested = onExplain
         tv.string = text
         // Highlight the initial contents — the delegate's edit hook only
         // fires for subsequent mutations.
@@ -405,6 +441,19 @@ final class SqlCellNSTextView: NSTextView {
         // so neither is wired here.
         if event.modifierFlags.contains(.option), event.keyCode == 53 {
             self.complete(nil)
+            return
+        }
+        // ⌘⌥L (JetBrains convention) → Format SQL.
+        if event.modifierFlags.contains([.command, .option]),
+           event.charactersIgnoringModifiers?.lowercased() == "l" {
+            formatSQL(nil)
+            return
+        }
+        // ⌘E → Explain Statement (Postico / DataGrip convention).
+        if event.modifierFlags.contains(.command),
+           !event.modifierFlags.contains(.shift),
+           event.charactersIgnoringModifiers?.lowercased() == "e" {
+            explainStatement(nil)
             return
         }
         // ⌥↓ / ⌥↑ → unconditional jump to next/previous SQL cell,
@@ -550,6 +599,13 @@ final class SqlCellNSTextView: NSTextView {
         menu.addItem(paste)
         menu.addItem(.separator())
         menu.addItem(selectAll)
+        menu.addItem(.separator())
+        let format = NSMenuItem(title: "Format SQL", action: #selector(formatSQL(_:)), keyEquivalent: "")
+        format.target = self
+        menu.addItem(format)
+        let explain = NSMenuItem(title: "Explain Statement", action: #selector(explainStatement(_:)), keyEquivalent: "")
+        explain.target = self
+        menu.addItem(explain)
 
         // SQL-specific block, only when we can resolve something.
         let snapshot = schemaProvider.flatMap { $0() }
@@ -592,6 +648,53 @@ final class SqlCellNSTextView: NSTextView {
         guard let info = sender.representedObject as? String else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(info, forType: .string)
+    }
+
+    /// Resolve the statement under the caret (or selection) and ask
+    /// the host notebook to open the EXPLAIN sheet for it.
+    @objc func explainStatement(_ sender: Any?) {
+        let sql = currentStatementSQL()
+        guard !sql.isEmpty else { return }
+        onExplainRequested?(sql)
+    }
+
+    /// Statement-under-caret resolver shared by Explain + the SQL
+    /// runner. Prefers the user's selection when one exists, else
+    /// the `;`-bounded statement around the caret.
+    private func currentStatementSQL() -> String {
+        let ns = string as NSString
+        let sel = selectedRange()
+        if sel.length > 0 {
+            return ns.substring(with: sel).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let buffer = string
+        let caret = sel.location  // NSString (UTF-16) units
+        let statements = SQLStatementSplitter.split(buffer)
+        for s in statements {
+            let lo = buffer.utf16.distance(from: buffer.startIndex, to: s.range.lowerBound)
+            let hi = buffer.utf16.distance(from: buffer.startIndex, to: s.range.upperBound)
+            if caret >= lo, caret <= hi {
+                return s.trimmed
+            }
+        }
+        return buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Host-provided closure that opens the EXPLAIN sheet.
+    var onExplainRequested: ((String) -> Void)?
+
+    /// Run the SQL formatter on the cell's contents. Replaces the
+    /// whole text storage in one shot so the undo manager records a
+    /// single undoable edit rather than per-token replacements.
+    @objc func formatSQL(_ sender: Any?) {
+        let original = self.string
+        let formatted = SQLFormatter.format(original)
+        guard formatted != original else { return }
+        let full = NSRange(location: 0, length: (original as NSString).length)
+        if shouldChangeText(in: full, replacementString: formatted) {
+            self.textStorage?.replaceCharacters(in: full, with: formatted)
+            didChangeText()
+        }
     }
 
     /// Identifier the cursor / right-click is sitting on. Shares the

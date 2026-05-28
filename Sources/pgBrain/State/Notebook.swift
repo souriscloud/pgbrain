@@ -33,6 +33,10 @@ final class Notebook: Identifiable {
     /// ID of the SQL cell currently running. Powers a green-border outline
     /// in the editor while a run is in flight.
     var runningCellID: UUID?
+    /// Pulse: SQL string the user wants explained. `NotebookView`
+    /// catches the change, opens the EXPLAIN sheet, and clears it.
+    /// Same consume-on-use contract as the tab `requested*` flags.
+    var requestedExplainSQL: String?
 
     init(title: String) {
         self.title = title

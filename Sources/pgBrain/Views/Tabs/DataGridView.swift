@@ -9,6 +9,13 @@ import SwiftUI
 /// key, columns become editable. Double-clicking a cell opens an inline
 /// `NSTextField`; commit on Enter/Tab/focus-loss, Esc reverts. Dirty cells
 /// get a tinted background and a yellow corner triangle.
+/// Quick-filter modes wired into the grid's cell context menu.
+/// Receivers compose the corresponding `col IS NULL` / `col IS NOT
+/// NULL` fragment and AND it onto the existing WHERE clause.
+enum ColumnFilterMode {
+    case isNull, isNotNull
+}
+
 struct DataGridView: NSViewRepresentable {
     let page: RowsFetcher.Page
     /// Pass nil to render the grid read-only (e.g. for SQL scratchpad
@@ -36,6 +43,17 @@ struct DataGridView: NSViewRepresentable {
     var onCopyRowAsInsert: ((Int) -> Void)? = nil
     var onCopyRowAsDelete: ((Int) -> Void)? = nil
     var onDuplicateRow: ((Int) -> Void)? = nil
+    /// "Filter to this value" actions — write a `colname = value`
+    /// fragment into the parent's WHERE strip and reload.
+    var onFilterEqualsCell: ((Int /*sourceRow*/, Int /*dataCol*/) -> Void)? = nil
+    var onFilterColumn: ((Int /*dataCol*/, ColumnFilterMode) -> Void)? = nil
+    /// Selection-export actions. Receivers serialize the current row
+    /// selection in the chosen format and put it on the pasteboard.
+    var onCopyAsMarkdown: (() -> Void)? = nil
+    var onCopyAsSlack: (() -> Void)? = nil
+    /// ⌘-click navigation. Receiver checks whether the cell is on
+    /// an FK column and opens the parent table if so.
+    var onCommandClickCell: ((Int /*sourceRow*/, Int /*dataCol*/) -> Void)? = nil
 
     @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
@@ -48,6 +66,11 @@ struct DataGridView: NSViewRepresentable {
         var onCopyRowAsInsert: ((Int) -> Void)?
         var onCopyRowAsDelete: ((Int) -> Void)?
         var onDuplicateRow: ((Int) -> Void)?
+        var onFilterEqualsCell: ((Int, Int) -> Void)?
+        var onFilterColumn: ((Int, ColumnFilterMode) -> Void)?
+        var onCopyAsMarkdown: (() -> Void)?
+        var onCopyAsSlack: (() -> Void)?
+        var onCommandClickCell: ((Int, Int) -> Void)?
 
         /// Keyboard-focused cell (visible-row index + data-column index,
         /// where data-column-index excludes the row-gutter column 0).
@@ -59,9 +82,43 @@ struct DataGridView: NSViewRepresentable {
         weak var tableView: NSTableView?
         @ObservationIgnored var observationTask: Task<Void, Never>?
 
+        /// Render cache for the type-aware cell formatter. Building
+        /// the attributed string + paragraph style on every cell
+        /// recycle was the dominant per-frame cost during fast scroll.
+        /// Keyed by `(sourceRow << 16) | dataCol` so a 200×10 grid
+        /// caches 2000 entries (~MB). Cleared on page swap + on per-
+        /// cell edit commits.
+        @ObservationIgnored private var renderCache: [Int: CellFormat.Rendered] = [:]
+
         init(page: RowsFetcher.Page, editBuffer: EditBuffer?) {
             self.page = page
             self.editBuffer = editBuffer
+        }
+
+        /// Called by `updateNSView` when the page identity flips so
+        /// we don't serve stale rendered cells for a brand-new
+        /// result set.
+        func invalidateRenderCache() {
+            renderCache.removeAll(keepingCapacity: true)
+        }
+
+        /// Per-cell invalidation — fires from the commit path so the
+        /// next viewFor call re-renders this cell with its pending
+        /// value instead of returning the cached pre-edit string.
+        func invalidateRenderCacheCell(sourceRow: Int, dataCol: Int) {
+            renderCache.removeValue(forKey: renderKey(sourceRow: sourceRow, col: dataCol))
+        }
+
+        func renderKey(sourceRow: Int, col: Int) -> Int {
+            (sourceRow << 16) | (col & 0xFFFF)
+        }
+
+        func cachedRender(sourceRow: Int, col: Int, value: String?, column: ColumnNode) -> CellFormat.Rendered {
+            let key = renderKey(sourceRow: sourceRow, col: col)
+            if let hit = renderCache[key] { return hit }
+            let r = CellFormat.render(value: value, column: column)
+            renderCache[key] = r
+            return r
         }
 
         /// Identifier of the synthetic leftmost row-number column. The
@@ -105,15 +162,15 @@ struct DataGridView: NSViewRepresentable {
             let cell = reuseCell(in: tableView)
             let isApplied = appliedHighlights.contains(EditBuffer.CellKey(row: sourceRow, column: colIdx))
             let isFocused = focusedRow == row && focusedDataCol == colIdx
+            let value = effectiveValue(sourceRow: sourceRow, col: colIdx, original: original)
+            let rendered = cachedRender(sourceRow: sourceRow, col: colIdx, value: value, column: column)
             cell.configure(
-                value: effectiveValue(sourceRow: sourceRow, col: colIdx, original: original),
-                column: column,
+                rendered: rendered,
                 isDirty: editBuffer?.isDirty(row: sourceRow, column: colIdx) ?? false,
                 isRecentlyApplied: isApplied,
                 isFocused: isFocused,
-                editable: editBuffer != nil
+                isNull: value == nil
             )
-            // Inline edit removed; popover is the only edit path.
             cell.onCommit = nil
             return cell
         }
@@ -267,6 +324,55 @@ struct DataGridView: NSViewRepresentable {
             copyName.representedObject = column.name
             menu.addItem(copyName)
 
+            // Filter-to-value bloc. Available regardless of edit
+            // buffer — these write to the WHERE strip, no PK needed.
+            if onFilterEqualsCell != nil || onFilterColumn != nil {
+                menu.addItem(.separator())
+                if onFilterEqualsCell != nil {
+                    let label: String = {
+                        guard let displayed else {
+                            return "Filter to NULL on \(column.name)"
+                        }
+                        let preview = displayed.count > 24
+                            ? String(displayed.prefix(22)) + "…"
+                            : displayed
+                        return "Filter to \"\(preview)\""
+                    }()
+                    let item = NSMenuItem(title: label, action: #selector(handleFilterToCell(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = CellLocator(row: sourceRow, col: dataCol)
+                    menu.addItem(item)
+                }
+                if onFilterColumn != nil {
+                    let nullItem = NSMenuItem(title: "Filter: \(column.name) IS NULL", action: #selector(handleFilterIsNull(_:)), keyEquivalent: "")
+                    nullItem.target = self
+                    nullItem.representedObject = dataCol
+                    menu.addItem(nullItem)
+                    let notNullItem = NSMenuItem(title: "Filter: \(column.name) IS NOT NULL", action: #selector(handleFilterIsNotNull(_:)), keyEquivalent: "")
+                    notNullItem.target = self
+                    notNullItem.representedObject = dataCol
+                    menu.addItem(notNullItem)
+                }
+            }
+
+            // Selection-export bloc. Only meaningful when at least one
+            // row is selected (or focused) — the receivers gate the
+            // pasteboard write themselves but no point cluttering
+            // the menu otherwise.
+            if onCopyAsMarkdown != nil || onCopyAsSlack != nil {
+                menu.addItem(.separator())
+                if onCopyAsMarkdown != nil {
+                    let item = NSMenuItem(title: "Copy selection as Markdown table", action: #selector(handleCopyMarkdown(_:)), keyEquivalent: "")
+                    item.target = self
+                    menu.addItem(item)
+                }
+                if onCopyAsSlack != nil {
+                    let item = NSMenuItem(title: "Copy selection as Slack code block", action: #selector(handleCopySlack(_:)), keyEquivalent: "")
+                    item.target = self
+                    menu.addItem(item)
+                }
+            }
+
             // Row-level actions live on the same menu when the grid has
             // a primary key + edit buffer (i.e. this is a real table).
             if editBuffer != nil {
@@ -341,6 +447,24 @@ struct DataGridView: NSViewRepresentable {
             onDuplicateRow?(r)
         }
 
+        @objc private func handleFilterToCell(_ sender: NSMenuItem) {
+            guard let loc = sender.representedObject as? CellLocator else { return }
+            onFilterEqualsCell?(loc.row, loc.col)
+        }
+
+        @objc private func handleFilterIsNull(_ sender: NSMenuItem) {
+            guard let col = sender.representedObject as? Int else { return }
+            onFilterColumn?(col, .isNull)
+        }
+
+        @objc private func handleFilterIsNotNull(_ sender: NSMenuItem) {
+            guard let col = sender.representedObject as? Int else { return }
+            onFilterColumn?(col, .isNotNull)
+        }
+
+        @objc private func handleCopyMarkdown(_ sender: NSMenuItem) { onCopyAsMarkdown?() }
+        @objc private func handleCopySlack(_ sender: NSMenuItem) { onCopyAsSlack?() }
+
         /// When the buffer has a pending edit for the source row, show it
         /// (which may be `nil` for an explicit Set NULL). Otherwise fall
         /// back to the server value.
@@ -365,11 +489,13 @@ struct DataGridView: NSViewRepresentable {
             if newValue == original {
                 if buffer.isDirty(row: row, column: col) {
                     buffer.clearCell(row: row, column: col)
+                    invalidateRenderCacheCell(sourceRow: row, dataCol: col)
                     reloadRow(row)
                 }
                 return
             }
             buffer.set(row: row, column: col, value: newValue)
+            invalidateRenderCacheCell(sourceRow: row, dataCol: col)
             // SwiftUI's @Observable chain will eventually re-render the
             // table, but on same-key re-edits the observable signals can
             // coalesce and the cell is left displaying its previous text
@@ -460,6 +586,11 @@ struct DataGridView: NSViewRepresentable {
         table.tsvCopyProvider = { [weak coord = context.coordinator] in
             coord?.copyAsTSV()
         }
+        table.onCommandClick = { [weak coord = context.coordinator] visibleRow, dataCol in
+            guard let coord else { return }
+            let sourceRow = coord.sourceIndex(forVisibleRow: visibleRow)
+            coord.onCommandClickCell?(sourceRow, dataCol)
+        }
 
         applyColumns(to: table, coordinator: context.coordinator)
         table.dataSource = context.coordinator
@@ -486,6 +617,11 @@ struct DataGridView: NSViewRepresentable {
         coordinator.onCopyRowAsInsert = onCopyRowAsInsert
         coordinator.onCopyRowAsDelete = onCopyRowAsDelete
         coordinator.onDuplicateRow = onDuplicateRow
+        coordinator.onFilterEqualsCell = onFilterEqualsCell
+        coordinator.onFilterColumn = onFilterColumn
+        coordinator.onCopyAsMarkdown = onCopyAsMarkdown
+        coordinator.onCopyAsSlack = onCopyAsSlack
+        coordinator.onCommandClickCell = onCommandClickCell
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
@@ -500,6 +636,12 @@ struct DataGridView: NSViewRepresentable {
         let appliedChanged = context.coordinator.appliedHighlights != appliedHighlights
         let editBufferRefChanged = context.coordinator.editBuffer !== editBuffer
 
+        // If the page identity changed (different columns or fresh
+        // fetch produced a different row count) the render cache no
+        // longer corresponds to what the user is looking at.
+        if identityChanged || rowCountChanged {
+            context.coordinator.invalidateRenderCache()
+        }
         context.coordinator.page = page
         context.coordinator.editBuffer = editBuffer
         context.coordinator.appliedHighlights = appliedHighlights
@@ -523,6 +665,11 @@ struct DataGridView: NSViewRepresentable {
         }
         table.tsvCopyProvider = { [weak coord = context.coordinator] in
             coord?.copyAsTSV()
+        }
+        table.onCommandClick = { [weak coord = context.coordinator] visibleRow, dataCol in
+            guard let coord else { return }
+            let sourceRow = coord.sourceIndex(forVisibleRow: visibleRow)
+            coord.onCommandClickCell?(sourceRow, dataCol)
         }
         if identityChanged || editableChanged {
             for col in table.tableColumns { table.removeTableColumn(col) }
@@ -663,6 +810,12 @@ final class EditableTableView: NSTableView {
     /// Called to produce TSV for the current selection; result lands on
     /// the system pasteboard.
     var tsvCopyProvider: (() -> String?)?
+    /// ⌘-click navigation hook — fires when the user ⌘-clicks a
+    /// single cell. Caller resolves whether the cell is a foreign
+    /// key and routes to the parent table if so. `visibleRow` is the
+    /// row in the currently-filtered view; `dataCol` is 0-indexed
+    /// over data columns (not including the gutter).
+    var onCommandClick: ((Int, Int) -> Void)?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let chars = event.charactersIgnoringModifiers ?? ""
@@ -684,6 +837,25 @@ final class EditableTableView: NSTableView {
             }
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // ⌘-click → fire the FK-navigation hook on the cell under
+        // the cursor. Falls through to NSTableView's normal click
+        // handling otherwise.
+        if event.modifierFlags.contains(.command), event.clickCount == 1,
+           let handler = onCommandClick {
+            let point = convert(event.locationInWindow, from: nil)
+            let row = self.row(at: point)
+            let tableCol = self.column(at: point)
+            // tableCol 0 is the gutter; anything past it is a data
+            // column index N → dataCol N-1.
+            if row >= 0, tableCol > 0 {
+                handler(row, tableCol - 1)
+                return
+            }
+        }
+        super.mouseDown(with: event)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -728,7 +900,12 @@ final class HoverableRowView: NSTableRowView {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        if let existing = trackingArea { removeTrackingArea(existing) }
+        // Tracking areas with `.inVisibleRect` follow bounds without
+        // being rebuilt, so we only need to install one ever. The
+        // previous code recreated the area on every layout pass and
+        // tableview row-recycling triggers a lot of layout passes
+        // mid-scroll — visible as the "clunky" feel the user reported.
+        if trackingArea != nil { return }
         let area = NSTrackingArea(
             rect: bounds,
             options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
@@ -740,6 +917,15 @@ final class HoverableRowView: NSTableRowView {
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
     override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    /// NSTableView recycles row views — when a row view is detached
+    /// from its old visible row and reattached to a new one, the
+    /// hover state from the old row would leak through until the
+    /// mouse moves. Reset on each prepare.
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        isHovered = false
+    }
 
     override func drawBackground(in dirtyRect: NSRect) {
         super.drawBackground(in: dirtyRect)
@@ -825,12 +1011,26 @@ private final class DataCellView: NSTableCellView, NSTextFieldDelegate {
     private var isDirty = false
     private var isRecentlyApplied = false
     private var isFocused = false
+    /// Identity of the last NSAttributedString we assigned to the
+    /// field, so configure() can skip the re-assignment (and the
+    /// layout invalidation that comes with it) when the coordinator
+    /// hands us the same cached Rendered.
+    private var lastAttributedID: ObjectIdentifier?
+    /// Cached tooltip string — set with `setToolTip` only when it
+    /// actually changes. (Setting the same toolTip is technically
+    /// cheap, but every per-cell write during a recycle storm shows
+    /// up in profiles.)
+    private var lastToolTip: String?
     var onCommit: ((String) -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        field.translatesAutoresizingMaskIntoConstraints = false
+        // Manual frame layout — AutoLayout per cell × per scroll tick
+        // adds up to the dominant cost during fast scrolling. We set
+        // the field's frame directly in `layout()` instead.
+        field.translatesAutoresizingMaskIntoConstraints = true
+        field.autoresizingMask = []
         field.isBordered = false
         field.isBezeled = false
         field.drawsBackground = false
@@ -842,22 +1042,42 @@ private final class DataCellView: NSTableCellView, NSTextFieldDelegate {
         field.cell?.isScrollable = true
         field.delegate = self
         addSubview(field)
-
-        NSLayoutConstraint.activate([
-            // Left-padding leaves room for the dirty/applied rail.
-            field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            field.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
         self.textField = field
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    override func layout() {
+        super.layout()
+        // 8pt left inset leaves room for the dirty/applied rail, 6pt
+        // right inset stops content from kissing the column boundary.
+        let inset = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 6)
+        let h = NSFont.systemFont(ofSize: 12).boundingRectForFont.height + 2
+        field.frame = NSRect(
+            x: inset.left,
+            y: (bounds.height - h) / 2,
+            width: max(0, bounds.width - inset.left - inset.right),
+            height: h
+        )
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        // Drop the dedupe caches so the recycled cell rebinds from
+        // scratch against whatever row it's now serving.
+        lastAttributedID = nil
+        lastToolTip = nil
+    }
+
     override func draw(_ dirtyRect: NSRect) {
-        // Background tints first (use `bounds`, not the dirtyRect — the
-        // dirtyRect is whatever AppKit happens to be invalidating and
-        // gives a partial fill on scroll/refresh).
+        // Common-case fast path: the cell has no dirty / applied /
+        // focused state to render, so skip every custom op and let
+        // AppKit's default draw run uninterrupted. This is what
+        // 99% of cells are during a scroll storm.
+        if !isDirty && !isRecentlyApplied && !isFocused {
+            super.draw(dirtyRect)
+            return
+        }
         if isDirty {
             NSColor.systemYellow.withAlphaComponent(0.10).setFill()
             bounds.fill()
@@ -866,7 +1086,6 @@ private final class DataCellView: NSTableCellView, NSTextFieldDelegate {
             bounds.fill()
         }
         super.draw(dirtyRect)
-        // Then the left rail on top so it reads cleanly.
         if isDirty {
             NSColor.systemYellow.setFill()
             NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
@@ -875,8 +1094,6 @@ private final class DataCellView: NSTableCellView, NSTextFieldDelegate {
             NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
         }
         if isFocused {
-            // Cell-level focus ring drawn inside the bounds so it isn't
-            // clipped by the intercell spacing. Brand violet.
             let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 3, yRadius: 3)
             path.lineWidth = 1.5
             #colorLiteral(red: 0.42, green: 0.32, blue: 0.86, alpha: 0.9).setStroke()
@@ -886,42 +1103,54 @@ private final class DataCellView: NSTableCellView, NSTextFieldDelegate {
 
     private var rawForEditor: String = ""
 
-    func configure(value: String?, column: ColumnNode, isDirty: Bool, isRecentlyApplied: Bool, isFocused: Bool, editable: Bool) {
-        currentKind = ColumnTypeKind.from(typeName: column.typeName)
-        currentValueIsNull = (value == nil)
-        // Inline editing disabled — popover handles all edits. Cell stays
-        // selectable so users can ⌘C the displayed text.
+    /// Fast configure — takes a pre-rendered attributed string from
+    /// the coordinator's render cache instead of re-running the
+    /// formatter on every recycle. Skips redundant per-cell writes
+    /// (attributed string, tooltip, needsDisplay) when nothing
+    /// visually changed since the previous configure.
+    func configure(rendered: CellFormat.Rendered, isDirty: Bool, isRecentlyApplied: Bool, isFocused: Bool, isNull: Bool) {
+        currentValueIsNull = isNull
+        // These are cheap idempotent property writes; leave alone.
         field.isEditable = false
         field.isSelectable = true
+
+        // Only mark for redisplay if a visual state ACTUALLY changed.
+        // Most cell recycles during scroll have identical state to
+        // the previous occupant — letting AppKit skip the redraw is
+        // the big scroll-fps win.
+        let stateChanged = (self.isDirty != isDirty)
+            || (self.isRecentlyApplied != isRecentlyApplied)
+            || (self.isFocused != isFocused)
         self.isDirty = isDirty
         self.isRecentlyApplied = isRecentlyApplied
         self.isFocused = isFocused
-        needsDisplay = true
 
-        // Bake alignment into a paragraph style attached to the whole
-        // string so we don't have to also set `field.alignment` (which can
-        // override the attributed string in subtle ways).
-        let rendered = CellFormat.render(value: value, column: column)
-        let mutable = NSMutableAttributedString(attributedString: rendered.attributed)
-        let para = NSMutableParagraphStyle()
-        para.alignment = rendered.alignment
-        para.lineBreakMode = .byTruncatingTail
-        mutable.addAttribute(.paragraphStyle, value: para,
-                             range: NSRange(location: 0, length: mutable.length))
-        field.placeholderString = nil
-        field.attributedStringValue = mutable
-        lastConfiguredText = mutable.string
-        rawForEditor = rendered.rawForEditor
-        // Hover-tooltip the full value when the rendered string is long
-        // enough to plausibly truncate. Cheaper than a real layout pass
-        // and free for the user — AppKit only shows the tooltip on a
-        // dwell, so short cells aren't bothered.
-        let full = rendered.rawForEditor
-        if full.count > 32 || full.contains("\n") {
-            self.toolTip = full
-        } else {
-            self.toolTip = nil
+        // Skip the attributedStringValue set when the coordinator's
+        // render cache handed us the same NSAttributedString as last
+        // time — NSTextField's setter triggers cell-content layout
+        // invalidation that's not free.
+        let nextID = ObjectIdentifier(rendered.attributed)
+        if lastAttributedID != nextID {
+            field.placeholderString = nil
+            field.attributedStringValue = rendered.attributed
+            lastAttributedID = nextID
+            lastConfiguredText = rendered.attributed.string
+            rawForEditor = rendered.rawForEditor
         }
+
+        // Long-text tooltip — only changed when the string changed.
+        let nextToolTip: String? = {
+            if rendered.attributed.length > 32 || rendered.attributed.string.contains("\n") {
+                return rendered.rawForEditor
+            }
+            return nil
+        }()
+        if lastToolTip != nextToolTip {
+            self.toolTip = nextToolTip
+            lastToolTip = nextToolTip
+        }
+
+        if stateChanged { needsDisplay = true }
     }
 
     func controlTextDidBeginEditing(_ notif: Notification) {

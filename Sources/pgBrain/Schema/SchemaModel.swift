@@ -8,6 +8,40 @@ struct SchemaSnapshot: Equatable, Sendable {
     var schemas: [SchemaNode]
 
     static let empty = SchemaSnapshot(databaseName: "", schemas: [])
+
+    /// `"schema\u{1F}table"` → `[ColumnNode]`. Used by the lazy-load
+    /// path: `SchemaFetcher.fetchColumnsAll` produces one of these,
+    /// `merging(columns:)` folds it back into the snapshot in place.
+    typealias ColumnMap = [String: [ColumnNode]]
+
+    /// Returns a copy of the snapshot with each table's column list
+    /// populated from `columns`. Tables missing from the map are
+    /// left untouched so per-table on-demand loads layered on top
+    /// don't get clobbered.
+    func merging(columns: ColumnMap) -> SchemaSnapshot {
+        var out = self
+        for i in out.schemas.indices {
+            for j in out.schemas[i].tables.indices {
+                let key = "\(out.schemas[i].name)\u{1F}\(out.schemas[i].tables[j].name)"
+                if let cols = columns[key] {
+                    out.schemas[i].tables[j].columns = cols
+                }
+            }
+        }
+        return out
+    }
+
+    /// Set the column list for one specific table (used by the
+    /// single-table on-demand loader). No-op when the table isn't
+    /// in the snapshot.
+    func mergingColumns(forSchema schema: String, table: String, columns: [ColumnNode]) -> SchemaSnapshot {
+        var out = self
+        guard let i = out.schemas.firstIndex(where: { $0.name == schema }),
+              let j = out.schemas[i].tables.firstIndex(where: { $0.name == table })
+        else { return out }
+        out.schemas[i].tables[j].columns = columns
+        return out
+    }
 }
 
 struct SchemaNode: Equatable, Identifiable, Sendable {
@@ -57,6 +91,11 @@ struct TableNode: Equatable, Identifiable, Sendable {
     /// Names of columns making up the primary key, in index order. Empty when
     /// the relation has no primary key (or is a view) — gates row editing.
     var primaryKey: [String] = []
+    /// Single-column foreign keys discovered on this table. Powers
+    /// ⌘-click "jump to parent row" in the data grid. Composite FKs
+    /// are skipped for v1 — they'd need every key column's cell value
+    /// gathered to navigate cleanly.
+    var foreignKeys: [ForeignKey] = []
 
     var id: String { "\(schema).\(name)" }
     var qualifiedName: String { "\(schema).\(name)" }
@@ -72,6 +111,13 @@ struct TableNode: Equatable, Identifiable, Sendable {
     var primaryKeyColumns: [ColumnNode] {
         primaryKey.compactMap { name in columns.first(where: { $0.name == name }) }
     }
+}
+
+struct ForeignKey: Equatable, Sendable {
+    var localColumn: String
+    var refSchema: String
+    var refTable: String
+    var refColumn: String
 }
 
 struct ColumnNode: Equatable, Identifiable, Sendable {

@@ -302,12 +302,49 @@ final class ConnectionService {
         schemaState = .loading
         let op = operations.begin(kind: .schema, summary: "Loading schema for \(connection.database.isEmpty ? "default db" : connection.database)")
         do {
+            // Phase 1 — shallow fetch (no columns). Fast, makes the
+            // sidebar usable in <1s even on big DBs.
             schema = try await SchemaFetcher.fetch(client: client)
             schemaState = .loaded
             operations.finish(op, status: .succeeded)
+            // Phase 2 — background column enrichment so completion +
+            // hover light up for every table eventually, without
+            // blocking the user from doing real work.
+            Task { [weak self] in
+                guard let self else { return }
+                let enrichOp = operations.begin(kind: .schema, summary: "Loading column details")
+                do {
+                    let columns = try await SchemaFetcher.fetchColumnsAll(client: client)
+                    self.schema = self.schema.merging(columns: columns)
+                    self.operations.finish(enrichOp, status: .succeeded)
+                } catch {
+                    self.operations.finish(enrichOp, status: .failed(error.localizedDescription))
+                }
+            }
         } catch {
             schemaState = .error(error.localizedDescription)
             operations.finish(op, status: .failed(error.localizedDescription))
+        }
+    }
+
+    /// On-demand single-table column load. Used by `RowsLoader` when
+    /// it opens a table whose columns haven't reached the snapshot
+    /// from the phase-2 enrichment yet. Returns a TableNode with
+    /// `columns` populated; no-op (returns the input) if columns are
+    /// already loaded or the fetch fails.
+    func ensureColumns(for table: TableNode) async -> TableNode {
+        if !table.columns.isEmpty { return table }
+        guard let client else { return table }
+        do {
+            let cols = try await SchemaFetcher.fetchColumns(
+                for: table.schema, table: table.name, client: client
+            )
+            schema = schema.mergingColumns(forSchema: table.schema, table: table.name, columns: cols)
+            var enriched = table
+            enriched.columns = cols
+            return enriched
+        } catch {
+            return table
         }
     }
 

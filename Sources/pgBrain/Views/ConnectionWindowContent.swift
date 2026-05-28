@@ -1,11 +1,26 @@
 import SwiftUI
 
+extension Notification.Name {
+    /// Posted by the command palette to ask the connection-window
+    /// matching `object as? UUID` to show its Activity Panel sheet.
+    static let pgbrainOpenActivityPanel = Notification.Name("cloud.souris.pgbrain.openActivityPanel")
+    /// Asks the matching window to prompt the user for a name and
+    /// save the current tab set as a workspace.
+    static let pgbrainSaveWorkspace = Notification.Name("cloud.souris.pgbrain.saveWorkspace")
+    /// Asks the matching window to switch to a saved workspace.
+    /// `userInfo["workspaceID"]` carries the `SavedWorkspace.id`.
+    static let pgbrainSwitchWorkspace = Notification.Name("cloud.souris.pgbrain.switchWorkspace")
+}
+
 struct ConnectionWindowContent: View {
     @Bindable var service: ConnectionService
     @State private var copySource: TableNode?
     @State private var showSchemaDiff = false
     @State private var sidebarFilter: String = ""
     @State private var sidebarVisible: Bool = true
+    @State private var showActivityPanel = false
+    @State private var showSaveWorkspaceDialog = false
+    @State private var workspaceNameDraft = ""
 
     /// Convenience pass-through to `service.visibleSchema` so views
     /// in this file can read the filtered snapshot without re-doing
@@ -37,6 +52,40 @@ struct ConnectionWindowContent: View {
         }
         .sheet(isPresented: $showSchemaDiff) {
             SchemaDiffView(source: service) { showSchemaDiff = false }
+        }
+        .sheet(isPresented: $showActivityPanel) {
+            ActivityPanelView(service: service) { showActivityPanel = false }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainOpenActivityPanel)) { notif in
+            // ⌘K → "Show Activity Panel" posts this with the target
+            // connection ID. Only the window that owns that
+            // connection should react.
+            if let id = notif.object as? UUID, id == service.connection.id {
+                showActivityPanel = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainSaveWorkspace)) { notif in
+            if let id = notif.object as? UUID, id == service.connection.id {
+                workspaceNameDraft = "Workspace \((WorkspaceStore.shared.workspaces(for: service.connection.id).count) + 1)"
+                showSaveWorkspaceDialog = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainSwitchWorkspace)) { notif in
+            guard let connID = notif.object as? UUID, connID == service.connection.id,
+                  let wsID = notif.userInfo?["workspaceID"] as? UUID,
+                  let ws = WorkspaceStore.shared.workspaces(for: connID).first(where: { $0.id == wsID })
+            else { return }
+            switchTo(workspace: ws)
+        }
+        .alert("Name this workspace", isPresented: $showSaveWorkspaceDialog) {
+            TextField("Workspace name", text: $workspaceNameDraft)
+            Button("Save") {
+                let trimmed = workspaceNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { saveCurrentAsWorkspace(named: trimmed) }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Captures every open tab — schema, scratchpad text, colour, WHERE/ORDER BY. Switch back later from the Workspaces menu.")
         }
     }
 
@@ -152,6 +201,93 @@ struct ConnectionWindowContent: View {
             service.workspace.closeCurrentTab()
         } else {
             NSApp.keyWindow?.performClose(nil)
+        }
+    }
+
+    // MARK: - Saved workspaces
+
+    /// Snapshot every open tab into a `SavedWorkspace` + persist it.
+    /// Scratchpad text comes from the live `Notebook.plainText` so the
+    /// saved snapshot includes any unsaved query edits.
+    private func saveCurrentAsWorkspace(named name: String) {
+        let tabs: [SavedWorkspaceTab] = service.workspace.tabs.map { tab in
+            switch tab.kind {
+            case .table(let t):
+                return SavedWorkspaceTab(
+                    kind: .table,
+                    tableSchema: t.schema,
+                    tableName: t.name,
+                    tableWhereClause: tab.tableWhereClause.isEmpty ? nil : tab.tableWhereClause,
+                    tableOrderByClause: tab.tableOrderByClause.isEmpty ? nil : tab.tableOrderByClause,
+                    colorTag: tab.color?.rawValue,
+                    tabTitle: tab.title == t.qualifiedName ? nil : tab.title
+                )
+            case .scratchpad(let pad):
+                return SavedWorkspaceTab(
+                    kind: .scratchpad,
+                    scratchpadTitle: pad.title,
+                    scratchpadText: pad.plainText,
+                    scratchpadSearchPath: pad.searchPath,
+                    colorTag: tab.color?.rawValue,
+                    tabTitle: tab.title == pad.title ? nil : tab.title
+                )
+            }
+        }
+        let selectedIndex: Int? = service.workspace.selectedID.flatMap { id in
+            service.workspace.tabs.firstIndex(where: { $0.id == id })
+        }
+        let ws = SavedWorkspace(
+            id: UUID(), name: name,
+            tabs: tabs, selectedTabIndex: selectedIndex,
+            createdAt: Date()
+        )
+        WorkspaceStore.shared.save(ws, for: service.connection.id)
+    }
+
+    /// Replace the current tab set with the saved one. We close every
+    /// open tab first (no confirmation — workspaces are how the user
+    /// "saves" their state, so this is the explicit opt-in to
+    /// discard) then replay the saved tabs in order.
+    private func switchTo(workspace: SavedWorkspace) {
+        for tab in service.workspace.tabs {
+            service.workspace.closeTab(id: tab.id)
+        }
+        for saved in workspace.tabs {
+            switch saved.kind {
+            case .table:
+                guard let schema = saved.tableSchema, let name = saved.tableName,
+                      let live = service.schema.schemas
+                        .first(where: { $0.name == schema })?
+                        .tables.first(where: { $0.name == name })
+                else { continue }
+                service.workspace.openTable(live)
+                if let opened = service.workspace.tabs.last {
+                    opened.tableWhereClause = saved.tableWhereClause ?? ""
+                    opened.tableOrderByClause = saved.tableOrderByClause ?? ""
+                    opened.color = saved.colorTag.flatMap { Connection.ColorTag(rawValue: $0) }
+                    if let custom = saved.tabTitle { opened.title = custom }
+                }
+            case .scratchpad:
+                let pad = service.workspace.openScratchpad()
+                if let title = saved.scratchpadTitle { pad.title = title }
+                if let text = saved.scratchpadText, !text.isEmpty,
+                   let firstSql = pad.cells.first(where: { $0.kind == .sql }) {
+                    firstSql.text = text
+                }
+                pad.searchPath = saved.scratchpadSearchPath
+                if let opened = service.workspace.tabs.last {
+                    opened.color = saved.colorTag.flatMap { Connection.ColorTag(rawValue: $0) }
+                    if let custom = saved.tabTitle {
+                        opened.title = custom
+                    } else if let scratchTitle = saved.scratchpadTitle {
+                        opened.title = scratchTitle
+                    }
+                }
+            }
+        }
+        if let idx = workspace.selectedTabIndex,
+           service.workspace.tabs.indices.contains(idx) {
+            service.workspace.selectedID = service.workspace.tabs[idx].id
         }
     }
 
@@ -281,6 +417,31 @@ struct ConnectionWindowContent: View {
                 Divider()
                 Button("Reload schema") { Task { await service.loadSchema() } }
                 Button("Diff schemas…") { showSchemaDiff = true }
+                Button("Activity…") { showActivityPanel = true }
+                Divider()
+                Menu("Workspaces") {
+                    Button("Save current as workspace…") {
+                        workspaceNameDraft = "Workspace \((WorkspaceStore.shared.workspaces(for: service.connection.id).count) + 1)"
+                        showSaveWorkspaceDialog = true
+                    }
+                    let saved = WorkspaceStore.shared.workspaces(for: service.connection.id)
+                    if !saved.isEmpty {
+                        Divider()
+                        Section("Switch to") {
+                            ForEach(saved) { ws in
+                                Button(ws.name) { switchTo(workspace: ws) }
+                            }
+                        }
+                        Divider()
+                        Menu("Delete") {
+                            ForEach(saved) { ws in
+                                Button(ws.name, role: .destructive) {
+                                    WorkspaceStore.shared.delete(id: ws.id, for: service.connection.id)
+                                }
+                            }
+                        }
+                    }
+                }
                 Divider()
                 // Schema-visibility toggles. Hidden schemas disappear
                 // from the sidebar tree AND completion suggestions

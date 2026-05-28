@@ -113,7 +113,49 @@ enum CommandProviders {
                 shortcut: nil,
                 action: { Task { await service.loadSchema() } }
             ),
+            CommandItem(
+                id: "action.activityPanel",
+                icon: "waveform.path.ecg",
+                title: "Show Activity Panel",
+                subtitle: "Live pg_stat_activity for this database",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    AppDelegate.shared?.openConnection(service.connection)
+                    NotificationCenter.default.post(name: .pgbrainOpenActivityPanel, object: service.connection.id)
+                }
+            ),
+            CommandItem(
+                id: "action.saveWorkspace",
+                icon: "square.stack.3d.up",
+                title: "Save Workspace…",
+                subtitle: "Snapshot the current tab set",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    NotificationCenter.default.post(name: .pgbrainSaveWorkspace, object: service.connection.id)
+                }
+            ),
         ]
+        // One palette item per saved workspace — quick switch via
+        // ⌘K rather than mousing into the sidebar menu.
+        for ws in WorkspaceStore.shared.workspaces(for: service.connection.id) {
+            items.append(CommandItem(
+                id: "action.switchWorkspace.\(ws.id.uuidString)",
+                icon: "square.stack.3d.up.fill",
+                title: "Switch to: \(ws.name)",
+                subtitle: "\(ws.tabs.count) tab\(ws.tabs.count == 1 ? "" : "s")",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    NotificationCenter.default.post(
+                        name: .pgbrainSwitchWorkspace,
+                        object: service.connection.id,
+                        userInfo: ["workspaceID": ws.id]
+                    )
+                }
+            ))
+        }
         // Cancel-running shows up only when something's actually in flight,
         // so the palette doesn't pretend you can cancel idleness.
         let running = service.operations.operations.filter { !$0.isFinished }
