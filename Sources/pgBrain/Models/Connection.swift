@@ -53,4 +53,42 @@ struct Connection: Identifiable, Codable, Hashable {
     var isProduction: Bool = false
 
     static let placeholder = Connection(name: "")
+
+    init(
+        id: UUID = UUID(), name: String, host: String = "localhost", port: Int = 5432,
+        database: String = "", username: String = "", sslMode: SSLMode = .prefer,
+        colorTag: ColorTag = .none, sshEnabled: Bool = false, sshHost: String = "",
+        sshPort: Int = 22, sshUser: String = "", sshKeyPath: String = "", isProduction: Bool = false
+    ) {
+        self.id = id; self.name = name; self.host = host; self.port = port
+        self.database = database; self.username = username; self.sslMode = sslMode
+        self.colorTag = colorTag; self.sshEnabled = sshEnabled; self.sshHost = sshHost
+        self.sshPort = sshPort; self.sshUser = sshUser; self.sshKeyPath = sshKeyPath
+        self.isProduction = isProduction
+    }
+
+    // Tolerant decoder: every field except `name`/`id` is optional in
+    // the on-disk JSON. Without this, a connections.json written by an
+    // older build (before the SSH fields existed) fails to decode — and
+    // because `ConnectionStore.load` does `try? … ?? []`, the user's
+    // entire connection list silently vanishes after an update. Decode
+    // each key with `decodeIfPresent` and fall back to the property
+    // default so old files keep working forever.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try c.decodeIfPresent(UUID.self, forKey: .id)) ?? UUID()
+        name = (try c.decodeIfPresent(String.self, forKey: .name)) ?? ""
+        host = (try c.decodeIfPresent(String.self, forKey: .host)) ?? "localhost"
+        port = (try c.decodeIfPresent(Int.self, forKey: .port)) ?? 5432
+        database = (try c.decodeIfPresent(String.self, forKey: .database)) ?? ""
+        username = (try c.decodeIfPresent(String.self, forKey: .username)) ?? ""
+        sslMode = (try c.decodeIfPresent(SSLMode.self, forKey: .sslMode)) ?? .prefer
+        colorTag = (try c.decodeIfPresent(ColorTag.self, forKey: .colorTag)) ?? .none
+        sshEnabled = (try c.decodeIfPresent(Bool.self, forKey: .sshEnabled)) ?? false
+        sshHost = (try c.decodeIfPresent(String.self, forKey: .sshHost)) ?? ""
+        sshPort = (try c.decodeIfPresent(Int.self, forKey: .sshPort)) ?? 22
+        sshUser = (try c.decodeIfPresent(String.self, forKey: .sshUser)) ?? ""
+        sshKeyPath = (try c.decodeIfPresent(String.self, forKey: .sshKeyPath)) ?? ""
+        isProduction = (try c.decodeIfPresent(Bool.self, forKey: .isProduction)) ?? false
+    }
 }
