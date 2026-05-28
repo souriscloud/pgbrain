@@ -45,6 +45,15 @@ struct CommandPaletteView: View {
     let onDismiss: () -> Void
     @FocusState private var searchFocused: Bool
 
+    /// Cursor location when the palette opened. SwiftUI's `.onHover`
+    /// fires for whatever row happens to be under the cursor the
+    /// instant the panel renders, which yanks the keyboard selection
+    /// away from the default top row. We compare against this on each
+    /// hover event and ignore the first round of fires until the user
+    /// has actually moved the mouse.
+    @State private var openedMouseLocation: CGPoint = .zero
+    @State private var hoverArmed = false
+
     var body: some View {
         VStack(spacing: 0) {
             searchBar
@@ -60,7 +69,11 @@ struct CommandPaletteView: View {
                 .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.35), radius: 30, x: 0, y: 16)
-        .onAppear { searchFocused = true }
+        .onAppear {
+            searchFocused = true
+            openedMouseLocation = NSEvent.mouseLocation
+            hoverArmed = false
+        }
         .onChange(of: model.query) { _, _ in model.reset() }
         // The local NSEvent monitor consumes ↑/↓ before they reach the
         // text field, but the @FocusState binding silently drops to
@@ -110,7 +123,19 @@ struct CommandPaletteView: View {
                             onExecute(item)
                         }
                         .onHover { hovering in
-                            if hovering { model.selectionIndex = idx }
+                            guard hovering else { return }
+                            // Suppress the first hover fire(s) when the
+                            // cursor was already sitting on a row at open
+                            // time — only honour hover after the user
+                            // actually moves the mouse.
+                            if !hoverArmed {
+                                let now = NSEvent.mouseLocation
+                                let dx = abs(now.x - openedMouseLocation.x)
+                                let dy = abs(now.y - openedMouseLocation.y)
+                                if dx < 2, dy < 2 { return }
+                                hoverArmed = true
+                            }
+                            model.selectionIndex = idx
                         }
                     }
                 }

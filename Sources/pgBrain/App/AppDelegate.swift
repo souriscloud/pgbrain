@@ -135,9 +135,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// tab against the live schema. Tables that no longer exist are dropped.
     private func restoreTabs(into service: ConnectionService, from snapshot: SessionState.Window) {
         Task { @MainActor in
-            // Spin until the schema is loaded or errored; bail on error.
-            while case .loading = service.schemaState {
-                try? await Task.sleep(nanoseconds: 100_000_000)
+            // Spin until the schema reaches a terminal state. The earlier
+            // version only waited on `.loading`, but a fresh window starts
+            // at `.idle` and may stay there for a beat before connect kicks
+            // off — `case .idle` would fall through the wait and the
+            // subsequent `case .loaded` check would fail, leaving tabs
+            // unrestored. Loop while idle OR loading; exit on loaded/error.
+            // Hard cap at ~30s so a hung connect can't park this Task
+            // forever.
+            let deadline = Date().addingTimeInterval(30)
+            while Date() < deadline {
+                switch service.schemaState {
+                case .loaded, .error:
+                    break
+                case .idle, .loading:
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    continue
+                }
+                break
             }
             if case .loaded = service.schemaState {
                 let workspace = service.workspace
