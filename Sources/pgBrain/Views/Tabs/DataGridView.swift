@@ -492,13 +492,19 @@ struct DataGridView: NSViewRepresentable {
         guard let table = scroll.documentView as? EditableTableView else { return }
         let identityChanged = !columnsMatch(coordinator: context.coordinator, new: page.columns)
         let editableChanged = (context.coordinator.editBuffer != nil) != (editBuffer != nil)
+        // Detect the meaningful change set BEFORE we mutate the coordinator
+        // — so we can decide whether to fire a full reloadData (slow)
+        // or partial updates (cheap, scroll-safe).
+        let rowCountChanged = context.coordinator.page.rows.count != page.rows.count
+            || context.coordinator.sourceRowIndices.count != sourceRowIndices.count
+        let appliedChanged = context.coordinator.appliedHighlights != appliedHighlights
+        let editBufferRefChanged = context.coordinator.editBuffer !== editBuffer
+
         context.coordinator.page = page
         context.coordinator.editBuffer = editBuffer
         context.coordinator.appliedHighlights = appliedHighlights
         context.coordinator.rebuildIndex()
         propagateState(to: context.coordinator)
-        // Clear focus on identity / row-count changes — anchoring it to
-        // a row that's no longer present would be confusing.
         if identityChanged || sourceRowIndices.count != table.numberOfRows {
             context.coordinator.focusedRow = nil
             context.coordinator.focusedDataCol = nil
@@ -519,15 +525,34 @@ struct DataGridView: NSViewRepresentable {
             coord?.copyAsTSV()
         }
         if identityChanged || editableChanged {
-            // Remove all columns and re-add — happens on tab swap or when
-            // the editability of the grid flips.
             for col in table.tableColumns { table.removeTableColumn(col) }
             applyColumns(to: table, coordinator: context.coordinator)
-        } else {
-            // Refresh header arrows in case the parent's ORDER BY moved.
-            updateHeaderSortIndicators(table: table)
+            table.reloadData()
+            return
         }
-        table.reloadData()
+        // Cheap-path updates. SwiftUI calls updateNSView on *every*
+        // observable change in the parent (dirty count, isRefreshing,
+        // refreshError flicker, …) so the previous unconditional
+        // `reloadData()` was tearing down + rebuilding every visible
+        // row mid-scroll. Now we only reload when the data actually
+        // changed shape.
+        updateHeaderSortIndicators(table: table)
+        if rowCountChanged {
+            table.reloadData()
+        } else if appliedChanged || editBufferRefChanged {
+            // Repaint just the visible rows so the green-rail flash +
+            // dirty-rail flip without nuking scroll position.
+            let visible = table.rows(in: table.visibleRect)
+            if visible.length > 0 {
+                table.reloadData(
+                    forRowIndexes: IndexSet(integersIn: visible.location..<(visible.location + visible.length)),
+                    columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns)
+                )
+            }
+        }
+        // Otherwise: no reload. Cells repaint themselves on their own
+        // bounds invalidations; per-cell edits already call
+        // `reloadRow(_:)` from the commit path.
     }
 
     private func updateHeaderSortIndicators(table: NSTableView) {

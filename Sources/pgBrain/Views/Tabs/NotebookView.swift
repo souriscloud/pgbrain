@@ -385,6 +385,11 @@ final class SqlCellNSTextView: NSTextView {
     /// Tracking area for hover-to-identify. Recreated whenever bounds
     /// change so the area stays the size of the visible cell.
     private var hoverTracking: NSTrackingArea?
+    /// Character index resolved by the *previous* mouseMoved call.
+    /// Used to skip the schema lookup when the cursor hasn't crossed
+    /// into a new character — otherwise every pixel of mouse motion
+    /// re-scans the entire schema and tanks scratchpad scroll fps.
+    private var lastHoverCharIndex: Int = -1
 
     override func keyDown(with event: NSEvent) {
         // ⌘↩ → run.
@@ -505,17 +510,22 @@ final class SqlCellNSTextView: NSTextView {
 
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
-        // characterIndexForInsertion gives a between-glyph index, but
-        // for hover we want the char UNDER the cursor — clamp left if
-        // we're past the last identifier char.
+        // Cheap gate: skip the schema resolution unless the cursor
+        // crossed a character boundary. Without this, every pixel of
+        // mouse motion runs `hoverInfo` (full schema scan), which
+        // becomes the dominant cost on a large schema and tanks
+        // scratchpad scroll fps.
         let point = convert(event.locationInWindow, from: nil)
         let index = characterIndexForInsertion(at: point)
+        if index == lastHoverCharIndex { return }
+        lastHoverCharIndex = index
         let info = hoverInfo(charIndex: index)
         if self.toolTip != info { self.toolTip = info }
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
+        lastHoverCharIndex = -1
         if self.toolTip != nil { self.toolTip = nil }
     }
 
