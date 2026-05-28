@@ -65,6 +65,10 @@ struct ConnectionWindowContent: View {
     @State private var showSequenceInspector = false
     @State private var showNotifyPanel = false
     @State private var showSnippets = false
+    @State private var showCreateDatabase = false
+    @State private var dropDatabaseTarget: IdentifiedString?
+    @State private var findUsagesTarget: CommentsTarget?
+    @State private var editFunction: FunctionNode?
 
     /// Convenience pass-through to `service.visibleSchema` so views
     /// in this file can read the filtered snapshot without re-doing
@@ -132,6 +136,34 @@ struct ConnectionWindowContent: View {
             SnippetsView(
                 onInsert: { body in insertSnippet(body) },
                 onClose: { showSnippets = false }
+            )
+        }
+        .sheet(isPresented: $showCreateDatabase) {
+            CreateDatabaseSheet(service: service) { showCreateDatabase = false }
+        }
+        .sheet(item: $dropDatabaseTarget) { target in
+            DropDatabaseSheet(service: service, target: target.value) { dropDatabaseTarget = nil }
+        }
+        .sheet(item: $findUsagesTarget) { target in
+            FindUsagesView(
+                service: service,
+                schema: target.schema, table: target.table,
+                onClose: { findUsagesTarget = nil },
+                onOpenFunction: { fn in
+                    findUsagesTarget = nil
+                    editFunction = fn
+                },
+                onOpenTable: { node in
+                    findUsagesTarget = nil
+                    service.workspace.openTable(node)
+                }
+            )
+        }
+        .sheet(item: $editFunction) { fn in
+            FunctionEditorView(
+                service: service,
+                function: fn,
+                onClose: { editFunction = nil }
             )
         }
         .confirmationDialog(
@@ -528,7 +560,13 @@ struct ConnectionWindowContent: View {
                     onDropSchema: { name in
                         dropSchemaTarget = IdentifiedString(id: name)
                     },
-                    onCreateSchema: { showCreateSchema = true }
+                    onCreateSchema: { showCreateSchema = true },
+                    onFindUsages: { table in
+                        findUsagesTarget = CommentsTarget(schema: table.schema, table: table.name)
+                    },
+                    onOpenFunction: { fn in
+                        editFunction = fn
+                    }
                 )
             case .loading, .idle:
                 VStack(spacing: Tokens.Spacing.sm) {
@@ -623,6 +661,7 @@ struct ConnectionWindowContent: View {
                 Button("Snippets…") { showSnippets = true }
                 Divider()
                 Button("New schema…") { showCreateSchema = true }
+                Button("New database…") { showCreateDatabase = true }
                 Divider()
                 Menu("Workspaces") {
                     Button("Save current as workspace…") {

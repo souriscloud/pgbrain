@@ -188,6 +188,143 @@ enum AdminActions {
         )
     }
 
+    // MARK: - Triggers
+
+    /// ALTER TABLE … {ENABLE|DISABLE} TRIGGER name. We use the
+    /// per-trigger flavour rather than the table-wide one — keeps
+    /// behaviour predictable when a table has many triggers.
+    static func setTriggerEnabled(
+        schema: String, table: String, trigger: String, enabled: Bool,
+        service: ConnectionService
+    ) async -> Result<Void, Error> {
+        let qualified = SQLIdent.quote(schema) + "." + SQLIdent.quote(table)
+        let verb = enabled ? "ENABLE" : "DISABLE"
+        return await runDDL(
+            "ALTER TABLE \(qualified) \(verb) TRIGGER \(SQLIdent.quote(trigger))",
+            summary: "\(verb) TRIGGER \(trigger) ON \(schema).\(table)",
+            service: service
+        )
+    }
+
+    static func dropTrigger(
+        schema: String, table: String, trigger: String,
+        service: ConnectionService
+    ) async -> Result<Void, Error> {
+        let qualified = SQLIdent.quote(schema) + "." + SQLIdent.quote(table)
+        return await runDDL(
+            "DROP TRIGGER \(SQLIdent.quote(trigger)) ON \(qualified)",
+            summary: "DROP TRIGGER \(trigger)",
+            service: service
+        )
+    }
+
+    // MARK: - Functions / procedures
+
+    /// Re-run a CREATE OR REPLACE FUNCTION (or any DDL) the user typed
+    /// in the function editor. We don't validate the body — the server
+    /// will, and its error message is more accurate than anything we
+    /// could string-parse.
+    static func saveFunctionBody(_ ddl: String, service: ConnectionService) async -> Result<Void, Error> {
+        await runDDL(ddl, summary: "CREATE OR REPLACE FUNCTION", service: service)
+    }
+
+    static func dropFunction(
+        schema: String, signature: String,
+        service: ConnectionService
+    ) async -> Result<Void, Error> {
+        // `signature` is what `pg_get_function_identity_arguments` returns —
+        // either `()` or `(text, int)`. We don't quote it; it's already
+        // server-shaped SQL.
+        let qualified = SQLIdent.quote(schema) + "." + signature
+        return await runDDL(
+            "DROP FUNCTION \(qualified)",
+            summary: "DROP FUNCTION \(schema).\(signature)",
+            service: service
+        )
+    }
+
+    // MARK: - Database CRUD
+
+    /// `CREATE DATABASE` can't run inside a transaction. The client
+    /// path uses autocommit so we just fire it. Some options
+    /// (TEMPLATE, OWNER, ENCODING) get conditionally appended.
+    static func createDatabase(
+        name: String, owner: String?, template: String?, encoding: String?,
+        service: ConnectionService
+    ) async -> Result<Void, Error> {
+        var sql = "CREATE DATABASE \(SQLIdent.quote(name))"
+        if let owner, !owner.isEmpty { sql += " OWNER \(SQLIdent.quote(owner))" }
+        if let template, !template.isEmpty { sql += " TEMPLATE \(SQLIdent.quote(template))" }
+        if let encoding, !encoding.isEmpty { sql += " ENCODING '\(escape(encoding))'" }
+        return await runDDL(sql, summary: "CREATE DATABASE \(name)", service: service)
+    }
+
+    static func dropDatabase(
+        name: String, force: Bool,
+        service: ConnectionService
+    ) async -> Result<Void, Error> {
+        let tail = force ? " WITH (FORCE)" : ""
+        return await runDDL(
+            "DROP DATABASE \(SQLIdent.quote(name))\(tail)",
+            summary: "DROP DATABASE \(name)\(force ? " FORCE" : "")",
+            service: service
+        )
+    }
+
+    // MARK: - Column ALTER
+
+    static func renameColumn(
+        schema: String, table: String, from: String, to: String,
+        service: ConnectionService
+    ) async -> Result<Void, Error> {
+        let qualified = SQLIdent.quote(schema) + "." + SQLIdent.quote(table)
+        return await runDDL(
+            "ALTER TABLE \(qualified) RENAME COLUMN \(SQLIdent.quote(from)) TO \(SQLIdent.quote(to))",
+            summary: "RENAME COLUMN \(from) → \(to)",
+            service: service
+        )
+    }
+
+    static func dropColumn(
+        schema: String, table: String, column: String, cascade: Bool,
+        service: ConnectionService
+    ) async -> Result<Void, Error> {
+        let qualified = SQLIdent.quote(schema) + "." + SQLIdent.quote(table)
+        let tail = cascade ? " CASCADE" : ""
+        return await runDDL(
+            "ALTER TABLE \(qualified) DROP COLUMN \(SQLIdent.quote(column))\(tail)",
+            summary: "DROP COLUMN \(column)\(cascade ? " CASCADE" : "")",
+            service: service
+        )
+    }
+
+    /// Add a column. `nullable` defaults to true (PG default). When
+    /// `defaultExpr` is supplied PG runs the rewrite to backfill —
+    /// caller's responsibility to consider lock impact.
+    static func addColumn(
+        schema: String, table: String, name: String, type: String,
+        nullable: Bool, defaultExpr: String?,
+        service: ConnectionService
+    ) async -> Result<Void, Error> {
+        let qualified = SQLIdent.quote(schema) + "." + SQLIdent.quote(table)
+        var line = "ALTER TABLE \(qualified) ADD COLUMN \(SQLIdent.quote(name)) \(type)"
+        if let defaultExpr, !defaultExpr.isEmpty { line += " DEFAULT \(defaultExpr)" }
+        if !nullable { line += " NOT NULL" }
+        return await runDDL(line, summary: "ADD COLUMN \(name) \(type)", service: service)
+    }
+
+    /// ALTER COLUMN TYPE with an optional USING expression for casts
+    /// that aren't implicit (e.g. text → uuid).
+    static func alterColumnType(
+        schema: String, table: String, column: String, newType: String, using: String?,
+        service: ConnectionService
+    ) async -> Result<Void, Error> {
+        let qualified = SQLIdent.quote(schema) + "." + SQLIdent.quote(table)
+        var sql = "ALTER TABLE \(qualified) ALTER COLUMN \(SQLIdent.quote(column)) TYPE \(newType)"
+        if let using, !using.isEmpty { sql += " USING \(using)" }
+        return await runDDL(sql, summary: "ALTER COLUMN \(column) TYPE \(newType)", service: service)
+    }
+
     // MARK: - LISTEN / NOTIFY
 
     /// Fire a NOTIFY from a regular pooled connection. Payload is wrapped

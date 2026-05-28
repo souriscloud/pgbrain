@@ -13,6 +13,13 @@ struct ColumnNameID: Identifiable, Hashable {
     let id: String
 }
 
+/// Drives the "Change type" sheet in the Structure pane.
+struct AlterTypeRequest: Identifiable {
+    let id = UUID()
+    let column: String
+    let currentType: String
+}
+
 struct TableTabView: View {
     let table: TableNode
     let tab: WorkspaceState.Tab
@@ -388,7 +395,13 @@ struct TableTabView: View {
     private var content: some View {
         switch pane {
         case .data:       dataPane
-        case .structure:  StructurePane(state: inspector.state) { Task { await inspector.load() } }
+        case .structure:
+            StructurePane(
+                state: inspector.state,
+                onRetry: { Task { await inspector.load() } },
+                service: service,
+                onReload: { Task { await inspector.load() } }
+            )
         case .ddl:        DDLPane(state: inspector.state) { Task { await inspector.load() } }
         }
     }
@@ -1403,6 +1416,8 @@ final class InspectorLoader {
 private struct StructurePane: View {
     let state: InspectorLoader.State
     let onRetry: () -> Void
+    var service: ConnectionService? = nil
+    var onReload: (() -> Void)? = nil
 
     var body: some View {
         switch state {
@@ -1413,7 +1428,7 @@ private struct StructurePane: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .loaded(let snap, _):
-            StructureBody(snapshot: snap)
+            StructureBody(snapshot: snap, service: service, onReload: onReload)
         case .error(let msg):
             InspectorError(msg: msg, retry: onRetry)
         }
@@ -1422,6 +1437,12 @@ private struct StructurePane: View {
 
 private struct StructureBody: View {
     let snapshot: TableInspector.Snapshot
+    var service: ConnectionService? = nil
+    var onReload: (() -> Void)? = nil
+
+    @State private var showAddColumn = false
+    @State private var renameColumnTarget: IdentifiedString?
+    @State private var alterTypeTarget: AlterTypeRequest?
 
     var body: some View {
         ScrollView([.vertical, .horizontal]) {
@@ -1435,8 +1456,17 @@ private struct StructureBody: View {
                 }
 
                 section("Columns") {
-                    StructureColumnsTable(columns: snapshot.columns,
-                                          pkColumns: pkColumnNames(snapshot))
+                    StructureColumnsTable(
+                        columns: snapshot.columns,
+                        pkColumns: pkColumnNames(snapshot),
+                        canEdit: service != nil,
+                        onRename: { renameColumnTarget = IdentifiedString(id: $0) },
+                        onAlterType: { col in
+                            alterTypeTarget = AlterTypeRequest(column: col.name, currentType: col.typeName)
+                        },
+                        onDrop: { col in dropColumnPrompt(col) },
+                        onAdd: { showAddColumn = true }
+                    )
                 }
 
                 if !snapshot.constraints.isEmpty {
@@ -1471,12 +1501,137 @@ private struct StructureBody: View {
                     }
                 }
 
+                if !snapshot.triggers.isEmpty {
+                    section("Triggers") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(snapshot.triggers, id: \.name) { t in
+                                triggerRow(t)
+                            }
+                        }
+                    }
+                }
+
                 Spacer(minLength: Tokens.Spacing.md)
             }
             .padding(Tokens.Spacing.md)
             .frame(minWidth: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .sheet(isPresented: $showAddColumn) {
+            if let service {
+                AddColumnSheet(
+                    service: service, schema: snapshot.schema, table: snapshot.table,
+                    onClose: { showAddColumn = false },
+                    onSaved: { onReload?() }
+                )
+            }
+        }
+        .sheet(item: $renameColumnTarget) { target in
+            if let service {
+                RenameColumnSheet(
+                    service: service, schema: snapshot.schema, table: snapshot.table,
+                    original: target.value,
+                    onClose: { renameColumnTarget = nil },
+                    onSaved: { onReload?() }
+                )
+            }
+        }
+        .sheet(item: $alterTypeTarget) { req in
+            if let service {
+                AlterColumnTypeSheet(
+                    service: service, schema: snapshot.schema, table: snapshot.table,
+                    column: req.column, currentType: req.currentType,
+                    onClose: { alterTypeTarget = nil },
+                    onSaved: { onReload?() }
+                )
+            }
+        }
+    }
+
+    private func dropColumnPrompt(_ col: TableInspector.Column) {
+        guard let service else { return }
+        let alert = NSAlert()
+        alert.messageText = "Drop column \(col.name)?"
+        alert.informativeText = "Data in this column is gone permanently. Drop CASCADE also removes anything depending on it (views, FKs)."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Drop")
+        alert.addButton(withTitle: "Drop CASCADE")
+        alert.addButton(withTitle: "Cancel")
+        let answer = alert.runModal()
+        guard answer != .alertThirdButtonReturn else { return }
+        let cascade = (answer == .alertSecondButtonReturn)
+        Task {
+            _ = await AdminActions.dropColumn(
+                schema: snapshot.schema, table: snapshot.table,
+                column: col.name, cascade: cascade, service: service
+            )
+            onReload?()
+        }
+    }
+
+    @ViewBuilder
+    private func triggerRow(_ t: TableInspector.Trigger) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Circle()
+                    .fill(t.enabled ? Color.green : Color.gray)
+                    .frame(width: 7, height: 7)
+                Text(t.name)
+                    .font(.system(.caption, design: .monospaced).weight(.semibold))
+                if !t.enabled {
+                    Text("disabled")
+                        .font(.caption2.monospaced())
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.gray.opacity(0.18), in: RoundedRectangle(cornerRadius: 3))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let service {
+                    Button(t.enabled ? "Disable" : "Enable") {
+                        Task {
+                            _ = await AdminActions.setTriggerEnabled(
+                                schema: snapshot.schema, table: snapshot.table,
+                                trigger: t.name, enabled: !t.enabled,
+                                service: service
+                            )
+                            onReload?()
+                        }
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.bordered)
+                    Button(role: .destructive) {
+                        let alert = NSAlert()
+                        alert.messageText = "Drop trigger \(t.name)?"
+                        alert.informativeText = "This cannot be undone."
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "Drop")
+                        alert.addButton(withTitle: "Cancel")
+                        if alert.runModal() == .alertFirstButtonReturn {
+                            Task {
+                                _ = await AdminActions.dropTrigger(
+                                    schema: snapshot.schema, table: snapshot.table,
+                                    trigger: t.name, service: service
+                                )
+                                onReload?()
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.borderless)
+                }
+            }
+            Text(t.definition)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.05),
+                    in: RoundedRectangle(cornerRadius: 6))
     }
 
     @ViewBuilder
@@ -1560,76 +1715,100 @@ private struct StructureBody: View {
 private struct StructureColumnsTable: View {
     let columns: [TableInspector.Column]
     let pkColumns: Set<String>
+    var canEdit: Bool = false
+    var onRename: ((String) -> Void)? = nil
+    var onAlterType: ((TableInspector.Column) -> Void)? = nil
+    var onDrop: ((TableInspector.Column) -> Void)? = nil
+    var onAdd: (() -> Void)? = nil
 
     var body: some View {
-        Grid(alignment: .leadingFirstTextBaseline,
-             horizontalSpacing: 14,
-             verticalSpacing: 4) {
-            // Header row.
-            GridRow {
-                headerCell("#", alignment: .trailing)
-                headerCell("Name")
-                headerCell("Type")
-                headerCell("Nullable", alignment: .center)
-                headerCell("Default")
-                headerCell("Comment")
-            }
-            .padding(.vertical, 5)
-            .background(Color.secondary.opacity(0.08))
-
-            ForEach(Array(columns.enumerated()), id: \.element.ordinal) { (idx, c) in
+        VStack(alignment: .leading, spacing: 6) {
+            Grid(alignment: .leadingFirstTextBaseline,
+                 horizontalSpacing: 14,
+                 verticalSpacing: 4) {
                 GridRow {
-                    Text("\(c.ordinal)")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                        .gridColumnAlignment(.trailing)
+                    headerCell("#", alignment: .trailing)
+                    headerCell("Name")
+                    headerCell("Type")
+                    headerCell("Nullable", alignment: .center)
+                    headerCell("Default")
+                    headerCell("Comment")
+                }
+                .padding(.vertical, 5)
+                .background(Color.secondary.opacity(0.08))
 
-                    HStack(spacing: 4) {
-                        if pkColumns.contains(c.name) {
-                            Image(systemName: "key.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(Tokens.Brand.primary)
+                ForEach(Array(columns.enumerated()), id: \.element.ordinal) { (idx, c) in
+                    GridRow {
+                        Text("\(c.ordinal)")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .gridColumnAlignment(.trailing)
+
+                        HStack(spacing: 4) {
+                            if pkColumns.contains(c.name) {
+                                Image(systemName: "key.fill")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Tokens.Brand.primary)
+                            }
+                            Text(c.name)
+                                .font(.system(.caption, design: .monospaced).weight(.medium))
+                                .textSelection(.enabled)
                         }
-                        Text(c.name)
-                            .font(.system(.caption, design: .monospaced).weight(.medium))
+
+                        Text(c.typeName)
+                            .font(.system(.caption, design: .monospaced))
                             .textSelection(.enabled)
+                            .fixedSize(horizontal: true, vertical: false)
+
+                        Text(c.nullable ? "yes" : "no")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(c.nullable ? .secondary : .primary)
+                            .gridColumnAlignment(.center)
+
+                        Text(c.defaultExpr ?? "—")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(c.defaultExpr == nil ? .tertiary : .secondary)
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text(c.comment ?? "")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-
-                    Text(c.typeName)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: true, vertical: false)
-
-                    Text(c.nullable ? "yes" : "no")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(c.nullable ? .secondary : .primary)
-                        .gridColumnAlignment(.center)
-
-                    Text(c.defaultExpr ?? "—")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(c.defaultExpr == nil ? .tertiary : .secondary)
-                        .textSelection(.enabled)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Text(c.comment ?? "")
+                    .padding(.vertical, 2)
+                    .contextMenu {
+                        if canEdit {
+                            Button("Rename column…") { onRename?(c.name) }
+                            Button("Change type…") { onAlterType?(c) }
+                            Divider()
+                            Button("Drop column…", role: .destructive) { onDrop?(c) }
+                        }
+                    }
+                    if idx < columns.count - 1 {
+                        Divider().opacity(0.35).gridCellUnsizedAxes(.horizontal)
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.secondary.opacity(0.18), lineWidth: 0.5)
+            )
+            if canEdit, let onAdd {
+                Button {
+                    onAdd()
+                } label: {
+                    Label("Add column", systemImage: "plus.square")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.vertical, 2)
-                if idx < columns.count - 1 {
-                    Divider().opacity(0.35).gridCellUnsizedAxes(.horizontal)
-                }
+                .buttonStyle(.borderless)
+                .padding(.leading, 4)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.secondary.opacity(0.18), lineWidth: 0.5)
-        )
     }
 
     @ViewBuilder

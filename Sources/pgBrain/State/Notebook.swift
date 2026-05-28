@@ -40,6 +40,11 @@ final class Notebook: Identifiable {
     /// Pulse: ask the host to open the result-diff sheet on the
     /// last two successful results in this notebook.
     var requestedDiffLastTwo: Bool = false
+    /// When true, every multi-statement cell run gets wrapped in a
+    /// single BEGIN/COMMIT on one pooled connection so partial-batch
+    /// failures roll back the whole thing. Default off — keeps the
+    /// existing "each statement autocommits" mental model.
+    var runAsTransaction: Bool = false
 
     init(title: String) {
         self.title = title

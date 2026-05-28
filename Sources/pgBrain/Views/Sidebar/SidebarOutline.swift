@@ -108,6 +108,10 @@ struct SidebarOutlineView: NSViewRepresentable {
     var onDropSchema: ((String) -> Void)? = nil
     /// Database-level: create a new schema.
     var onCreateSchema: (() -> Void)? = nil
+    /// Find usages — pops the "where is this table referenced?" sheet.
+    var onFindUsages: ((TableNode) -> Void)? = nil
+    /// Open a function in the editor sheet.
+    var onOpenFunction: ((FunctionNode) -> Void)? = nil
 
     @MainActor
     final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
@@ -126,6 +130,8 @@ struct SidebarOutlineView: NSViewRepresentable {
         var onRenameSchema: ((String) -> Void)?
         var onDropSchema: ((String) -> Void)?
         var onCreateSchema: (() -> Void)?
+        var onFindUsages: ((TableNode) -> Void)?
+        var onOpenFunction: ((FunctionNode) -> Void)?
 
         var activeRoot: SidebarNode { filteredRoot ?? root }
 
@@ -247,6 +253,12 @@ struct SidebarOutlineView: NSViewRepresentable {
                 cm.representedObject = table
                 menu.addItem(cm)
             }
+            if onFindUsages != nil {
+                let find = NSMenuItem(title: "Find usages…", action: #selector(handleFindUsages(_:)), keyEquivalent: "")
+                find.target = self
+                find.representedObject = table
+                menu.addItem(find)
+            }
             // Maintenance bloc — tables + matviews only.
             if onMaintenance != nil, table.kind != .view {
                 menu.addItem(.separator())
@@ -325,6 +337,10 @@ struct SidebarOutlineView: NSViewRepresentable {
         }
         @objc private func handleCreateSchema(_ sender: NSMenuItem) {
             onCreateSchema?()
+        }
+        @objc private func handleFindUsages(_ sender: NSMenuItem) {
+            guard let table = sender.representedObject as? TableNode else { return }
+            onFindUsages?(table)
         }
 
         @objc private func handleOpen(_ sender: NSMenuItem) {
@@ -433,6 +449,8 @@ struct SidebarOutlineView: NSViewRepresentable {
         coord.onRenameSchema = onRenameSchema
         coord.onDropSchema = onDropSchema
         coord.onCreateSchema = onCreateSchema
+        coord.onFindUsages = onFindUsages
+        coord.onOpenFunction = onOpenFunction
     }
 
     func makeNSView(context: Context) -> NSScrollView {

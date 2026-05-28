@@ -377,6 +377,22 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launched. Maintenance ANALYZE round-tripped, schema create/drop round-tripped, sequences pane lists + nextvals, NOTIFY/LISTEN round-trips, snippets save+insert+expand cursor placeholder.
 
+### Iter 20 — DBA round 2: psql commands, triggers, function editor, transactions, pivot, chart, roles, DB CRUD, column ALTER, find usages (2026-05-29)
+**Goal**: catch up on the other DBA workflows — psql-style `\d` commands, trigger management, function editing, transactional scratchpad runs, pivot + chart over results, roles + grants, database CRUD, column-level ALTER, "find usages" of a table.
+
+- **psql slash commands** (`SlashCommands.swift`) — `\l`, `\dn`, `\du`, `\dt`, `\dv`, `\dm`, `\di`, `\ds`, `\df`, `\dx`, `\d [name]`. Translated per-line before statement-splitting so you can mix `\dt` with normal SQL in the same cell.
+- **Triggers in Structure pane** — `TableInspector.Snapshot` now carries `[Trigger]` (`pg_trigger` + `pg_get_triggerdef`). Each row gets Enable / Disable / Drop buttons via `AdminActions.setTriggerEnabled / dropTrigger`.
+- **Function editor** (`FunctionEditorView.swift`) — sheet that loads `pg_get_functiondef` and re-runs the buffer as a `CREATE OR REPLACE` round-trip. Opens from the Find Usages results when the hit is a function.
+- **Run-as-transaction toggle** — TX button in the notebook header. When on, multi-statement runs go through `runTransactional`: single `client.withConnection`, BEGIN, sequential per-statement execution with per-widget results, COMMIT on full success / ROLLBACK on any failure (and remaining widgets marked `.cancelled`).
+- **Pivot view** (`PivotResultView.swift`) — overlay button on every notebook result grid. User picks Row / Column / Value columns + aggregation (SUM / AVG / MIN / MAX / COUNT); we build the pivot in Swift over the in-memory page.
+- **Chart view** (`ResultChartView.swift`) — second overlay button. SwiftUI Charts with Bar / Line / Point picker. Y auto-pick prefers numeric columns; capped at 200 rows.
+- **Roles + Grants tab** in Activity panel (`RolesFetcher.swift`) — two sub-tabs: every `pg_roles` row with superuser / login / createDB flags; aggregated `information_schema.role_table_grants` per (grantee, schema, table).
+- **Database CRUD** (`DatabaseAdminDialogs.swift`) — Create database sheet (name + owner + template + encoding) + Drop database sheet (retype to confirm + WITH FORCE toggle). Surfaced from the sidebar `…` menu and the schema context menu.
+- **Column ALTER** (`ColumnAdminDialogs.swift`) — Structure pane's columns table grows a context menu (Rename / Change type… / Drop) + an "Add column" button below the grid. Drop uses an NSAlert with Drop / Drop CASCADE / Cancel.
+- **Find usages** (`UsageFinder.swift` + `FindUsagesView.swift`) — sidebar table context menu → "Find usages…". Substring-matches `schema.table`, `"table"`, and bare-name forms against `pg_get_functiondef`, `pg_get_viewdef`, `pg_get_triggerdef`. Results pane opens functions in the editor, views in tabs.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launched. `\dt` translation round-trips; trigger enable/disable round-trips; function editor loads + saves a CREATE OR REPLACE; runAsTransaction rolls back on injected error; pivot + chart render off the live result; roles + grants tab populates; create/drop database round-trips on a sacrificial DB; column rename/drop/alter type round-trips; find usages locates a view referencing a sample table.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Observation
+import PostgresNIO
 
 /// Cell-based notebook scratchpad. Replaces the iter-15
 /// NSTextAttachmentViewProvider design which never managed to render an
@@ -120,14 +121,25 @@ struct NotebookView: View {
 
             schemaPicker
 
+            Toggle(isOn: $notebook.runAsTransaction) {
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.triangle.2.circlepath").font(.caption)
+                    Text("TX").font(.caption.weight(.semibold))
+                }
+            }
+            .toggleStyle(.button)
+            .controlSize(.small)
+            .help("Wrap each multi-statement run in BEGIN/COMMIT (rolls back on any error)")
+
             Spacer()
             Button {
                 runFocusedOrLastCell()
             } label: {
-                Label("Run", systemImage: "play.fill").labelStyle(.titleAndIcon)
+                Label(notebook.runAsTransaction ? "Run as TX" : "Run",
+                      systemImage: "play.fill").labelStyle(.titleAndIcon)
             }
             .buttonStyle(.borderedProminent)
-            .tint(Tokens.Brand.primary)
+            .tint(notebook.runAsTransaction ? .orange : Tokens.Brand.primary)
             .controlSize(.small)
             .help("Run focused SQL cell (⌘↩ also works inside a cell)")
             .disabled(service.client == nil)
@@ -969,6 +981,49 @@ final class SqlCellNSTextView: NSTextView {
 
 // MARK: - Result cell
 
+/// Wraps the grid with a tiny segmented toggle to flip between the
+/// default grid, a pivot view, and a quick chart. Pivot + chart sheets
+/// reuse the same `RowsFetcher.Page` — no extra fetch.
+private struct ResultGridWithViews: View {
+    let page: RowsFetcher.Page
+    @State private var showPivot = false
+    @State private var showChart = false
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            DataGridView(page: page)
+                .frame(minHeight: 140, idealHeight: 260, maxHeight: 360)
+            HStack(spacing: 4) {
+                Button {
+                    showPivot = true
+                } label: {
+                    Label("Pivot", systemImage: "square.grid.3x3")
+                        .font(.caption2)
+                }
+                .controlSize(.mini)
+                .buttonStyle(.borderless)
+                .help("Pivot this result")
+                Button {
+                    showChart = true
+                } label: {
+                    Label("Chart", systemImage: "chart.bar")
+                        .font(.caption2)
+                }
+                .controlSize(.mini)
+                .buttonStyle(.borderless)
+                .help("Chart this result")
+            }
+            .padding(6)
+        }
+        .sheet(isPresented: $showPivot) {
+            PivotResultView(page: page) { showPivot = false }
+        }
+        .sheet(isPresented: $showChart) {
+            ResultChartView(page: page) { showChart = false }
+        }
+    }
+}
+
 private struct ResultCellView: View {
     let resultID: UUID
     @Bindable var notebook: Notebook
@@ -1065,8 +1120,7 @@ private struct ResultBody: View {
                 }
                 .padding(10)
             } else {
-                DataGridView(page: q.page)
-                    .frame(minHeight: 140, idealHeight: 260, maxHeight: 360)
+                ResultGridWithViews(page: q.page)
             }
         case .failure(let message):
             HStack(alignment: .top, spacing: 8) {
@@ -1130,14 +1184,17 @@ enum NotebookRunner {
     static func run(cell: NotebookCell, selection: NSRange?, notebook: Notebook, service: ConnectionService) {
         guard cell.kind == .sql, let client = service.client else { return }
 
-        // Resolve target statements within this cell.
-        let buffer = cell.text
+        // Resolve target statements within this cell. Slash-command
+        // lines (`\dt`, `\df`, …) get expanded into real SQL before
+        // statement splitting so the user can mix `\dt` with normal
+        // queries in the same cell.
+        let buffer = SlashCommands.translateCell(cell.text)
         let plans: [String]
         if let sel = selection {
-            // User selected a range → just those statements.
-            let ns = buffer as NSString
+            // User selected a range → translate-and-split just that.
+            let ns = cell.text as NSString
             guard sel.location + sel.length <= ns.length else { return }
-            let slice = ns.substring(with: sel)
+            let slice = SlashCommands.translateCell(ns.substring(with: sel))
             plans = SQLStatementSplitter.split(slice).map { $0.trimmed }
         } else {
             // No selection → run *every* statement in the cell, Jupyter-
@@ -1181,6 +1238,17 @@ enum NotebookRunner {
         for (sql, id) in zip(plans, ids) {
             let r = notebook.startResult(id: id, statement: sql)
             r.isCollapsed = collapseAll
+        }
+
+        // Transactional path: all statements on one connection inside
+        // BEGIN/COMMIT. The first failure short-circuits and rolls back
+        // the whole batch; remaining widgets get marked `.cancelled`.
+        if notebook.runAsTransaction && plans.count > 1 {
+            Task { @MainActor in
+                defer { notebook.runningCellID = nil }
+                await runTransactional(plans: plans, ids: ids, notebook: notebook, service: service, client: client)
+            }
+            return
         }
 
         Task { @MainActor in
@@ -1230,6 +1298,94 @@ enum NotebookRunner {
                         rowsAffected: nil
                     )
                 }
+            }
+        }
+    }
+
+    /// Single-connection BEGIN/COMMIT batch. Walks `plans` sequentially
+    /// on one checked-out connection. First failure short-circuits the
+    /// loop and issues ROLLBACK; statements that never ran get marked
+    /// `.cancelled` so the user can see exactly where the failure was.
+    @MainActor
+    private static func runTransactional(
+        plans: [String], ids: [UUID],
+        notebook: Notebook, service: ConnectionService,
+        client: PostgresClient
+    ) async {
+        let op = service.operations.begin(kind: .update, summary: "Transaction (\(plans.count) statements)")
+        let started = Date()
+        var failureMessage: String?
+        var failedAt: Int = plans.count
+        do {
+            try await client.withConnection { conn in
+                _ = try await conn.query(PostgresQuery(unsafeSQL: "BEGIN"), logger: pgbrainQuietLogger)
+                if let sp = notebook.searchPath {
+                    _ = try await conn.query(
+                        PostgresQuery(unsafeSQL: "SET LOCAL search_path TO \(SQLIdent.quote(sp))"),
+                        logger: pgbrainQuietLogger
+                    )
+                }
+                for (i, (sql, id)) in zip(plans, ids).enumerated() {
+                    let stmtStarted = Date()
+                    let result = await MainActor.run { notebook.startResult(id: id, statement: sql) }
+                    do {
+                        let qr = try await QueryRunner.runOnConnection(sql, on: conn)
+                        await MainActor.run {
+                            result.status = .success(qr)
+                            result.finishedAt = Date()
+                        }
+                        QueryHistoryStore.shared.record(
+                            connectionID: service.connection.id,
+                            sql: sql, startedAt: stmtStarted,
+                            elapsedSec: Date().timeIntervalSince(stmtStarted),
+                            success: true, errorMessage: nil,
+                            rowsAffected: qr.rowsAffected
+                        )
+                    } catch {
+                        let msg = PostgresErrorMessage.describe(error)
+                        failureMessage = msg
+                        failedAt = i
+                        await MainActor.run {
+                            result.status = .failure(msg)
+                            result.finishedAt = Date()
+                        }
+                        QueryHistoryStore.shared.record(
+                            connectionID: service.connection.id,
+                            sql: sql, startedAt: stmtStarted,
+                            elapsedSec: Date().timeIntervalSince(stmtStarted),
+                            success: false, errorMessage: msg,
+                            rowsAffected: nil
+                        )
+                        break
+                    }
+                }
+                // Commit on full success, rollback on any failure.
+                if failureMessage == nil {
+                    _ = try await conn.query(PostgresQuery(unsafeSQL: "COMMIT"), logger: pgbrainQuietLogger)
+                } else {
+                    _ = try? await conn.query(PostgresQuery(unsafeSQL: "ROLLBACK"), logger: pgbrainQuietLogger)
+                }
+            }
+            // Mark the never-ran widgets so the user sees the cutoff.
+            for i in (failedAt + 1)..<plans.count {
+                let r = await MainActor.run { notebook.startResult(id: ids[i], statement: plans[i]) }
+                r.status = .cancelled
+                r.finishedAt = Date()
+            }
+            if let msg = failureMessage {
+                service.operations.finish(op, status: .failed("rolled back — \(msg)"))
+            } else {
+                service.operations.finish(op, status: .succeeded)
+            }
+            _ = started
+        } catch {
+            let msg = PostgresErrorMessage.describe(error)
+            service.operations.finish(op, status: .failed(msg))
+            // Mark every widget that never resolved.
+            for id in ids {
+                guard let r = notebook.result(id: id), case .running = r.status else { continue }
+                r.status = .failure(msg)
+                r.finishedAt = Date()
             }
         }
     }

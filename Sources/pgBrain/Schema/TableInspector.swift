@@ -36,6 +36,12 @@ enum TableInspector {
         let definition: String    // result of pg_get_indexdef(oid)
     }
 
+    struct Trigger: Sendable {
+        let name: String
+        let enabled: Bool         // tgenabled: 'O' or 'A' = on, 'D' = off, 'R' = replica
+        let definition: String    // result of pg_get_triggerdef(oid)
+    }
+
     struct Snapshot: Sendable {
         let schema: String
         let table: String
@@ -47,6 +53,7 @@ enum TableInspector {
         /// (PK / UK indexes are skipped — they'd duplicate the constraint
         /// definitions in the rendered DDL).
         let indexes: [Index]
+        let triggers: [Trigger]
     }
 
     static func fetch(
@@ -63,6 +70,7 @@ enum TableInspector {
         async let cols = fetchColumns(client: client, oid: oid)
         async let cons = fetchConstraints(client: client, oid: oid)
         async let idxs = fetchIndexes(client: client, oid: oid)
+        async let trigs = fetchTriggers(client: client, oid: oid)
         async let tableComment = fetchTableComment(client: client, oid: oid)
         return Snapshot(
             schema: schema,
@@ -71,7 +79,8 @@ enum TableInspector {
             comment: try await tableComment,
             columns: try await cols,
             constraints: try await cons,
-            indexes: try await idxs
+            indexes: try await idxs,
+            triggers: try await trigs
         )
     }
 
@@ -281,6 +290,26 @@ enum TableInspector {
         var out: [Index] = []
         for try await (name, def) in rows.decode((String, String).self) {
             out.append(Index(name: name, definition: def))
+        }
+        return out
+    }
+
+    private static func fetchTriggers(client: PostgresClient, oid: Int64) async throws -> [Trigger] {
+        // Skip the internally-generated triggers (constraint-backed FKs
+        // create a hidden trigger pair we don't want to surface).
+        let sql: PostgresQuery = """
+        SELECT t.tgname,
+               (t.tgenabled::text IN ('O','A','R')),
+               pg_get_triggerdef(t.oid, true)
+        FROM pg_trigger t
+        WHERE t.tgrelid = \(oid)::oid
+          AND NOT t.tgisinternal
+        ORDER BY t.tgname
+        """
+        let rows = try await client.query(sql)
+        var out: [Trigger] = []
+        for try await (name, enabled, def) in rows.decode((String, Bool, String).self) {
+            out.append(Trigger(name: name, enabled: enabled, definition: def))
         }
         return out
     }

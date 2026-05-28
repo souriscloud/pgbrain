@@ -20,6 +20,7 @@ struct ActivityPanelView: View {
         case indexes  = "Indexes"
         case slow     = "Slow queries"
         case sizes    = "Sizes"
+        case roles    = "Roles"
         var id: String { rawValue }
     }
 
@@ -31,7 +32,16 @@ struct ActivityPanelView: View {
     @State private var stmtSort: StatementStatsFetcher.SortKey = .total
     @State private var stmtInstalled: Bool? = nil
     @State private var sizes: SizeStats? = nil
+    @State private var roleRows: [RoleRow] = []
+    @State private var grantRows: [GrantRow] = []
+    @State private var rolesSubtab: RolesSubtab = .roles
     @State private var error: String?
+
+    enum RolesSubtab: String, CaseIterable, Identifiable {
+        case roles = "Roles"
+        case grants = "Grants"
+        var id: String { rawValue }
+    }
     @State private var loading = false
     @State private var refreshTask: Task<Void, Never>?
     @State private var pendingTerminate: ActivityRow?
@@ -102,6 +112,7 @@ struct ActivityPanelView: View {
         case .indexes:  return "(\(indexRows.count) indexes)"
         case .slow:     return stmtInstalled == false ? "(extension not installed)" : "(top \(stmtRows.count))"
         case .sizes:    return sizes.map { "(\(formatSize($0.databaseBytes)) total)" } ?? ""
+        case .roles:    return "(\(roleRows.count) roles · \(grantRows.count) grants)"
         }
     }
 
@@ -113,7 +124,78 @@ struct ActivityPanelView: View {
         case .indexes:  indexesContent
         case .slow:     slowContent
         case .sizes:    sizesContent
+        case .roles:    rolesContent
         }
+    }
+
+    @ViewBuilder
+    private var rolesContent: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $rolesSubtab) {
+                ForEach(RolesSubtab.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .padding(.horizontal, Tokens.Spacing.md)
+            .padding(.bottom, 6)
+            if rolesSubtab == .roles {
+                Table(roleRows) {
+                    TableColumn("Role") { row in
+                        HStack(spacing: 4) {
+                            if row.isSuperuser {
+                                Image(systemName: "crown.fill")
+                                    .font(.system(size: 9)).foregroundStyle(.orange)
+                                    .help("Superuser")
+                            }
+                            Text(row.name).font(.system(.caption, design: .monospaced).weight(.medium))
+                        }
+                    }.width(min: 120, ideal: 180)
+                    TableColumn("Login") { row in flagChip(row.canLogin) }
+                        .width(min: 60, ideal: 70)
+                    TableColumn("CreateDB") { row in flagChip(row.canCreateDB) }
+                        .width(min: 70, ideal: 80)
+                    TableColumn("CreateRole") { row in flagChip(row.canCreateRole) }
+                        .width(min: 80, ideal: 90)
+                    TableColumn("Inherit") { row in flagChip(row.inherit) }
+                        .width(min: 60, ideal: 70)
+                    TableColumn("Conn limit") { row in
+                        Text(row.connectionLimit < 0 ? "∞" : "\(row.connectionLimit)")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }.width(min: 70, ideal: 80)
+                    TableColumn("Member of") { row in
+                        Text(row.memberOf)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    }
+                }
+            } else {
+                Table(grantRows) {
+                    TableColumn("Grantee") { row in
+                        Text(row.grantee).font(.system(.caption, design: .monospaced).weight(.medium))
+                    }.width(min: 100, ideal: 140)
+                    TableColumn("Schema.Table") { row in
+                        Text("\(row.schema).\(row.table)").font(.system(.caption, design: .monospaced))
+                    }.width(min: 140, ideal: 220)
+                    TableColumn("Privileges") { row in
+                        Text(row.privileges)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        }
+    }
+
+    private func flagChip(_ on: Bool) -> some View {
+        Text(on ? "✓" : "—")
+            .font(.system(.caption, design: .monospaced))
+            .foregroundStyle(on ? Color.green : Color.secondary)
     }
 
     @ViewBuilder
@@ -514,6 +596,9 @@ struct ActivityPanelView: View {
                 }
             case .sizes:
                 sizes = try await SizeStatsFetcher.fetch(client: client)
+            case .roles:
+                roleRows = try await RolesFetcher.fetchRoles(client: client)
+                grantRows = try await RolesFetcher.fetchGrants(client: client)
             }
             error = nil
         } catch {
