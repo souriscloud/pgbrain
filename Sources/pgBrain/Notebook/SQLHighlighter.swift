@@ -50,28 +50,43 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate, @unchecked Sendable
     /// pass right after we set the text up front. Reads the editor font
     /// size from the storage's *existing* attributes so we don't have to
     /// hop to the main actor for `AppSettings.shared`.
+    /// Highlight the full storage. Convenience wrapper around the
+    /// ranged variant; used by the up-front pass when the editor is
+    /// first populated.
     nonisolated func highlight(_ storage: NSTextStorage) {
         let text = storage.string as NSString
-        let full = NSRange(location: 0, length: text.length)
-        guard full.length > 0 else { return }
+        highlight(storage, in: NSRange(location: 0, length: text.length))
+    }
+
+    /// Highlight only the characters in `range`. Used by the
+    /// per-keystroke text-storage delegate so we only re-lex the
+    /// changed line(s) instead of the full buffer.
+    nonisolated func highlight(_ storage: NSTextStorage, in range: NSRange) {
+        let text = storage.string as NSString
+        let len = text.length
+        let safe = NSRange(
+            location: max(0, min(range.location, len)),
+            length: max(0, min(range.length, len - max(0, min(range.location, len))))
+        )
+        guard safe.length > 0 else { return }
 
         // Read existing font (set by the host NSTextView) to keep size
         // consistent without crossing the main-actor boundary.
         let baseFont: NSFont = {
-            if let existing = storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont {
+            if let existing = storage.attribute(.font, at: safe.location, effectiveRange: nil) as? NSFont {
                 return NSFont.monospacedSystemFont(ofSize: existing.pointSize, weight: .regular)
             }
             return NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         }()
 
-        // Strip styling, restore base attrs.
-        storage.removeAttribute(.foregroundColor, range: full)
-        storage.removeAttribute(.font, range: full)
-        storage.addAttribute(.font, value: baseFont, range: full)
-        storage.addAttribute(.foregroundColor, value: NSColor.labelColor, range: full)
+        // Strip styling on the touched range only, restore base attrs.
+        storage.removeAttribute(.foregroundColor, range: safe)
+        storage.removeAttribute(.font, range: safe)
+        storage.addAttribute(.font, value: baseFont, range: safe)
+        storage.addAttribute(.foregroundColor, value: NSColor.labelColor, range: safe)
 
-        var i = 0
-        let n = text.length
+        var i = safe.location
+        let n = safe.location + safe.length
         while i < n {
             let scalar = text.character(at: i)
             // Comments — `--` to end of line, `/* */` block.
@@ -178,11 +193,19 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate, @unchecked Sendable
         range editedRange: NSRange,
         changeInLength delta: Int
     ) {
-        // Re-highlight the entire storage. For our cell-sized text this
-        // is fast enough; line-level incremental highlighting can come
-        // later if profiling says otherwise.
+        // Re-paint only the LINES that contain `editedRange` instead
+        // of the whole storage. Re-highlighting the entire cell on
+        // every keystroke was the dominant cost for big scratchpads
+        // (every character → full lex pass over thousands of bytes,
+        // visible as typing-fps drops).
         guard editedMask.contains(.editedCharacters) else { return }
-        highlight(textStorage)
+        let ns = textStorage.string as NSString
+        let safeRange = NSRange(
+            location: max(0, min(editedRange.location, ns.length)),
+            length: max(0, min(editedRange.length, ns.length - max(0, min(editedRange.location, ns.length))))
+        )
+        let lineRange = ns.lineRange(for: safeRange)
+        highlight(textStorage, in: lineRange)
     }
 
     // MARK: - Helpers

@@ -42,6 +42,48 @@ enum RowsFetcher {
         try await page(offset: 0, pageSize: limit, from: table, client: client, filter: filter)
     }
 
+    /// Planner's row-count estimate for the whole table — cheap
+    /// (`pg_class.reltuples`, single catalog read). `nil` when the
+    /// table hasn't been analyzed yet (reltuples = -1). Doesn't
+    /// reflect a filter; used by the pager only when no WHERE clause
+    /// is active. The user gets a "click to count exact" affordance
+    /// for the filtered case.
+    static func estimatedRowCount(
+        table: TableNode,
+        client: PostgresClient
+    ) async throws -> Int64? {
+        let sql: PostgresQuery = """
+        SELECT GREATEST(c.reltuples, 0)::bigint
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = \(table.schema) AND c.relname = \(table.name)
+        LIMIT 1
+        """
+        let rows = try await client.query(sql)
+        for try await v in rows.decode(Int64.self) {
+            return v <= 0 ? nil : v
+        }
+        return nil
+    }
+
+    /// Exact `SELECT COUNT(*)` honouring the active filter. Expensive
+    /// on big tables — the pager exposes this behind a "count exact"
+    /// button instead of running it automatically.
+    static func exactRowCount(
+        table: TableNode,
+        client: PostgresClient,
+        filter: Filter
+    ) async throws -> Int64 {
+        let whereBody = filter.whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
+        let whereSQL = whereBody.isEmpty ? "" : " WHERE \(whereBody)"
+        let sql = "SELECT COUNT(*)::bigint FROM \(SQLIdent.qualified(schema: table.schema, name: table.name))\(whereSQL)"
+        let rows = try await client.query(PostgresQuery(unsafeSQL: sql))
+        for try await v in rows.decode(Int64.self) {
+            return v
+        }
+        return 0
+    }
+
     /// Paged fetch — `offset` rows skipped, up to `pageSize` returned.
     /// We fetch `pageSize + 1` to detect whether more pages exist
     /// (so the pager can disable/enable the Next button without an

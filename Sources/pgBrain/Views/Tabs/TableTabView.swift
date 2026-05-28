@@ -378,11 +378,24 @@ struct TableTabView: View {
             .menuIndicator(.hidden)
             .fixedSize()
 
-            Text(visible.rows.isEmpty
-                 ? "0 rows"
-                 : "Rows \(start)–\(end)\(canNext ? "+" : "")")
+            Text(rangeText(start: start, end: end, canNext: canNext, rowCount: visible.rows.count))
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
+            // "Count exact" affordance — only meaningful when more
+            // rows clearly exist (truncated, or an estimate beats the
+            // current page). Spinner while in flight.
+            if loader.isCountingExact {
+                ProgressView().controlSize(.small)
+            } else if loader.exactTotal == nil && (canNext || loader.estimatedTotal != nil) {
+                Button {
+                    Task { await loader.countExact() }
+                } label: {
+                    Text("count exact")
+                        .font(.system(.caption2, design: .monospaced))
+                }
+                .buttonStyle(.borderless)
+                .help("Run SELECT COUNT(*) — may be slow on big tables")
+            }
 
             Spacer()
 
@@ -415,6 +428,32 @@ struct TableTabView: View {
         .padding(.vertical, 5)
         .background(Color(nsColor: .underPageBackgroundColor))
         .overlay(Rectangle().frame(height: 0.5).foregroundStyle(.separator), alignment: .top)
+    }
+
+    /// Pager range text. Prefers exact when the user has clicked
+    /// "count exact"; falls back to the planner estimate; falls back
+    /// to the bare "X-Y[+]" when neither is available.
+    private func rangeText(start: Int, end: Int, canNext: Bool, rowCount: Int) -> String {
+        if rowCount == 0 { return "0 rows" }
+        if let exact = loader.exactTotal {
+            return "Rows \(start)–\(end) of \(Self.formatCount(exact))"
+        }
+        if let estimate = loader.estimatedTotal, estimate > Int64(end) {
+            return "Rows \(start)–\(end) of ~\(Self.formatCount(estimate))"
+        }
+        return "Rows \(start)–\(end)\(canNext ? "+" : "")"
+    }
+
+    /// `1,234,567` → `1.23M`, `1_234` → `1.23k`, smaller → as-is.
+    /// Compact-thousands keeps the pager strip narrow on huge tables.
+    private static func formatCount(_ n: Int64) -> String {
+        let v = Double(n)
+        switch v {
+        case ..<1_000:        return "\(n)"
+        case ..<1_000_000:    return String(format: "%.1fk", v / 1_000)
+        case ..<1_000_000_000:return String(format: "%.2fM", v / 1_000_000)
+        default:              return String(format: "%.2fB", v / 1_000_000_000)
+        }
     }
 
     private var emptyMessage: String {
@@ -716,6 +755,17 @@ final class RowsLoader {
     /// Rows fetched per page. Defaults to 200 — 1000 was punishing
     /// on tables with wide JSONB / TEXT columns. User can bump it.
     var pageSize: Int = 200
+    /// Planner row-count estimate when no WHERE clause is active.
+    /// Surfaced as "~1.2M" in the pager so the user has a sense of
+    /// scale without paying for a full COUNT(*).
+    var estimatedTotal: Int64?
+    /// Exact row count, populated when the user explicitly clicks
+    /// "Count exact" in the pager. Takes precedence over
+    /// `estimatedTotal` when both are present.
+    var exactTotal: Int64?
+    /// True while the exact-count query is in flight (drives the
+    /// pager's button spinner).
+    var isCountingExact: Bool = false
     /// Whether the previously-loaded page reported "there's more
     /// after this" (so the Next arrow stays enabled).
     var hasMoreAfterCurrentPage: Bool {
@@ -775,14 +825,24 @@ final class RowsLoader {
         }
         editBuffer.clear()
         applyError = nil
+        // Clear the exact-count cache on any reload — it's tied to a
+        // specific filter + page set.
+        exactTotal = nil
         defer { isRefreshing = false }
         do {
+            // Kick off the planner estimate in parallel with the page
+            // fetch. Cheap (catalog read), only meaningful when no
+            // WHERE clause is active.
+            async let estimate: Int64? = filter.whereClause.trimmingCharacters(in: .whitespaces).isEmpty
+                ? (try? RowsFetcher.estimatedRowCount(table: table, client: client))
+                : nil
             let page = try await RowsFetcher.page(
                 offset: pageOffset,
                 pageSize: pageSize,
                 from: table, client: client, filter: filter
             )
             state = .loaded(page)
+            estimatedTotal = await estimate
             refreshError = nil
         } catch {
             let message = PostgresErrorMessage.describe(error)
@@ -791,6 +851,20 @@ final class RowsLoader {
             } else {
                 state = .error(message)
             }
+        }
+    }
+
+    /// Run a `SELECT COUNT(*)` honouring the active filter. Wired to
+    /// the pager's "count exact" button — bypasses the auto-load
+    /// path because COUNT(*) can be slow on big tables.
+    func countExact() async {
+        guard let client = service.client, !isCountingExact else { return }
+        isCountingExact = true
+        defer { isCountingExact = false }
+        if let count = try? await RowsFetcher.exactRowCount(
+            table: table, client: client, filter: filter
+        ) {
+            exactTotal = count
         }
     }
 

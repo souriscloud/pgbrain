@@ -529,6 +529,90 @@ final class SqlCellNSTextView: NSTextView {
         if self.toolTip != nil { self.toolTip = nil }
     }
 
+    // MARK: - Custom context menu
+
+    /// Replace NSTextView's default menu (writing tools, dictation,
+    /// substitutions, …) with a focused SQL-editor menu. Standard
+    /// editing actions on top, schema-lookup of the identifier under
+    /// the cursor at the bottom.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let charIndex = characterIndexForInsertion(at: point)
+        let identifier = identifierAround(charIndex: charIndex)
+
+        let menu = NSMenu()
+        let cut = NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "")
+        let copy = NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "")
+        let paste = NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "")
+        let selectAll = NSMenuItem(title: "Select All", action: #selector(NSResponder.selectAll(_:)), keyEquivalent: "")
+        menu.addItem(cut)
+        menu.addItem(copy)
+        menu.addItem(paste)
+        menu.addItem(.separator())
+        menu.addItem(selectAll)
+
+        // SQL-specific block, only when we can resolve something.
+        let snapshot = schemaProvider.flatMap { $0() }
+        if let ident = identifier,
+           let snap = snapshot,
+           let info = SQLHoverResolver.describe(identifier: ident, in: snap) {
+            menu.addItem(.separator())
+            let header = NSMenuItem(title: "Look up “\(ident)”", action: nil, keyEquivalent: "")
+            header.attributedTitle = NSAttributedString(
+                string: "Look up “\(ident)”",
+                attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)]
+            )
+            header.isEnabled = false
+            menu.addItem(header)
+            for line in info.split(separator: "\n", omittingEmptySubsequences: false) {
+                let item = NSMenuItem(title: String(line), action: nil, keyEquivalent: "")
+                item.attributedTitle = NSAttributedString(
+                    string: "  " + String(line),
+                    attributes: [
+                        .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                        .foregroundColor: NSColor.secondaryLabelColor
+                    ]
+                )
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+            let copyInfo = NSMenuItem(
+                title: "Copy lookup info",
+                action: #selector(copyHoverInfo(_:)),
+                keyEquivalent: ""
+            )
+            copyInfo.target = self
+            copyInfo.representedObject = info
+            menu.addItem(copyInfo)
+        }
+        return menu
+    }
+
+    @objc private func copyHoverInfo(_ sender: NSMenuItem) {
+        guard let info = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(info, forType: .string)
+    }
+
+    /// Identifier the cursor / right-click is sitting on. Shares the
+    /// same word-walk logic as `hoverInfo` — duplicate kept inline so
+    /// the menu builder doesn't have to do the schema lookup again.
+    private func identifierAround(charIndex: Int) -> String? {
+        let ns = string as NSString
+        var idx = max(0, min(charIndex, ns.length - 1))
+        if idx < 0 || idx >= ns.length { return nil }
+        if !isWordChar(ns.character(at: idx)) {
+            if idx > 0, isWordChar(ns.character(at: idx - 1)) { idx -= 1 }
+            else { return nil }
+        }
+        var left = idx
+        while left > 0, isWordChar(ns.character(at: left - 1)) { left -= 1 }
+        var right = idx
+        while right + 1 < ns.length, isWordChar(ns.character(at: right + 1)) { right += 1 }
+        let word = ns.substring(with: NSRange(location: left, length: right - left + 1))
+        return word.isEmpty ? nil : word
+    }
+
     /// Resolve the identifier under `charIndex` (or just before it) and
     /// build a short description from the live schema. Returns nil when
     /// the cursor is on whitespace / punctuation / an unknown word so
