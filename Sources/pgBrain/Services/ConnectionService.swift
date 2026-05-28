@@ -111,6 +111,9 @@ final class ConnectionService {
         clientTask = nil
         client = nil
         state = .closed
+        // Tear down the SSH tunnel if one was started for this
+        // connection. No-op when ssh isn't in use.
+        SSHTunnelManager.shared.stopTunnel(for: connection.id)
     }
 
     /// Hard timeout for the long-running `PostgresClient`-pooled path —
@@ -121,13 +124,33 @@ final class ConnectionService {
     private func connect() async {
         let password = Keychain.password(for: connection.id) ?? ""
 
+        // ---- SSH TUNNEL (optional) --------------------------------------
+        // When enabled, swap the connection's effective host:port for a
+        // local-forward port owned by SSHTunnelManager. The TLS probe +
+        // pool below then talk to localhost which ssh forwards through.
+        var effectiveHost = connection.host
+        var effectivePort = connection.port
+        if connection.sshEnabled {
+            do {
+                let localPort = try await SSHTunnelManager.shared.startTunnel(for: connection)
+                effectiveHost = "127.0.0.1"
+                effectivePort = localPort
+            } catch {
+                state = .error("SSH tunnel failed: \(error.localizedDescription)")
+                return
+            }
+        }
+
         // ---- PRE-FLIGHT PROBE -------------------------------------------
         // PostgresClient's connection pool silently retries on auth /
         // protocol failures forever and never surfaces the real error.
         // A raw `PostgresConnection.connect()` does, in <10ms. Use that
         // first to validate credentials + reachability and turn a generic
         // "Connecting…" into a "wrong password for user X" or similar.
-        let probeOutcome = await Self.probe(connection: connection, password: password)
+        let probeOutcome = await Self.probe(
+            connection: connection, password: password,
+            overrideHost: effectiveHost, overridePort: effectivePort
+        )
         if case .failure(let message) = probeOutcome {
             state = .error(message)
             return
@@ -142,8 +165,8 @@ final class ConnectionService {
             return
         }
         let config = PostgresClient.Configuration(
-            host: connection.host,
-            port: connection.port,
+            host: effectiveHost,
+            port: effectivePort,
             username: connection.username,
             password: password.isEmpty ? nil : password,
             database: connection.database.isEmpty ? nil : connection.database,
@@ -195,7 +218,10 @@ final class ConnectionService {
         case failure(String)
     }
 
-    nonisolated static func probe(connection: Connection, password: String) async -> ProbeOutcome {
+    nonisolated static func probe(
+        connection: Connection, password: String,
+        overrideHost: String? = nil, overridePort: Int? = nil
+    ) async -> ProbeOutcome {
         // Mirror the libpq mapping from `tls(for:)` — `prefer`/`require`
         // skip cert validation entirely; only `verify-ca`/`verify-full`
         // engage the chain check. Without this, every connection to
@@ -224,8 +250,8 @@ final class ConnectionService {
             return .failure("TLS setup failed: \(error.localizedDescription)")
         }
         var config = PostgresConnection.Configuration(
-            host: connection.host,
-            port: connection.port,
+            host: overrideHost ?? connection.host,
+            port: overridePort ?? connection.port,
             username: connection.username,
             password: password.isEmpty ? nil : password,
             database: connection.database.isEmpty ? nil : connection.database,

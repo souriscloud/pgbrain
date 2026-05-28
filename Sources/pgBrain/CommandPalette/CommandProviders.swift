@@ -117,12 +117,24 @@ enum CommandProviders {
                 id: "action.activityPanel",
                 icon: "waveform.path.ecg",
                 title: "Show Activity Panel",
-                subtitle: "Live pg_stat_activity for this database",
+                subtitle: "Live pg_stat_activity / locks / index usage",
                 category: .action,
                 shortcut: nil,
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
                     NotificationCenter.default.post(name: .pgbrainOpenActivityPanel, object: service.connection.id)
+                }
+            ),
+            CommandItem(
+                id: "action.queryHistory",
+                icon: "clock.arrow.circlepath",
+                title: "Query History…",
+                subtitle: "Browse + reinsert past statements",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    AppDelegate.shared?.openConnection(service.connection)
+                    NotificationCenter.default.post(name: .pgbrainOpenQueryHistory, object: service.connection.id)
                 }
             ),
             CommandItem(
@@ -169,6 +181,30 @@ enum CommandProviders {
                 shortcut: nil,
                 action: { service.operations.cancel(op) }
             ))
+        }
+
+        // Diff last two results — only meaningful when the active
+        // tab is a scratchpad with ≥2 successful results.
+        if let selID = service.workspace.selectedID,
+           let active = service.workspace.tabs.first(where: { $0.id == selID }),
+           case .scratchpad(let pad) = active.kind {
+            let succ = pad.cells.filter {
+                if case .result(let id) = $0.kind,
+                   let r = pad.results[id],
+                   case .success = r.status { return true }
+                return false
+            }.count
+            if succ >= 2 {
+                items.append(CommandItem(
+                    id: "action.diffLastTwo",
+                    icon: "rectangle.split.2x1",
+                    title: "Diff Last Two Results",
+                    subtitle: "Side-by-side delta of the two most recent results",
+                    category: .action,
+                    shortcut: nil,
+                    action: { pad.requestedDiffLastTwo = true }
+                ))
+            }
         }
 
         // Active-tab actions: rename + colour pick. Both reduce to a

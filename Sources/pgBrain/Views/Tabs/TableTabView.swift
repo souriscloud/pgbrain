@@ -200,6 +200,7 @@ struct TableTabView: View {
                 }
                 Divider()
                 Button("Import CSV into this table…", action: importCSV)
+                Button("Import JSON into this table…", action: importJSON)
             } label: {
                 Image(systemName: "tray.and.arrow.up")
             }
@@ -269,6 +270,37 @@ struct TableTabView: View {
         Task {
             do {
                 _ = try await Importer.importCSV(
+                    into: table,
+                    from: url,
+                    client: client,
+                    tracker: tracker,
+                    operationID: opID
+                )
+                tracker.finish(op, status: .succeeded)
+                await loader.load()
+            } catch is CancellationError {
+                tracker.finish(op, status: .cancelled)
+            } catch {
+                tracker.finish(op, status: .failed(error.localizedDescription))
+            }
+        }
+    }
+
+    private func importJSON() {
+        guard let client = service.client else { return }
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let op = service.operations.begin(
+            kind: .importJob,
+            summary: "Import \(url.lastPathComponent) → \(table.qualifiedName)"
+        )
+        let tracker = service.operations
+        let opID = op.id
+        Task {
+            do {
+                _ = try await Importer.importJSON(
                     into: table,
                     from: url,
                     client: client,
@@ -777,7 +809,8 @@ struct TableTabView: View {
                             onCopyAsSlack:    { copySelection(as: .slack) },
                             onCommandClickCell: { row, col in
                                 navigateForeignKey(row: row, col: col)
-                            }
+                            },
+                            columnLayoutKey: (service.connection.id, table.schema, table.name)
                         )
                         pagerStrip(visible: visible)
                     }

@@ -37,6 +37,9 @@ final class Notebook: Identifiable {
     /// catches the change, opens the EXPLAIN sheet, and clears it.
     /// Same consume-on-use contract as the tab `requested*` flags.
     var requestedExplainSQL: String?
+    /// Pulse: ask the host to open the result-diff sheet on the
+    /// last two successful results in this notebook.
+    var requestedDiffLastTwo: Bool = false
 
     init(title: String) {
         self.title = title

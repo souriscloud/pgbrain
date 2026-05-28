@@ -37,6 +37,18 @@ struct Connection: Identifiable, Codable, Hashable {
     var username: String = ""
     var sslMode: SSLMode = .prefer
     var colorTag: ColorTag = .none
+    // MARK: - SSH tunnel (optional)
+    /// When true, ConnectionService starts an ssh local-forward
+    /// process and points the PostgresNIO client at it before
+    /// connecting.
+    var sshEnabled: Bool = false
+    var sshHost: String = ""
+    var sshPort: Int = 22
+    var sshUser: String = ""
+    /// Path to a private key file (e.g. `~/.ssh/id_ed25519`). When
+    /// empty, ssh falls back to its default search (~/.ssh/id_rsa,
+    /// id_ed25519, etc.) or the agent.
+    var sshKeyPath: String = ""
     /// When true, every reference to this connection gets red danger chrome.
     var isProduction: Bool = false
 

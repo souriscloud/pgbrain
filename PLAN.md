@@ -343,6 +343,23 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, ad-hoc grid + scratchpad + palette + colour-picker + connection-paste flows tested live.
 
+### Iter 18 — Pro IDE round 2 (2026-05-28)
+**Goal**: close the next wave of DataGrip gaps — secure tunnels, JSON import, find/replace + bracket pairing + auto-indent in the scratchpad, query history, pg_locks + index-usage diagnostics, long-query notifications, per-table column width memory, and side-by-side result diff.
+
+- **SSH tunnel per connection** — `SSHTunnelManager` shells out to `/usr/bin/ssh -L <free>:<dbhost>:<dbport> -N -o ExitOnForwardFailure=yes` with public-key auth (agent or explicit key path). Free local port via `bind(0) + getsockname`. 8s deadline polling the local socket; if ssh dies first its stderr is surfaced. `ConnectionEditorView` grows an SSH section (toggle + host / port / user / key path); `ConnectionService.connect()` brings the tunnel up first and points PostgresNIO at `127.0.0.1:<port>`; `shutdown()` tears it down. StrictHostKeyChecking left at default — first connect requires a Terminal trust step (deliberate, not silent auto-accept).
+- **Find / replace in scratchpad** — `usesFindBar = true` + `isIncrementalSearchingEnabled = true` on `SqlCellNSTextView`. ⌘F / ⌘G / ⌘⌥F are native.
+- **Bracket + quote auto-pairing** — `insertText(_:replacementRange:)` wraps selections in `() [] {} '' ""`, skips over an existing closer when typing it, and falls through on apostrophe-after-word so `it's` keeps working.
+- **Auto-indent** — `insertNewline(_:)` copies the leading whitespace of the current line into the new line.
+- **Format SQL / Explain Statement** in the scratchpad context menu + ⌘⌥L / ⌘E. `SQLFormatter` is a tokenizer-driven pretty printer (top-level clauses on their own line, keywords uppercased, SELECT lists broken vertically, function args inline). `ExplainPlan` runs `EXPLAIN (FORMAT JSON [, ANALYZE])`, wraps ANALYZE in `BEGIN/ROLLBACK`, renders a recursive cost-tier-coloured tree in `ExplainPlanView`.
+- **Query history** — every executed statement logged to `query_history.json` (FIFO, 5000-entry cap) with sql / startedAt / elapsedSec / success / error / rowsAffected. `QueryHistoryView` is an HSplitView (searchable list + detail with highlighted SQL + Copy / Insert-into-scratchpad). Opened via sidebar `…` menu and ⌘K → "Query History…".
+- **Activity panel grew Locks + Indexes tabs** — `LockFetcher` joins `pg_locks` to `pg_stat_activity` (granted vs waiting); `IndexUsageFetcher` reads `pg_stat_user_indexes` + `pg_relation_size` and flags unused indexes. Each tab auto-refreshes on its own timer.
+- **JSON import** — `Importer.importJSON` reads an array of objects, validates keys against the target table, streams through the same `copyFrom` TEXT-format path as CSV. Nested objects/arrays serialise compactly. TableTab Import/Export menu now offers "Import JSON into this table…" alongside CSV.
+- **Result diff** — ⌘K → "Diff Last Two Results" (visible when active scratchpad has ≥2 successful results). `ResultDiffView` keys both pages by their first column, walks the union → added / removed / changed / unchanged with green/red/orange row backgrounds. Drives ad-hoc "did this change" workflows without leaving the app.
+- **Per-table column width memory** — `ColumnLayoutStore` (debounced JSON at AppSupport) keyed by `(connection, schema.table, column)`. `DataGridView` subscribes to `NSTableView.columnDidResizeNotification` and replays widths on mount via `columnLayoutKey`.
+- **Long-query notification** — `LongQueryNotifier` (`UNUserNotificationCenter`, lazy authorization request). `OperationsCenter.finish` fires when `elapsed > 30 && !NSApp.isActive` so background imports / dumps page you when they finish. Users who never wait that long never see the prompt.
+
+**Verified**: `swift build` ✓. App launched, SSH tunnel tested against localhost, find bar + bracket pair + auto-indent live, query history records and re-inserts, activity Locks + Indexes tabs populated against a live DB, JSON import round-tripped, column widths survive relaunch, diff-last-two pops the correct delta.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

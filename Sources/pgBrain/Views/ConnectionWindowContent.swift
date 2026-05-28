@@ -10,6 +10,8 @@ extension Notification.Name {
     /// Asks the matching window to switch to a saved workspace.
     /// `userInfo["workspaceID"]` carries the `SavedWorkspace.id`.
     static let pgbrainSwitchWorkspace = Notification.Name("cloud.souris.pgbrain.switchWorkspace")
+    /// Asks the matching window to show the query-history sheet.
+    static let pgbrainOpenQueryHistory = Notification.Name("cloud.souris.pgbrain.openQueryHistory")
 }
 
 struct ConnectionWindowContent: View {
@@ -19,6 +21,7 @@ struct ConnectionWindowContent: View {
     @State private var sidebarFilter: String = ""
     @State private var sidebarVisible: Bool = true
     @State private var showActivityPanel = false
+    @State private var showQueryHistory = false
     @State private var showSaveWorkspaceDialog = false
     @State private var workspaceNameDraft = ""
 
@@ -55,6 +58,33 @@ struct ConnectionWindowContent: View {
         }
         .sheet(isPresented: $showActivityPanel) {
             ActivityPanelView(service: service) { showActivityPanel = false }
+        }
+        .sheet(isPresented: $showQueryHistory) {
+            QueryHistoryView(
+                connectionID: service.connection.id,
+                onInsert: { sql in
+                    // Drop into a new scratchpad cell pre-populated
+                    // with the picked statement.
+                    let pad: Notebook
+                    if let active = service.workspace.tabs.first(where: { $0.id == service.workspace.selectedID }),
+                       case .scratchpad(let existing) = active.kind {
+                        pad = existing
+                    } else {
+                        pad = service.workspace.openScratchpad()
+                    }
+                    if let firstSql = pad.cells.first(where: { $0.kind == .sql }) {
+                        let separator = firstSql.text.isEmpty ? "" : "\n\n"
+                        firstSql.text += separator + sql
+                    }
+                    showQueryHistory = false
+                },
+                onClose: { showQueryHistory = false }
+            )
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainOpenQueryHistory)) { notif in
+            if let id = notif.object as? UUID, id == service.connection.id {
+                showQueryHistory = true
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainOpenActivityPanel)) { notif in
             // ⌘K → "Show Activity Panel" posts this with the target
@@ -418,6 +448,7 @@ struct ConnectionWindowContent: View {
                 Button("Reload schema") { Task { await service.loadSchema() } }
                 Button("Diff schemas…") { showSchemaDiff = true }
                 Button("Activity…") { showActivityPanel = true }
+                Button("Query history…") { showQueryHistory = true }
                 Divider()
                 Menu("Workspaces") {
                     Button("Save current as workspace…") {

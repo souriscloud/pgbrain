@@ -54,6 +54,10 @@ struct DataGridView: NSViewRepresentable {
     /// ⌘-click navigation. Receiver checks whether the cell is on
     /// an FK column and opens the parent table if so.
     var onCommandClickCell: ((Int /*sourceRow*/, Int /*dataCol*/) -> Void)? = nil
+    /// `(connectionID, schema, table)` for the column-layout store
+    /// keying. Nil disables persisted widths (e.g. for scratchpad
+    /// result grids that don't have a stable table identity).
+    var columnLayoutKey: (UUID, String, String)? = nil
 
     @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
@@ -71,6 +75,24 @@ struct DataGridView: NSViewRepresentable {
         var onCopyAsMarkdown: (() -> Void)?
         var onCopyAsSlack: (() -> Void)?
         var onCommandClickCell: ((Int, Int) -> Void)?
+        var columnLayoutKey: (UUID, String, String)?
+
+        @objc func columnDidResize(_ notification: Notification) {
+            guard let col = notification.userInfo?["NSTableColumn"] as? NSTableColumn,
+                  let key = columnLayoutKey
+            else { return }
+            let id = col.identifier.rawValue
+            // Skip the gutter column.
+            if id == Self.gutterColumnID { return }
+            // Identifier is `<index>_<name>`; strip the prefix.
+            guard let underscore = id.firstIndex(of: "_") else { return }
+            let name = String(id[id.index(after: underscore)...])
+            ColumnLayoutStore.shared.setWidth(
+                col.width,
+                connectionID: key.0, schema: key.1, table: key.2,
+                column: name
+            )
+        }
 
         /// Keyboard-focused cell (visible-row index + data-column index,
         /// where data-column-index excludes the row-gutter column 0).
@@ -600,6 +622,15 @@ struct DataGridView: NSViewRepresentable {
         context.coordinator.rebuildIndex()
         context.coordinator.tableView = table
         propagateState(to: context.coordinator)
+        // Persist column-width drags. The notification only fires on
+        // user-driven resize (not programmatic), so the initial
+        // applyColumns pass we just ran doesn't bounce-write.
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.columnDidResize(_:)),
+            name: NSTableView.columnDidResizeNotification,
+            object: table
+        )
 
         let scroll = NSScrollView()
         scroll.documentView = table
@@ -622,6 +653,7 @@ struct DataGridView: NSViewRepresentable {
         coordinator.onCopyAsMarkdown = onCopyAsMarkdown
         coordinator.onCopyAsSlack = onCopyAsSlack
         coordinator.onCommandClickCell = onCommandClickCell
+        coordinator.columnLayoutKey = columnLayoutKey
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
@@ -752,7 +784,14 @@ struct DataGridView: NSViewRepresentable {
             let identifier = NSUserInterfaceItemIdentifier("\(i)_\(col.name)")
             let column = NSTableColumn(identifier: identifier)
             column.minWidth = 60
-            column.width = estimatedWidth(for: col)
+            // Persisted user-set width wins over the type-driven
+            // default. Clamps to [minWidth, maxWidth] so a stale
+            // outsize value can't break the grid.
+            let saved = columnLayoutKey.flatMap { (id, sch, t) in
+                ColumnLayoutStore.shared.width(connectionID: id, schema: sch, table: t, column: col.name)
+            }
+            let estimated = estimatedWidth(for: col)
+            column.width = max(60, min(saved ?? estimated, 800))
             column.maxWidth = 800
             column.isEditable = editable
             let kind = ColumnTypeKind.from(typeName: col.typeName)

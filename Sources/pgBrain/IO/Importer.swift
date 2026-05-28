@@ -184,6 +184,9 @@ enum Importer {
         case openFailed(String)
         case noColumns
         case unknownHeaderColumn(String)
+        case invalidJSON
+        case jsonExpectsArray
+        case unknownJSONKey(String)
 
         var errorDescription: String? {
             switch self {
@@ -191,8 +194,145 @@ enum Importer {
             case .noColumns: return "Target table has no columns."
             case .unknownHeaderColumn(let name):
                 return "CSV header column \"\(name)\" doesn't match any column in the target table."
+            case .invalidJSON: return "File isn't valid JSON."
+            case .jsonExpectsArray: return "Top-level JSON must be an array of objects."
+            case .unknownJSONKey(let name):
+                return "JSON key \"\(name)\" doesn't match any column in the target table."
             }
         }
+    }
+
+    /// JSON importer — reads an array of objects, maps each object's
+    /// keys to table columns (1:1, name-matched), and streams them
+    /// through the same TEXT-format COPY path the CSV importer uses.
+    /// All values are stringified — PG decodes them server-side per
+    /// column type, so anything storable as a PG literal works
+    /// (numbers, booleans, ISO dates, json blobs).
+    static func importJSON(
+        into table: TableNode,
+        from source: URL,
+        client: PostgresClient,
+        tracker: OperationsCenter? = nil,
+        operationID: UUID? = nil
+    ) async throws -> Stats {
+        let started = Date()
+        guard let data = try? Data(contentsOf: source) else {
+            throw ImportError.openFailed(source.path)
+        }
+        let parsed: Any
+        do {
+            parsed = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        } catch {
+            throw ImportError.invalidJSON
+        }
+        guard let array = parsed as? [[String: Any]] else {
+            throw ImportError.jsonExpectsArray
+        }
+        let columns = table.columns
+        guard !columns.isEmpty else { throw ImportError.noColumns }
+
+        // Pre-validate every distinct key — fail before any work if
+        // the file references a column we don't have.
+        var keysSeen = Set<String>()
+        for obj in array {
+            for k in obj.keys where !keysSeen.contains(k) {
+                guard columns.contains(where: { $0.name == k }) else {
+                    throw ImportError.unknownJSONKey(k)
+                }
+                keysSeen.insert(k)
+            }
+        }
+        // Project to a stable column order (table's column list) so
+        // the COPY stream lines up correctly.
+        let columnNames = columns.map(\.name)
+        var rowsImported = 0
+        let bytesReadBox = ImportByteCounter()
+        bytesReadBox.set(data.count)
+
+        try await client.withConnection { connection in
+            if let opID = operationID, let tracker {
+                let pid = try await OperationsHelpers.fetchBackendPID(connection, logger: pgbrainQuietLogger)
+                let cancel: @Sendable () async -> Void = { [weak client] in
+                    guard let client else { return }
+                    _ = try? await client.withConnection { sister in
+                        _ = try await sister.query(
+                            PostgresQuery(unsafeSQL: "SELECT pg_cancel_backend(\(pid))"),
+                            logger: pgbrainQuietLogger
+                        )
+                    }
+                }
+                Task { @MainActor in
+                    tracker.attachCancellation(toOperationID: opID, pid: pid, handler: cancel)
+                }
+            }
+            _ = try await connection.query(PostgresQuery(unsafeSQL: "BEGIN"), logger: pgbrainQuietLogger)
+            do {
+                _ = try await connection.query(
+                    PostgresQuery(unsafeSQL: "SET LOCAL search_path = \(SQLIdent.quote(table.schema))"),
+                    logger: pgbrainQuietLogger
+                )
+                try await connection.copyFrom(
+                    table: table.name,
+                    columns: columnNames,
+                    format: .text(.init()),
+                    logger: pgbrainQuietLogger
+                ) { writer in
+                    var buffer = ByteBufferAllocator().buffer(capacity: 64 * 1024)
+                    for obj in array {
+                        try Task.checkCancellation()
+                        for (i, name) in columnNames.enumerated() {
+                            if i > 0 { buffer.writeString("\t") }
+                            let raw = obj[name]
+                            if let cell = jsonCellToCopyText(raw) {
+                                buffer.writeString(copyTextEscape(cell))
+                            } else {
+                                buffer.writeString("\\N")
+                            }
+                        }
+                        buffer.writeString("\n")
+                        rowsImported += 1
+                        if buffer.readableBytes >= 64 * 1024 {
+                            try await writer.write(buffer)
+                            buffer.clear()
+                        }
+                    }
+                    if buffer.readableBytes > 0 {
+                        try await writer.write(buffer)
+                    }
+                }
+                _ = try await connection.query(PostgresQuery(unsafeSQL: "COMMIT"), logger: pgbrainQuietLogger)
+            } catch {
+                _ = try? await connection.query(PostgresQuery(unsafeSQL: "ROLLBACK"), logger: pgbrainQuietLogger)
+                throw error
+            }
+        }
+        return Stats(
+            rowsImported: rowsImported,
+            bytesRead: bytesReadBox.value,
+            elapsed: Date().timeIntervalSince(started)
+        )
+    }
+
+    /// Stringify a JSON value for COPY-TEXT. Nested objects / arrays
+    /// are re-serialised as compact JSON so they can land in `jsonb`
+    /// columns; nulls become NULL; primitives stringify directly.
+    private static func jsonCellToCopyText(_ value: Any?) -> String? {
+        guard let value, !(value is NSNull) else { return nil }
+        if let s = value as? String { return s }
+        if let b = value as? Bool { return b ? "true" : "false" }
+        if let n = value as? Int { return String(n) }
+        if let n = value as? Int64 { return String(n) }
+        if let n = value as? Double {
+            // Avoid losing precision on round-trip; "%.17g" keeps
+            // doubles roundtrippable, but rstrips trailing zeros for
+            // readability.
+            return String(n)
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]),
+           let s = String(data: data, encoding: .utf8) {
+            return s
+        }
+        return nil
     }
 }
 

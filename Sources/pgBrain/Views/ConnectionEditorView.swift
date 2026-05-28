@@ -183,6 +183,44 @@ struct ConnectionEditorView: View {
             .tint(Tokens.Brand.danger)
             .padding(.top, Tokens.Spacing.xs)
 
+            // SSH tunnel section — optional. When enabled we shell
+            // out to /usr/bin/ssh with `-L localport:dbhost:dbport`
+            // and point the Postgres client at the local forward.
+            Divider().padding(.vertical, 4)
+            Toggle(isOn: $connection.sshEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("SSH tunnel").font(.callout.weight(.medium))
+                    Text("Connect through a bastion. Public-key auth only — set up your key in ssh-agent or specify a key file.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            if connection.sshEnabled {
+                HStack(alignment: .top, spacing: Tokens.Spacing.md) {
+                    field("SSH Host") {
+                        TextField("bastion.example.com", text: $connection.sshHost)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    field("Port", flex: 0) {
+                        TextField("22", value: $connection.sshPort, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+                    }
+                }
+                HStack(alignment: .top, spacing: Tokens.Spacing.md) {
+                    field("SSH User") {
+                        TextField("ec2-user", text: $connection.sshUser)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    field("Private key (optional)") {
+                        TextField("~/.ssh/id_ed25519 — leave blank to use agent / defaults",
+                                  text: $connection.sshKeyPath)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+            }
+
             if let testMessage {
                 HStack(alignment: .firstTextBaseline, spacing: Tokens.Spacing.xs) {
                     Image(systemName: testOK ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")

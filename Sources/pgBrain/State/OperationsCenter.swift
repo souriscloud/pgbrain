@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Logging
 import Observation
@@ -94,6 +95,12 @@ final class OperationsCenter {
         op.status = status
         op.finishedAt = Date()
         op.cancellationHandler = nil
+        // Long-query toast — fire only when the app is in the
+        // background so the user gets pinged without spamming
+        // notifications for queries they're sitting on.
+        if op.elapsed > 30, NSApp.isActive == false {
+            LongQueryNotifier.notify(operation: op)
+        }
     }
 
     /// User-initiated cancellation from the popover. Fires the cancel handler

@@ -19,10 +19,18 @@ struct NotebookView: View {
     @State private var showLibrary = false
     @State private var focusedCellID: UUID?
     @State private var explainRequest: ExplainSheetState?
+    @State private var diffRequest: DiffSheetState?
 
     struct ExplainSheetState: Identifiable {
         let id = UUID()
         let sql: String
+    }
+    struct DiffSheetState: Identifiable {
+        let id = UUID()
+        let leftStatement: String
+        let rightStatement: String
+        let leftPage: RowsFetcher.Page
+        let rightPage: RowsFetcher.Page
     }
 
     var body: some View {
@@ -90,6 +98,18 @@ struct NotebookView: View {
                 explainRequest = ExplainSheetState(sql: sql)
                 notebook.requestedExplainSQL = nil
             }
+        }
+        .onChange(of: notebook.requestedDiffLastTwo) { _, want in
+            if want { presentDiffLastTwo(); notebook.requestedDiffLastTwo = false }
+        }
+        .sheet(item: $diffRequest) { state in
+            ResultDiffView(
+                leftStatement: state.leftStatement,
+                rightStatement: state.rightStatement,
+                leftPage: state.leftPage,
+                rightPage: state.rightPage,
+                onClose: { diffRequest = nil }
+            )
         }
     }
 
@@ -165,6 +185,26 @@ struct NotebookView: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help("search_path for this scratchpad")
+    }
+
+    /// Find the two most-recent successful results in the notebook
+    /// and pop the diff sheet on them. No-op (no sheet) when fewer
+    /// than two successful results exist.
+    private func presentDiffLastTwo() {
+        let successes: [(stmt: String, page: RowsFetcher.Page)] = notebook.cells.compactMap { cell in
+            guard case .result(let resultID) = cell.kind,
+                  let result = notebook.results[resultID],
+                  case .success(let qr) = result.status
+            else { return nil }
+            return (result.statement, qr.page)
+        }
+        guard successes.count >= 2 else { return }
+        let right = successes[successes.count - 1]
+        let left = successes[successes.count - 2]
+        diffRequest = DiffSheetState(
+            leftStatement: left.stmt, rightStatement: right.stmt,
+            leftPage: left.page, rightPage: right.page
+        )
     }
 
     private func runFocusedOrLastCell() {
@@ -338,6 +378,11 @@ private struct SqlCellEditor: NSViewRepresentable {
     func makeNSView(context: Context) -> SqlCellNSTextView {
         let tv = SqlCellNSTextView()
         tv.isRichText = false
+        // Enable the standard NSTextView find bar — ⌘F shows it,
+        // ⌘G / ⌘⇧G step matches, ⌘⌥F toggles replace. Free win,
+        // just had to opt in.
+        tv.usesFindBar = true
+        tv.isIncrementalSearchingEnabled = true
         tv.font = NSFont.monospacedSystemFont(ofSize: CGFloat(AppSettings.shared.editorFontSize), weight: .regular)
         tv.textColor = .labelColor
         tv.insertionPointColor = .labelColor
@@ -493,6 +538,82 @@ final class SqlCellNSTextView: NSTextView {
         lm.ensureLayout(for: tc)
         let used = lm.usedRect(for: tc)
         return NSSize(width: NSView.noIntrinsicMetric, height: max(24, used.height + 8))
+    }
+
+    // MARK: - Bracket / quote pairing + auto-indent
+
+    private static let openerToCloser: [Character: Character] = [
+        "(": ")", "[": "]", "{": "}", "'": "'", "\"": "\""
+    ]
+    private static let closersSet: Set<Character> = [")", "]", "}", "'", "\""]
+
+    /// Auto-pair `(` `[` `{` `'` `"`. Wraps an existing selection
+    /// when present; skips over an existing closer when the user
+    /// types one that's already next to the caret. Apostrophes after
+    /// word characters (`it's`) fall through to the default insert.
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        if let s = string as? String, s.count == 1, let ch = s.first {
+            let sel = selectedRange()
+            let ns = self.string as NSString
+            if Self.closersSet.contains(ch), sel.length == 0, sel.location < ns.length,
+               UnicodeScalar(ns.character(at: sel.location)) == ch.unicodeScalars.first {
+                setSelectedRange(NSRange(location: sel.location + 1, length: 0))
+                return
+            }
+            if let closer = Self.openerToCloser[ch] {
+                let isQuote = ch == "'" || ch == "\""
+                let prevIsWord: Bool = {
+                    guard sel.location > 0 else { return false }
+                    let prev = ns.character(at: sel.location - 1)
+                    return (prev >= 0x41 && prev <= 0x5A)
+                        || (prev >= 0x61 && prev <= 0x7A)
+                        || (prev >= 0x30 && prev <= 0x39)
+                        || prev == 0x5F
+                }()
+                if !(isQuote && prevIsWord) {
+                    if sel.length > 0 {
+                        let selected = ns.substring(with: sel)
+                        let replacement = "\(ch)\(selected)\(closer)"
+                        if shouldChangeText(in: sel, replacementString: replacement) {
+                            textStorage?.replaceCharacters(in: sel, with: replacement)
+                            didChangeText()
+                            setSelectedRange(NSRange(location: sel.location + 1, length: sel.length))
+                        }
+                    } else {
+                        let pair = "\(ch)\(closer)"
+                        if shouldChangeText(in: sel, replacementString: pair) {
+                            textStorage?.replaceCharacters(in: sel, with: pair)
+                            didChangeText()
+                            setSelectedRange(NSRange(location: sel.location + 1, length: 0))
+                        }
+                    }
+                    return
+                }
+            }
+        }
+        super.insertText(string, replacementRange: replacementRange)
+    }
+
+    /// Match the previous line's leading whitespace on Enter so users
+    /// don't re-indent every line. Tabs and spaces are both honoured.
+    override func insertNewline(_ sender: Any?) {
+        let ns = string as NSString
+        let sel = selectedRange()
+        guard sel.location <= ns.length else { super.insertNewline(sender); return }
+        let beforeCaret = NSRange(location: 0, length: sel.location)
+        let nlRange = ns.range(of: "\n", options: [.backwards], range: beforeCaret)
+        let lineStart = nlRange.location == NSNotFound ? 0 : nlRange.location + 1
+        var indentEnd = lineStart
+        while indentEnd < ns.length {
+            let c = ns.character(at: indentEnd)
+            if c == 0x20 || c == 0x09 { indentEnd += 1 } else { break }
+        }
+        let indent = ns.substring(with: NSRange(location: lineStart, length: indentEnd - lineStart))
+        let insertion = "\n" + indent
+        if shouldChangeText(in: sel, replacementString: insertion) {
+            textStorage?.replaceCharacters(in: sel, with: insertion)
+            didChangeText()
+        }
     }
 
     override func didChangeText() {
@@ -1002,11 +1123,8 @@ enum NotebookRunner {
             for (sql, id) in zip(plans, ids) {
                 let op = service.operations.begin(kind: .query, summary: QueryRunner.summary(of: sql))
                 let result = notebook.startResult(id: id, statement: sql)
-                // Re-apply collapse policy after startResult — the
-                // synchronous pre-loop already did, but we want to be
-                // explicit so future code changes don't reintroduce the
-                // "always expanded" regression.
                 result.isCollapsed = collapseAll
+                let started = Date()
                 do {
                     let qr = try await QueryRunner.run(
                         sql, on: client,
@@ -1016,15 +1134,36 @@ enum NotebookRunner {
                     result.status = .success(qr)
                     result.finishedAt = Date()
                     service.operations.finish(op, status: .succeeded)
+                    QueryHistoryStore.shared.record(
+                        connectionID: service.connection.id,
+                        sql: sql, startedAt: started,
+                        elapsedSec: Date().timeIntervalSince(started),
+                        success: true, errorMessage: nil,
+                        rowsAffected: qr.rowsAffected
+                    )
                 } catch is CancellationError {
                     result.status = .cancelled
                     result.finishedAt = Date()
                     service.operations.finish(op, status: .cancelled)
+                    QueryHistoryStore.shared.record(
+                        connectionID: service.connection.id,
+                        sql: sql, startedAt: started,
+                        elapsedSec: Date().timeIntervalSince(started),
+                        success: false, errorMessage: "Cancelled",
+                        rowsAffected: nil
+                    )
                 } catch {
                     let message = PostgresErrorMessage.describe(error)
                     result.status = .failure(message)
                     result.finishedAt = Date()
                     service.operations.finish(op, status: .failed(message))
+                    QueryHistoryStore.shared.record(
+                        connectionID: service.connection.id,
+                        sql: sql, startedAt: started,
+                        elapsedSec: Date().timeIntervalSince(started),
+                        success: false, errorMessage: message,
+                        rowsAffected: nil
+                    )
                 }
             }
         }
