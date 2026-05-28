@@ -10,6 +10,7 @@ struct CommandItem: Identifiable {
         case action     = "Action"
         case connection = "Connection"
         case table      = "Table"
+        case function   = "Function"
         case schema     = "Schema"
         case tab        = "Tab"
         case query      = "Query"
@@ -20,8 +21,9 @@ struct CommandItem: Identifiable {
             case .connection: 1
             case .tab:        2
             case .table:      3
-            case .schema:     4
-            case .query:      5
+            case .function:   4
+            case .schema:     5
+            case .query:      6
             }
         }
     }

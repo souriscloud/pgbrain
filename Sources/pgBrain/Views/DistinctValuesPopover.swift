@@ -47,32 +47,13 @@ struct DistinctValuesPopover: View {
             } else {
                 ScrollView {
                     VStack(spacing: 0) {
-                        ForEach(Array(rows.enumerated()), id: \.offset) { (_, row) in
-                            Button {
+                        ForEach(Array(rows.enumerated()), id: \.offset) { (idx, row) in
+                            DistinctRow(value: row.value, count: row.count) {
                                 onPick(row.value)
-                            } label: {
-                                HStack {
-                                    Text(row.value ?? "NULL")
-                                        .font(.system(.caption, design: .monospaced))
-                                        .foregroundStyle(row.value == nil ? .secondary : .primary)
-                                        .italic(row.value == nil)
-                                        .lineLimit(1)
-                                        .truncationMode(.tail)
-                                    Spacer(minLength: 8)
-                                    Text("\(row.count)")
-                                        .font(.system(.caption2, design: .monospaced).weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                        .monospacedDigit()
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .contentShape(Rectangle())
                             }
-                            .buttonStyle(.plain)
-                            .background(
-                                Color.secondary.opacity(0.01)
-                                    .background(Color.clear)
-                            )
+                            if idx < rows.count - 1 {
+                                Divider().opacity(0.25)
+                            }
                         }
                     }
                 }
@@ -138,5 +119,38 @@ struct DistinctValuesPopover: View {
         let stream = try await client.query(PostgresQuery(unsafeSQL: sql))
         for try await n in stream.decode(Int64.self) { return n }
         return 0
+    }
+}
+
+/// One tappable distinct-value row with a hover highlight. Pulled out so
+/// the per-row `@State` hover flag doesn't churn the whole list.
+private struct DistinctRow: View {
+    let value: String?
+    let count: Int64
+    let onTap: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack {
+                Text(value ?? "NULL")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(value == nil ? .secondary : .primary)
+                    .italic(value == nil)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 8)
+                Text("\(count)")
+                    .font(.system(.caption2, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(hovering ? Color.accentColor.opacity(0.12) : Color.clear)
+        .onHover { hovering = $0 }
     }
 }

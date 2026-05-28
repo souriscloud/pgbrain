@@ -17,6 +17,13 @@ extension Notification.Name {
     static let pgbrainOpenNotifyPanel = Notification.Name("cloud.souris.pgbrain.openNotifyPanel")
     /// Asks the matching window to open the snippets library sheet.
     static let pgbrainOpenSnippets = Notification.Name("cloud.souris.pgbrain.openSnippets")
+    /// Asks the matching window to open the create-schema sheet.
+    static let pgbrainCreateSchema = Notification.Name("cloud.souris.pgbrain.createSchema")
+    /// Asks the matching window to open the create-database sheet.
+    static let pgbrainCreateDatabase = Notification.Name("cloud.souris.pgbrain.createDatabase")
+    /// Asks the matching window to open a function in the editor.
+    /// `userInfo["schema"]` + `userInfo["name"]` + `userInfo["args"]` identify it.
+    static let pgbrainEditFunction = Notification.Name("cloud.souris.pgbrain.editFunction")
     /// Asks the matching window to prompt the user for a name and
     /// save the current tab set as a workspace.
     static let pgbrainSaveWorkspace = Notification.Name("cloud.souris.pgbrain.saveWorkspace")
@@ -196,6 +203,26 @@ struct ConnectionWindowContent: View {
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainOpenSnippets)) { notif in
             if let id = notif.object as? UUID, id == service.connection.id {
                 showSnippets = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainCreateSchema)) { notif in
+            if let id = notif.object as? UUID, id == service.connection.id {
+                showCreateSchema = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainCreateDatabase)) { notif in
+            if let id = notif.object as? UUID, id == service.connection.id {
+                showCreateDatabase = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainEditFunction)) { notif in
+            guard let id = notif.object as? UUID, id == service.connection.id,
+                  let schema = notif.userInfo?["schema"] as? String,
+                  let name = notif.userInfo?["name"] as? String
+            else { return }
+            if let fn = service.schema.schemas.first(where: { $0.name == schema })?
+                .functions.first(where: { $0.name == name }) {
+                editFunction = fn
             }
         }
         .sheet(isPresented: $showQueryHistory) {

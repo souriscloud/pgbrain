@@ -12,6 +12,8 @@ final class SidebarNode {
         case table(TableNode)
         case columns(ofTable: TableNode)   // group node so columns nest one extra level
         case column(ColumnNode)
+        case functionsGroup(schema: String)  // group node holding a schema's routines
+        case function(FunctionNode)
     }
 
     let kind: Kind
@@ -31,7 +33,15 @@ final class SidebarNode {
                 let columnsGroup = SidebarNode(kind: .columns(ofTable: table), children: columnNodes)
                 return SidebarNode(kind: .table(table), children: [columnsGroup])
             }
-            return SidebarNode(kind: .schema(name: schema.name), children: tableNodes)
+            var children = tableNodes
+            // Functions live in a collapsed "functions" group below the
+            // schema's tables so they're browsable without cluttering
+            // the common table-hunting flow.
+            if !schema.functions.isEmpty {
+                let fnNodes = schema.functions.map { SidebarNode(kind: .function($0)) }
+                children.append(SidebarNode(kind: .functionsGroup(schema: schema.name), children: fnNodes))
+            }
+            return SidebarNode(kind: .schema(name: schema.name), children: children)
         }
         return SidebarNode(
             kind: .database(name: snapshot.databaseName.isEmpty ? "database" : snapshot.databaseName),
@@ -46,6 +56,8 @@ final class SidebarNode {
         case .table(let t): return t.name
         case .columns: return "columns"
         case .column(let c): return c.name
+        case .functionsGroup: return "functions"
+        case .function(let f): return f.name
         }
     }
 
@@ -58,7 +70,14 @@ final class SidebarNode {
             case .table: return nil
             }
         case .column(let c): return c.typeName + (c.nullable ? "" : " NOT NULL")
-        case .schema, .database, .columns: return nil
+        case .function(let f):
+            switch f.kind {
+            case .function: return nil
+            case .procedure: return "proc"
+            case .aggregate: return "agg"
+            case .window: return "window"
+            }
+        case .schema, .database, .columns, .functionsGroup: return nil
         }
     }
 
@@ -74,12 +93,19 @@ final class SidebarNode {
             }
         case .columns: return "list.bullet.rectangle"
         case .column: return "circle.dotted"
+        case .functionsGroup: return "function"
+        case .function: return "f.cursive"
         }
     }
 
     /// Tables are the only item that opens a tab on activation.
     var openableTable: TableNode? {
         if case .table(let t) = kind { return t } else { return nil }
+    }
+
+    /// Functions open the editor sheet on activation.
+    var openableFunction: FunctionNode? {
+        if case .function(let f) = kind { return f } else { return nil }
     }
 }
 
@@ -191,9 +217,21 @@ struct SidebarOutlineView: NSViewRepresentable {
                 return schemaMenu(name: name)
             case .table(let table):
                 return tableMenu(for: table)
-            case .columns, .column:
+            case .function(let fn):
+                return functionMenu(for: fn)
+            case .columns, .column, .functionsGroup:
                 return nil
             }
+        }
+
+        private func functionMenu(for fn: FunctionNode) -> NSMenu? {
+            guard onOpenFunction != nil else { return nil }
+            let menu = NSMenu()
+            let edit = NSMenuItem(title: "Edit function…", action: #selector(handleOpenFunction(_:)), keyEquivalent: "")
+            edit.target = self
+            edit.representedObject = FunctionBox(fn)
+            menu.addItem(edit)
+            return menu
         }
 
         private func databaseMenu() -> NSMenu? {
@@ -342,6 +380,10 @@ struct SidebarOutlineView: NSViewRepresentable {
             guard let table = sender.representedObject as? TableNode else { return }
             onFindUsages?(table)
         }
+        @objc private func handleOpenFunction(_ sender: NSMenuItem) {
+            guard let box = sender.representedObject as? FunctionBox else { return }
+            onOpenFunction?(box.fn)
+        }
 
         @objc private func handleOpen(_ sender: NSMenuItem) {
             guard let table = sender.representedObject as? TableNode else { return }
@@ -414,12 +456,21 @@ struct SidebarOutlineView: NSViewRepresentable {
             guard row >= 0, let node = sender.item(atRow: row) as? SidebarNode else { return }
             if let table = node.openableTable {
                 onOpenTable(table)
+            } else if let fn = node.openableFunction {
+                onOpenFunction?(fn)
             } else if sender.isItemExpanded(node) {
                 sender.collapseItem(node)
             } else {
                 sender.expandItem(node)
             }
         }
+    }
+
+    /// AppKit's `representedObject` needs a class; `FunctionNode` is a
+    /// struct, so box it for the menu round-trip.
+    private final class FunctionBox {
+        let fn: FunctionNode
+        init(_ fn: FunctionNode) { self.fn = fn }
     }
 
     func makeCoordinator() -> Coordinator {

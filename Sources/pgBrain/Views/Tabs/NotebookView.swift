@@ -990,15 +990,15 @@ private struct ResultGridWithViews: View {
     @State private var showChart = false
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            DataGridView(page: page)
-                .frame(minHeight: 140, idealHeight: 260, maxHeight: 360)
-            HStack(spacing: 4) {
+        VStack(spacing: 0) {
+            // Thin toolbar above the grid so the buttons never cover
+            // the top-right data cells.
+            HStack(spacing: 8) {
+                Spacer()
                 Button {
                     showPivot = true
                 } label: {
-                    Label("Pivot", systemImage: "square.grid.3x3")
-                        .font(.caption2)
+                    Label("Pivot", systemImage: "square.grid.3x3").font(.caption2)
                 }
                 .controlSize(.mini)
                 .buttonStyle(.borderless)
@@ -1006,14 +1006,17 @@ private struct ResultGridWithViews: View {
                 Button {
                     showChart = true
                 } label: {
-                    Label("Chart", systemImage: "chart.bar")
-                        .font(.caption2)
+                    Label("Chart", systemImage: "chart.bar").font(.caption2)
                 }
                 .controlSize(.mini)
                 .buttonStyle(.borderless)
                 .help("Chart this result")
             }
-            .padding(6)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            Divider().opacity(0.3)
+            DataGridView(page: page)
+                .frame(minHeight: 140, idealHeight: 260, maxHeight: 360)
         }
         .sheet(isPresented: $showPivot) {
             PivotResultView(page: page) { showPivot = false }

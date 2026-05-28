@@ -393,6 +393,17 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launched. `\dt` translation round-trips; trigger enable/disable round-trips; function editor loads + saves a CREATE OR REPLACE; runAsTransaction rolls back on injected error; pivot + chart render off the live result; roles + grants tab populates; create/drop database round-trips on a sacrificial DB; column rename/drop/alter type round-trips; find usages locates a view referencing a sample table.
 
+### Iter 21 — Polish pass on the DBA rounds (2026-05-29)
+**Goal**: tighten what iter-18/19/20 added rather than add breadth — discoverability, dead UI code, button placement, palette coverage, keyboard consistency.
+
+- **Functions browsable in sidebar** — `SidebarNode` gains `.functionsGroup` + `.function` kinds. Each schema with routines shows a collapsed "functions" group below its tables; double-click or right-click → "Edit function…" opens the editor. Previously the function editor was only reachable via Find Usages (a dead-end). `f.cursive` / `function` SF Symbols, `proc`/`agg`/`window` secondary labels.
+- **DistinctValuesPopover rows** — replaced dead `Color.secondary.opacity(0.01).background(.clear)` no-op with a real `DistinctRow` view: accent hover highlight + row dividers, per-row `@State` so hover doesn't churn the list.
+- **Pivot/Chart buttons** — moved from a `ZStack` overlay (which covered the top-right data cells) to a thin toolbar strip above the grid.
+- **Palette coverage** — added *New Schema…*, *New Database…*, and a new **Function** category listing every routine (opens the editor via a `pgbrainEditFunction` notification). New palette icon colour (purple) + sort order for functions.
+- **Keyboard/consistency audit** — confirmed every iter-18/19/20 sheet has Esc-to-close (`.cancelAction`); fixed two non-existent SF Symbol names in the palette (`plus.diamond` → `cylinder.split.1x2`, `plus.rectangle.on.folder` → `folder.badge.plus`) that would have rendered blank.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launched. Not yet released — polish sits on top of v0.5.0 pending a bump.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

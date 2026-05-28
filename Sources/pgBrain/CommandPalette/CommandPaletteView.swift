@@ -264,6 +264,7 @@ private struct CommandRow: View {
         case .action:     Tokens.Brand.primary.opacity(0.18)
         case .connection: Color.cyan.opacity(0.18)
         case .table:      Color.blue.opacity(0.18)
+        case .function:   Color.purple.opacity(0.18)
         case .schema:     Color.orange.opacity(0.18)
         case .tab:        Color.green.opacity(0.18)
         case .query:      Color.pink.opacity(0.18)
@@ -275,6 +276,7 @@ private struct CommandRow: View {
         case .action:     Tokens.Brand.primary
         case .connection: .cyan
         case .table:      .blue
+        case .function:   .purple
         case .schema:     .orange
         case .tab:        .green
         case .query:      .pink

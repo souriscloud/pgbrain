@@ -17,6 +17,7 @@ enum CommandProviders {
         out.append(contentsOf: connectionActions(service: service))
         out.append(contentsOf: tabs(service: service))
         out.append(contentsOf: tables(service: service))
+        out.append(contentsOf: functions(service: service))
         out.append(contentsOf: schemas(service: service))
         return out
     }
@@ -174,6 +175,30 @@ enum CommandProviders {
                 }
             ),
             CommandItem(
+                id: "action.createSchema",
+                icon: "folder.badge.plus",
+                title: "New Schema…",
+                subtitle: "CREATE SCHEMA",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    AppDelegate.shared?.openConnection(service.connection)
+                    NotificationCenter.default.post(name: .pgbrainCreateSchema, object: service.connection.id)
+                }
+            ),
+            CommandItem(
+                id: "action.createDatabase",
+                icon: "cylinder.split.1x2",
+                title: "New Database…",
+                subtitle: "CREATE DATABASE",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    AppDelegate.shared?.openConnection(service.connection)
+                    NotificationCenter.default.post(name: .pgbrainCreateDatabase, object: service.connection.id)
+                }
+            ),
+            CommandItem(
                 id: "action.saveWorkspace",
                 icon: "square.stack.3d.up",
                 title: "Save Workspace…",
@@ -305,6 +330,36 @@ enum CommandProviders {
                     category: .table,
                     shortcut: nil,
                     action: { service.workspace.openTable(captured) }
+                ))
+            }
+        }
+        return out
+    }
+
+    // MARK: - Functions
+
+    private static func functions(service: ConnectionService) -> [CommandItem] {
+        var out: [CommandItem] = []
+        for schema in service.visibleSchema.schemas {
+            for fn in schema.functions {
+                let schemaName = schema.name
+                let fnName = fn.name
+                let args = fn.arguments
+                out.append(CommandItem(
+                    id: "function.\(schema.name).\(fn.name)\(fn.arguments)",
+                    icon: "function",
+                    title: fn.signature,
+                    subtitle: "\(schema.name) · \(fn.kind.rawValue)",
+                    category: .function,
+                    shortcut: nil,
+                    action: {
+                        AppDelegate.shared?.openConnection(service.connection)
+                        NotificationCenter.default.post(
+                            name: .pgbrainEditFunction,
+                            object: service.connection.id,
+                            userInfo: ["schema": schemaName, "name": fnName, "args": args]
+                        )
+                    }
                 ))
             }
         }
