@@ -19,6 +19,7 @@ final class WorkspaceState {
         }
     }
 
+    @Observable
     final class Tab: Identifiable, Equatable {
         let id = UUID()
         var kind: TabKind

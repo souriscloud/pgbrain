@@ -33,7 +33,8 @@ enum QueryRunner {
         on client: PostgresClient,
         limit: Int = defaultRowLimit,
         operationID: UUID? = nil,
-        tracker: OperationsCenter? = nil
+        tracker: OperationsCenter? = nil,
+        searchPath: String? = nil
     ) async throws -> QueryResult {
         try await client.withConnection { connection in
             if let opID = operationID, let tracker {
@@ -53,7 +54,33 @@ enum QueryRunner {
                     tracker.attachCancellation(toOperationID: opID, pid: pid, handler: cancelHandler)
                 }
             }
-            return try await runOnConnection(sql, on: connection, limit: limit)
+            if let schema = searchPath {
+                // SET (without LOCAL) persists on the connection — we RESET
+                // after the user query so the pool doesn't bleed this
+                // setting into the next checkout.
+                _ = try await connection.query(
+                    PostgresQuery(unsafeSQL: "SET search_path TO \(SQLIdent.quote(schema))"),
+                    logger: pgbrainQuietLogger
+                )
+            }
+            do {
+                let result = try await runOnConnection(sql, on: connection, limit: limit)
+                if searchPath != nil {
+                    _ = try? await connection.query(
+                        PostgresQuery(unsafeSQL: "RESET search_path"),
+                        logger: pgbrainQuietLogger
+                    )
+                }
+                return result
+            } catch {
+                if searchPath != nil {
+                    _ = try? await connection.query(
+                        PostgresQuery(unsafeSQL: "RESET search_path"),
+                        logger: pgbrainQuietLogger
+                    )
+                }
+                throw error
+            }
         }
     }
 

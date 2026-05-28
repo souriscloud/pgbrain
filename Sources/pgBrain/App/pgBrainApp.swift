@@ -20,6 +20,12 @@ struct pgBrainApp: App {
                 }
                 .keyboardShortcut("n")
             }
+            CommandGroup(after: .toolbar) {
+                Button("Command Palette…") {
+                    CommandPaletteWindow.shared.toggle()
+                }
+                .keyboardShortcut("k", modifiers: [.command])
+            }
         }
     }
 }

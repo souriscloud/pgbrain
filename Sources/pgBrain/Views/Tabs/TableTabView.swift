@@ -10,6 +10,7 @@ struct TableTabView: View {
     let service: ConnectionService
 
     @State private var loader: RowsLoader
+    @State private var showApplyErrorPopover = false
 
     init(table: TableNode, service: ConnectionService) {
         self.table = table
@@ -178,12 +179,30 @@ struct TableTabView: View {
     @ViewBuilder
     private var editControls: some View {
         if let applyError = loader.applyError {
-            Text(applyError)
+            Button {
+                showApplyErrorPopover = true
+            } label: {
+                Label {
+                    Text("Apply failed")
+                        .font(.caption.weight(.medium))
+                } icon: {
+                    Image(systemName: "exclamationmark.octagon.fill")
+                        .foregroundStyle(.red)
+                }
+                .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(.borderless)
+            .help("Click to see the full error message")
+            .popover(isPresented: $showApplyErrorPopover, arrowEdge: .bottom) {
+                ApplyErrorPopover(message: applyError)
+            }
+        }
+        if let applySuccess = loader.applySuccess {
+            Label(applySuccess, systemImage: "checkmark.circle.fill")
                 .font(.caption)
-                .foregroundStyle(.red)
+                .foregroundStyle(.green)
                 .lineLimit(1)
-                .truncationMode(.middle)
-                .help(applyError)
+                .transition(.opacity)
         }
         if loader.editBuffer.isDirty {
             Text("\(loader.editBuffer.dirtyCount) pending")
@@ -240,7 +259,8 @@ struct TableTabView: View {
             } else {
                 DataGridView(
                     page: page,
-                    editBuffer: table.isEditable ? loader.editBuffer : nil
+                    editBuffer: table.isEditable ? loader.editBuffer : nil,
+                    appliedHighlights: loader.appliedHighlights
                 )
             }
         case .error(let message):
@@ -283,6 +303,12 @@ final class RowsLoader {
     let editBuffer = EditBuffer()
     private(set) var isApplying = false
     private(set) var applyError: String?
+    /// Short-lived green message after a successful Apply.
+    private(set) var applySuccess: String?
+    /// Cells that were just applied — rendered with a fading green tint
+    /// in the grid so the user can see exactly what landed. Cleared on a
+    /// timer so the highlight doesn't loiter.
+    private(set) var appliedHighlights: Set<EditBuffer.CellKey> = []
 
     init(table: TableNode, service: ConnectionService) {
         self.table = table
@@ -329,11 +355,13 @@ final class RowsLoader {
 
         isApplying = true
         applyError = nil
+        applySuccess = nil
         defer { isApplying = false }
         let op = service.operations.begin(
             kind: .update,
             summary: "UPDATE \(table.qualifiedName) (\(edits.count) row\(edits.count == 1 ? "" : "s"))"
         )
+        let started = Date()
         do {
             try await UpdateApplier.apply(
                 edits: edits,
@@ -352,13 +380,73 @@ final class RowsLoader {
                 }
             }
             state = .loaded(page)
+            let elapsed = Date().timeIntervalSince(started)
+            applySuccess = "Applied \(edits.count) row\(edits.count == 1 ? "" : "s") · \(String(format: "%.0f ms", elapsed * 1000))"
+            // Flash every applied (row, col) green in the grid for a few
+            // seconds before fading.
+            var highlights: Set<EditBuffer.CellKey> = []
+            for edit in edits {
+                for cell in edit.cells {
+                    if let colIdx = page.columns.firstIndex(where: { $0.name == cell.column.name }) {
+                        highlights.insert(EditBuffer.CellKey(row: edit.rowIndex, column: colIdx))
+                    }
+                }
+            }
+            appliedHighlights = highlights
             editBuffer.clear()
+            let snapshot = applySuccess
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 3_500_000_000)
+                if self?.applySuccess == snapshot {
+                    self?.applySuccess = nil
+                    self?.appliedHighlights = []
+                }
+            }
         } catch is CancellationError {
             applyError = "Cancelled"
             service.operations.finish(op, status: .cancelled)
         } catch {
-            applyError = error.localizedDescription
-            service.operations.finish(op, status: .failed(error.localizedDescription))
+            // Unwrap PostgresTransactionError / PSQLError into a real
+            // server message — by default they read "error 1" / opaque
+            // code, which isn't actionable.
+            let message = PostgresErrorMessage.describe(error)
+            applyError = message
+            service.operations.finish(op, status: .failed(message))
         }
+    }
+}
+
+/// Click-to-open popover showing the full multi-line apply error so the
+/// user can actually read the server's reason (and copy it).
+private struct ApplyErrorPopover: View {
+    let message: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Tokens.Spacing.sm) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(.red)
+                Text("Apply failed").font(.headline)
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(message, forType: .string)
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                }
+                .controlSize(.small)
+            }
+            ScrollView {
+                Text(message)
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 300)
+            Text("Transaction rolled back. Your pending edits are still here — fix and Apply again, or Revert.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(Tokens.Spacing.md)
+        .frame(width: 460)
     }
 }

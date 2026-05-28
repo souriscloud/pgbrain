@@ -28,6 +28,10 @@ struct SessionState: Codable {
         /// Application Support directory.
         var scratchpadTitle: String?
         var scratchpadText: String?
+        /// Per-scratchpad `search_path` override. Nil = use the
+        /// connection's default. Optional so existing on-disk state
+        /// without this field decodes cleanly.
+        var scratchpadSearchPath: String?
     }
 
     struct CodableRect: Codable {
@@ -113,7 +117,8 @@ final class SessionStateStore {
                     return SessionState.Tab(
                         kind: .scratchpad,
                         scratchpadTitle: pad.title,
-                        scratchpadText: pad.plainText
+                        scratchpadText: pad.plainText,
+                        scratchpadSearchPath: pad.searchPath
                     )
                 }
             }

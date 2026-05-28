@@ -3,6 +3,7 @@ import Logging
 import Observation
 import PostgresNIO
 import NIOCore
+import NIOPosix
 import NIOSSL
 
 /// Shared no-op logger for the (currently very chatty) PostgresNIO query
@@ -64,14 +65,27 @@ final class ConnectionService {
         state = .closed
     }
 
-    /// Max time we wait for `SELECT version()` to come back before declaring
-    /// the connect attempt dead. PostgresNIO's `.require` TLS against a
-    /// server that doesn't speak TLS hangs silently with no error — without
-    /// this timeout the UI would stay on "Connecting…" forever.
+    /// Hard timeout for the long-running `PostgresClient`-pooled path —
+    /// reserved as a last-resort cap if the pre-flight probe somehow lets a
+    /// bad config through.
     private static let connectTimeoutSeconds: UInt64 = 15
 
     private func connect() async {
         let password = Keychain.password(for: connection.id) ?? ""
+
+        // ---- PRE-FLIGHT PROBE -------------------------------------------
+        // PostgresClient's connection pool silently retries on auth /
+        // protocol failures forever and never surfaces the real error.
+        // A raw `PostgresConnection.connect()` does, in <10ms. Use that
+        // first to validate credentials + reachability and turn a generic
+        // "Connecting…" into a "wrong password for user X" or similar.
+        let probeOutcome = await Self.probe(connection: connection, password: password)
+        if case .failure(let message) = probeOutcome {
+            state = .error(message)
+            return
+        }
+
+        // ---- POOL FOR REAL SESSION --------------------------------------
         let tls: PostgresClient.Configuration.TLS
         do {
             tls = try Self.tls(for: connection.sslMode)
@@ -79,7 +93,6 @@ final class ConnectionService {
             state = .error("TLS setup failed: \(error.localizedDescription)")
             return
         }
-
         let config = PostgresClient.Configuration(
             host: connection.host,
             port: connection.port,
@@ -91,12 +104,12 @@ final class ConnectionService {
 
         let client = PostgresClient(configuration: config)
         self.client = client
-
         let task = Task.detached(priority: .userInitiated) {
             await client.run()
         }
         self.clientTask = task
 
+        // Belt-and-braces timeout in case anything slips past the probe.
         let timeout = Self.connectTimeoutSeconds
         let host = connection.host
         let sslLabel = connection.sslMode.rawValue
@@ -105,16 +118,11 @@ final class ConnectionService {
                 group.addTask {
                     var v = "PostgreSQL"
                     let rows = try await client.query("SELECT version()")
-                    for try await row in rows.decode(String.self) {
-                        v = row
-                        break
-                    }
+                    for try await row in rows.decode(String.self) { v = row; break }
                     return v
                 }
                 group.addTask {
                     try await Task.sleep(nanoseconds: timeout * 1_000_000_000)
-                    // This text is what shows up in the connection error
-                    // bubble — make it actionable.
                     throw ConnectError.timedOut(host: host, sslMode: sslLabel, seconds: Int(timeout))
                 }
                 let first = try await group.next()!
@@ -129,6 +137,98 @@ final class ConnectionService {
             self.clientTask = nil
             self.client = nil
         }
+    }
+
+    /// Result of a one-shot `PostgresConnection.connect()` probe. We always
+    /// close the probe connection so we don't leave an orphan socket — the
+    /// real session uses a separate pooled connection.
+    enum ProbeOutcome: Sendable {
+        case ok
+        case failure(String)
+    }
+
+    nonisolated static func probe(connection: Connection, password: String) async -> ProbeOutcome {
+        // Mirror the libpq mapping from `tls(for:)` — `prefer`/`require`
+        // skip cert validation entirely; only `verify-ca`/`verify-full`
+        // engage the chain check. Without this, every connection to
+        // AWS RDS (or anything not in the system trust) fails with
+        // CERTIFICATE_VERIFY_FAILED.
+        let tls: PostgresConnection.Configuration.TLS
+        do {
+            var sslConfig = TLSConfiguration.makeClientConfiguration()
+            switch connection.sslMode {
+            case .disable:
+                tls = .disable
+            case .allow, .prefer:
+                sslConfig.certificateVerification = .none
+                tls = .prefer(try NIOSSLContext(configuration: sslConfig))
+            case .require:
+                sslConfig.certificateVerification = .none
+                tls = .require(try NIOSSLContext(configuration: sslConfig))
+            case .verifyCA:
+                sslConfig.certificateVerification = .noHostnameVerification
+                tls = .require(try NIOSSLContext(configuration: sslConfig))
+            case .verifyFull:
+                sslConfig.certificateVerification = .fullVerification
+                tls = .require(try NIOSSLContext(configuration: sslConfig))
+            }
+        } catch {
+            return .failure("TLS setup failed: \(error.localizedDescription)")
+        }
+        var config = PostgresConnection.Configuration(
+            host: connection.host,
+            port: connection.port,
+            username: connection.username,
+            password: password.isEmpty ? nil : password,
+            database: connection.database.isEmpty ? nil : connection.database,
+            tls: tls
+        )
+        // 8s on the wire-level connect: covers DNS + TCP + TLS + auth.
+        config.options.connectTimeout = .seconds(8)
+
+        let eventLoop = MultiThreadedEventLoopGroup.singleton.next()
+        let connectionID = Int.random(in: 0..<Int(Int32.max))
+        do {
+            let conn = try await PostgresConnection.connect(
+                on: eventLoop,
+                configuration: config,
+                id: connectionID,
+                logger: pgbrainQuietLogger
+            ).get()
+            try? await conn.close()
+            return .ok
+        } catch let psql as PSQLError {
+            return .failure(friendlyMessage(from: psql, connection: connection))
+        } catch {
+            return .failure(error.localizedDescription)
+        }
+    }
+
+    /// Translate a `PSQLError` into a one-line user-readable message.
+    /// Prefers the server's own `Message` field when present (covers
+    /// auth-fail / wrong-db / etc.); falls back to the underlying NIO
+    /// transport error description for DNS / connection-refused.
+    nonisolated private static func friendlyMessage(from error: PSQLError, connection: Connection) -> String {
+        if let server = error.serverInfo, let msg = server[.message] {
+            return msg
+        }
+        if let underlying = error.underlying {
+            let s = String(reflecting: underlying)
+            if s.contains("UnknownHost") {
+                if connection.host.contains(":") {
+                    return "Host \"\(connection.host)\" looks like host:port — move the port number into the Port field and leave just the hostname here."
+                }
+                return "Host \"\(connection.host)\" not found (DNS lookup failed). Check the address and your network."
+            }
+            if s.contains("Connection refused") {
+                return "Connection refused by \(connection.host):\(connection.port). Server isn't listening on that port, or a firewall is blocking it."
+            }
+            if s.contains("timeout") || s.contains("Connect timeout") {
+                return "Connect to \(connection.host):\(connection.port) timed out. Host unreachable or behind a VPN that's down."
+            }
+            return "Connection error: \(underlying)"
+        }
+        return "Connection failed (\(error.code))"
     }
 
     enum ConnectError: LocalizedError {
@@ -163,14 +263,32 @@ final class ConnectionService {
         }
     }
 
+    /// Maps our `Connection.SSLMode` (libpq-style) to PostgresNIO's
+    /// `(TLS mode, certificate verification)` pair. Matches libpq semantics:
+    ///
+    ///   - `disable` → no TLS
+    ///   - `allow`/`prefer` → try TLS, **no cert verification**
+    ///   - `require` → TLS required, **no cert verification** (libpq does
+    ///     not validate at this level; that's `verify-ca`/`verify-full`'s job)
+    ///   - `verify-ca` → TLS required, validate the chain but NOT the hostname
+    ///   - `verify-full` → TLS required, full chain + hostname verification
     private static func tls(for mode: Connection.SSLMode) throws -> PostgresClient.Configuration.TLS {
+        var config = TLSConfiguration.makeClientConfiguration()
         switch mode {
         case .disable:
             return .disable
         case .allow, .prefer:
-            return .prefer(TLSConfiguration.makeClientConfiguration())
-        case .require, .verifyCA, .verifyFull:
-            return .require(TLSConfiguration.makeClientConfiguration())
+            config.certificateVerification = .none
+            return .prefer(config)
+        case .require:
+            config.certificateVerification = .none
+            return .require(config)
+        case .verifyCA:
+            config.certificateVerification = .noHostnameVerification
+            return .require(config)
+        case .verifyFull:
+            config.certificateVerification = .fullVerification
+            return .require(config)
         }
     }
 }

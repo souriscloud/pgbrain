@@ -62,7 +62,7 @@ struct TabStripView: View {
 }
 
 private struct TabChip: View {
-    let tab: WorkspaceState.Tab
+    @Bindable var tab: WorkspaceState.Tab
     let isSelected: Bool
     let isDragging: Bool
     let accent: Color
@@ -71,16 +71,40 @@ private struct TabChip: View {
     let onClose: () -> Void
 
     @State private var hovering = false
+    @State private var isRenaming = false
+    @State private var draftTitle = ""
+    @FocusState private var renameFocused: Bool
+
+    private var canRename: Bool {
+        if case .scratchpad = tab.kind { return true }
+        return false
+    }
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: icon)
                 .font(.system(size: 11))
                 .foregroundStyle(isSelected ? accent : .secondary)
-            Text(tab.title)
-                .font(.system(size: 12, weight: isSelected ? .medium : .regular))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
+            if isRenaming {
+                TextField("", text: $draftTitle)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, weight: isSelected ? .medium : .regular))
+                    .focused($renameFocused)
+                    .frame(minWidth: 80, maxWidth: 220)
+                    .onSubmit { commitRename() }
+                    .onExitCommand { cancelRename() }
+                    .onAppear {
+                        // One runloop hop lets the field render before
+                        // we hand focus over — otherwise the @FocusState
+                        // sometimes fails to engage on first display.
+                        DispatchQueue.main.async { renameFocused = true }
+                    }
+            } else {
+                Text(tab.title)
+                    .font(.system(size: 12, weight: isSelected ? .medium : .regular))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
             if isProduction {
                 Circle()
                     .fill(Tokens.Brand.danger)
@@ -110,8 +134,41 @@ private struct TabChip: View {
         )
         .opacity(isDragging ? 0.4 : 1)
         .contentShape(Rectangle())
-        .onTapGesture { onSelect() }
+        .onTapGesture(count: 2) { if canRename { startRename() } }
+        .onTapGesture { if !isRenaming { onSelect() } }
         .onHover { hovering = $0 }
+        .contextMenu {
+            if canRename {
+                Button("Rename Tab…") { startRename() }
+            }
+            Button("Close Tab", role: .destructive, action: onClose)
+        }
+    }
+
+    private func startRename() {
+        draftTitle = tab.title
+        isRenaming = true
+        // Make sure the tab is also selected so the rename feels like
+        // it's happening on the active surface.
+        onSelect()
+    }
+
+    private func commitRename() {
+        let trimmed = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            tab.title = trimmed
+            // Keep the underlying notebook's title in sync so the
+            // saved-queries list, session restore, and command palette
+            // all reflect the new name.
+            if case .scratchpad(let pad) = tab.kind {
+                pad.title = trimmed
+            }
+        }
+        isRenaming = false
+    }
+
+    private func cancelRename() {
+        isRenaming = false
     }
 
     private var icon: String {

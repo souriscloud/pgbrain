@@ -55,6 +55,18 @@ final class EditBuffer {
         edits.keys.contains(CellKey(row: row, column: column))
     }
 
+    /// Remove a pending edit so the cell returns to its server value.
+    /// Used when the popover save matches the original (no-op edit) — we
+    /// don't want to leave a fake-dirty marker on a cell that's actually
+    /// unchanged.
+    func clearCell(row: Int, column: Int) {
+        let key = CellKey(row: row, column: column)
+        guard edits.keys.contains(key) else { return }
+        let previous: Previous = .dirty(value: edits[key] ?? nil)
+        history.append(HistoryEntry(key: key, previous: previous))
+        edits.removeValue(forKey: key)
+    }
+
     /// Group all pending edits by row so the applier can emit one UPDATE per
     /// dirty row instead of one per cell.
     func editsByRow() -> [(row: Int, cells: [(column: Int, value: String?)])] {

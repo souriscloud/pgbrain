@@ -2,30 +2,59 @@ import AppKit
 import SwiftUI
 import Observation
 
-/// Notebook scratchpad. Replaces the iter-4 result-block stack with a single
-/// flowing document where SQL text and result widgets live inline.
+/// Cell-based notebook scratchpad. Replaces the iter-15
+/// NSTextAttachmentViewProvider design which never managed to render an
+/// inline widget on our NSTextView setup. SwiftUI stack of alternating
+/// SQL editors and result widgets — each cell is its own small NSTextView,
+/// results are rendered through `DataGridView`.
 ///
-/// Cmd+⏎ behaviour:
-///   - Non-empty selection → run that exact range, insert result(s) right
-///     after the selection end.
-///   - Empty selection → run the statement under the caret, insert result
-///     right after the statement.
-///
-/// Re-running with the same target (an existing result attachment is found
-/// adjacent to the run end) replaces that result in place. Otherwise a new
-/// attachment is inserted. The user can manually remove any result via its
-/// header "x" button.
+/// `Cmd+⏎` inside an SQL cell runs that cell. With a non-empty selection
+/// in the cell, only the selected SQL is run. The runner inserts result
+/// widgets immediately after the cell and appends a fresh empty SQL cell
+/// at the bottom so the user can keep typing without manually adding one.
 struct NotebookView: View {
     @Bindable var notebook: Notebook
     let service: ConnectionService
 
     @State private var showLibrary = false
+    @State private var focusedCellID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            NotebookDocumentView(notebook: notebook, service: service)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    // Eager VStack — not LazyVStack — so every cell's
+                    // NSTextView exists at all times. With LazyVStack, an
+                    // off-screen target cell isn't materialised and
+                    // `makeFirstResponder` can't transfer focus to it
+                    // (caret appears stuck in two cells, typing goes
+                    // nowhere). For huge notebooks (100+ cells) this
+                    // gets expensive; revisit with text-view pooling
+                    // then.
+                    VStack(spacing: 0) {
+                        ForEach(notebook.cells) { cell in
+                            CellRow(
+                                cell: cell,
+                                notebook: notebook,
+                                service: service,
+                                focusedCellID: $focusedCellID
+                            )
+                            .id(cell.id)
+                            Divider().opacity(0.2)
+                        }
+                    }
+                    .padding(.vertical, Tokens.Spacing.sm)
+                }
+                .background(Color(nsColor: .textBackgroundColor))
+                .onChange(of: focusedCellID) { _, newID in
+                    guard let id = newID else { return }
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        proxy.scrollTo(id, anchor: .center)
+                    }
+                }
+            }
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $showLibrary) {
@@ -37,25 +66,24 @@ struct NotebookView: View {
 
     private var header: some View {
         HStack(spacing: Tokens.Spacing.sm) {
-            Image(systemName: "doc.text")
-                .foregroundStyle(.secondary)
-            Text(notebook.title)
-                .font(.body.weight(.medium))
+            Image(systemName: "doc.text").foregroundStyle(.secondary)
+            Text(notebook.title).font(.body.weight(.medium))
+
+            schemaPicker
+
             Spacer()
             Button {
-                NotificationCenter.default.post(name: .pgBrainNotebookRunFromMenu, object: notebook.id)
+                runFocusedOrLastCell()
             } label: {
                 Label("Run", systemImage: "play.fill").labelStyle(.titleAndIcon)
             }
             .buttonStyle(.borderedProminent)
             .tint(Tokens.Brand.primary)
             .controlSize(.small)
-            .help("Run statement at cursor or selected range (⌘↩)")
+            .help("Run focused SQL cell (⌘↩ also works inside a cell)")
             .disabled(service.client == nil)
 
-            Button {
-                showLibrary = true
-            } label: {
+            Button { showLibrary = true } label: {
                 Image(systemName: "books.vertical")
             }
             .buttonStyle(.borderless)
@@ -65,190 +93,543 @@ struct NotebookView: View {
         .padding(.vertical, 6)
         .background(Color(nsColor: .windowBackgroundColor))
     }
+
+    /// Scopes the notebook's queries to a specific schema via
+    /// `SET search_path` on the checked-out connection. "Default" means
+    /// leave the connection's existing `search_path` alone (typically
+    /// `"$user", public`). Picking a schema also lets you write
+    /// unqualified table names against it (`SELECT * FROM users` instead
+    /// of `SELECT * FROM analytics.users`).
+    @ViewBuilder
+    private var schemaPicker: some View {
+        let schemas = service.schema.schemas.map(\.name)
+        Menu {
+            Button {
+                notebook.searchPath = nil
+            } label: {
+                Label("Default search_path", systemImage: notebook.searchPath == nil ? "checkmark" : "")
+            }
+            if !schemas.isEmpty {
+                Divider()
+                ForEach(schemas, id: \.self) { name in
+                    Button {
+                        notebook.searchPath = name
+                    } label: {
+                        Label(name, systemImage: notebook.searchPath == name ? "checkmark" : "")
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "rectangle.stack").font(.caption)
+                Text(notebook.searchPath ?? "default")
+                    .font(.system(.caption, design: .monospaced))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color.secondary.opacity(0.12))
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("search_path for this scratchpad")
+    }
+
+    private func runFocusedOrLastCell() {
+        let target = focusedCellID ?? notebook.cells.last(where: { $0.kind == .sql })?.id
+        guard let id = target, let cell = notebook.sqlCell(id: id) else { return }
+        NotebookRunner.run(cell: cell, selection: nil, notebook: notebook, service: service)
+    }
 }
 
-extension Notification.Name {
-    static let pgBrainNotebookRunFromMenu = Notification.Name("cloud.souris.pgbrain.notebook.runFromMenu")
-}
+// MARK: - Cell row
 
-/// `NSViewRepresentable` wrapper around the notebook's `NSTextView`. We
-/// can't use SwiftUI's `TextEditor` here because we need direct access to
-/// the `NSTextStorage` (for inline attachments) and to override key
-/// handling for Cmd+⏎.
-struct NotebookDocumentView: NSViewRepresentable {
+private struct CellRow: View {
+    @Bindable var cell: NotebookCell
     let notebook: Notebook
     let service: ConnectionService
+    @Binding var focusedCellID: UUID?
+
+    var body: some View {
+        switch cell.kind {
+        case .sql:
+            SqlCellView(cell: cell, notebook: notebook, service: service,
+                        isRunning: notebook.runningCellID == cell.id,
+                        focusedCellID: $focusedCellID)
+        case .result(let resultID):
+            ResultCellView(resultID: resultID, notebook: notebook)
+        }
+    }
+}
+
+// MARK: - SQL cell
+
+private struct SqlCellView: View {
+    @Bindable var cell: NotebookCell
+    let notebook: Notebook
+    let service: ConnectionService
+    let isRunning: Bool
+    @Binding var focusedCellID: UUID?
+
+    var body: some View {
+        SqlCellEditor(
+            text: Binding(get: { cell.text }, set: { cell.text = $0 }),
+            shouldFocus: focusedCellID == cell.id,
+            onRun: { selection in
+                NotebookRunner.run(
+                    cell: cell, selection: selection,
+                    notebook: notebook, service: service
+                )
+            },
+            onFocus: { focusedCellID = cell.id },
+            onJumpToAdjacent: { direction in
+                jumpToAdjacentSqlCell(direction: direction)
+            }
+        )
+        .frame(minHeight: 30)
+        .padding(.horizontal, Tokens.Spacing.md)
+        .padding(.vertical, 6)
+        .overlay(alignment: .leading) {
+            // Left rail indicates focus/running state at a glance.
+            Rectangle()
+                .fill(isRunning
+                      ? Color.green
+                      : (focusedCellID == cell.id ? Tokens.Brand.primary.opacity(0.7) : Color.clear))
+                .frame(width: 3)
+        }
+        .background(isRunning ? Color.green.opacity(0.04) : Color.clear)
+    }
+
+    private func jumpToAdjacentSqlCell(direction: Int) {
+        guard let myIdx = notebook.cells.firstIndex(where: { $0.id == cell.id }) else { return }
+        let range: AnyIterator<Int>
+        if direction > 0 {
+            var i = myIdx + 1
+            range = AnyIterator { defer { i += 1 }; return i < notebook.cells.count ? i : nil }
+        } else {
+            var i = myIdx - 1
+            range = AnyIterator { defer { i -= 1 }; return i >= 0 ? i : nil }
+        }
+        for i in range where notebook.cells[i].kind == .sql {
+            focusedCellID = notebook.cells[i].id
+            return
+        }
+    }
+}
+
+/// NSTextView wrapped in NSViewRepresentable. Each SQL cell gets its own
+/// instance. `onRun` fires on `Cmd+⏎` with the current selection (or nil
+/// if empty); the runner decides between "statement at caret" and "this
+/// exact selection".
+private struct SqlCellEditor: NSViewRepresentable {
+    @Binding var text: String
+    var shouldFocus: Bool
+    let onRun: (NSRange?) -> Void
+    let onFocus: () -> Void
+    /// Called when the caret tries to move past the cell's first/last line:
+    /// +1 for down (jump to next SQL cell), -1 for up.
+    let onJumpToAdjacent: (Int) -> Void
 
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
-        let notebook: Notebook
-        let service: ConnectionService
-        weak var textView: NotebookTextView?
-        // Held via `nonisolated(unsafe)` so the nonisolated `deinit` can read
-        // it back to remove the observer; only ever assigned during init on
-        // the main actor.
-        nonisolated(unsafe) var menuRunObserver: NSObjectProtocol?
+        var text: Binding<String>
+        var onRun: (NSRange?) -> Void
+        var onFocus: () -> Void
+        var onJumpToAdjacent: (Int) -> Void
 
-        init(notebook: Notebook, service: ConnectionService) {
-            self.notebook = notebook
-            self.service = service
-            super.init()
-            menuRunObserver = NotificationCenter.default.addObserver(
-                forName: .pgBrainNotebookRunFromMenu,
-                object: notebook.id,
-                queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    self?.runFromMenu()
-                }
-            }
+        init(text: Binding<String>, onRun: @escaping (NSRange?) -> Void, onFocus: @escaping () -> Void, onJumpToAdjacent: @escaping (Int) -> Void) {
+            self.text = text
+            self.onRun = onRun
+            self.onFocus = onFocus
+            self.onJumpToAdjacent = onJumpToAdjacent
         }
 
-        deinit {
-            if let token = menuRunObserver {
-                NotificationCenter.default.removeObserver(token)
-            }
-        }
-
-        @MainActor
-        func runFromMenu() {
-            guard let tv = textView else { return }
-            tv.runCurrent()
+        func textDidChange(_ notif: Notification) {
+            guard let tv = notif.object as? NSTextView else { return }
+            text.wrappedValue = tv.string
         }
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(notebook: notebook, service: service)
+        Coordinator(text: $text, onRun: onRun, onFocus: onFocus, onJumpToAdjacent: onJumpToAdjacent)
     }
 
-    func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.hasHorizontalScroller = false
-        scroll.borderType = .noBorder
-        scroll.drawsBackground = false
-
-        // Build a layout manager + container backed by the notebook's
-        // text storage so the view edits the same buffer the model owns.
-        let bigSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
-        let container = NSTextContainer(size: bigSize)
-        container.widthTracksTextView = true
-        container.lineFragmentPadding = 8
-        let layoutManager = NSLayoutManager()
-        layoutManager.addTextContainer(container)
-        notebook.textStorage.addLayoutManager(layoutManager)
-
-        let textView = NotebookTextView(frame: .zero, textContainer: container)
-        textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.isHorizontallyResizable = false
-        textView.isVerticallyResizable = true
-        textView.autoresizingMask = [NSView.AutoresizingMask.width]
-        textView.textContainerInset = NSSize(width: 8, height: 8)
-        textView.font = NSFont.monospacedSystemFont(ofSize: CGFloat(AppSettings.shared.editorFontSize), weight: .regular)
-        textView.isAutomaticQuoteSubstitutionEnabled = false
-        textView.isAutomaticDashSubstitutionEnabled = false
-        textView.isAutomaticSpellingCorrectionEnabled = false
-        textView.isAutomaticTextReplacementEnabled = false
-        textView.isAutomaticLinkDetectionEnabled = false
-        textView.isRichText = true   // attachments require rich text
-        textView.usesFontPanel = false
-        textView.allowsUndo = true
-        textView.allowsImageEditing = false
-        textView.delegate = context.coordinator
-        textView.notebook = notebook
-        textView.service = service
-
-        scroll.documentView = textView
-        context.coordinator.textView = textView
-        return scroll
+    func makeNSView(context: Context) -> SqlCellNSTextView {
+        let tv = SqlCellNSTextView()
+        tv.isRichText = false
+        tv.font = NSFont.monospacedSystemFont(ofSize: CGFloat(AppSettings.shared.editorFontSize), weight: .regular)
+        tv.textColor = .labelColor
+        tv.insertionPointColor = .labelColor
+        tv.backgroundColor = .clear
+        tv.drawsBackground = false
+        tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.isAutomaticDashSubstitutionEnabled = false
+        tv.isAutomaticSpellingCorrectionEnabled = false
+        tv.isAutomaticTextReplacementEnabled = false
+        tv.isAutomaticLinkDetectionEnabled = false
+        tv.allowsUndo = true
+        tv.textContainer?.lineFragmentPadding = 0
+        tv.textContainerInset = .zero
+        tv.delegate = context.coordinator
+        tv.onRun = { [weak tv] in
+            guard let tv else { return }
+            let sel = tv.selectedRange()
+            context.coordinator.onRun(sel.length > 0 ? sel : nil)
+        }
+        tv.onJumpToAdjacent = { [weak tv] direction in
+            _ = tv
+            context.coordinator.onJumpToAdjacent(direction)
+        }
+        tv.onBecomeFirstResponder = { context.coordinator.onFocus() }
+        tv.string = text
+        return tv
     }
 
-    func updateNSView(_ nsView: NSScrollView, context: Context) {
-        // The notebook owns the storage; re-render the green outline when
-        // `runningRange` changes.
-        (nsView.documentView as? NotebookTextView)?.refreshRunningOutline()
+    func updateNSView(_ tv: SqlCellNSTextView, context: Context) {
+        if tv.string != text {
+            let sel = tv.selectedRange()
+            tv.string = text
+            let safe = NSRange(
+                location: min(sel.location, tv.string.utf16.count),
+                length: 0
+            )
+            tv.setSelectedRange(safe)
+        }
+        // If the host says this cell should be focused, grab first
+        // responder synchronously. Async-dispatching was making cross-cell
+        // arrow nav feel clunky — Down-then-typing dropped the focus
+        // request between Cell A losing first responder and Cell B's
+        // updateNSView firing on the next runloop turn.
+        if shouldFocus, tv.window?.firstResponder !== tv {
+            tv.window?.makeFirstResponder(tv)
+            tv.setSelectedRange(NSRange(location: tv.string.utf16.count, length: 0))
+        }
     }
 }
 
-/// `NSTextView` subclass that owns Cmd+⏎ + paints the green run-context
-/// outline. All run side-effects flow through `runCurrent()`.
-final class NotebookTextView: NSTextView {
-    weak var notebook: Notebook?
-    weak var service: ConnectionService?
+/// NSTextView subclass that grows with its content, intercepts ⌘↩, and
+/// hands ↑/↓ at the cell boundary to the host for cross-cell navigation.
+final class SqlCellNSTextView: NSTextView {
+    var onRun: (() -> Void)?
+    var onJumpToAdjacent: ((Int) -> Void)?
+    var onBecomeFirstResponder: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
-        // Cmd+Return — same shortcut as iter-4 so muscle memory carries.
+        // ⌘↩ → run.
         if event.modifierFlags.contains(.command), event.keyCode == 36 {
-            runCurrent()
+            onRun?()
+            return
+        }
+        // ⌥↓ / ⌥↑ → unconditional jump to next/previous SQL cell,
+        // regardless of caret position. Overrides AppKit's default
+        // "move to end/start of paragraph" which is rarely useful here.
+        if event.modifierFlags.contains(.option), event.keyCode == 125 {
+            onJumpToAdjacent?(+1)
+            return
+        }
+        if event.modifierFlags.contains(.option), event.keyCode == 126 {
+            onJumpToAdjacent?(-1)
+            return
+        }
+        // Plain ↓ on the visually-last line → jump to next SQL cell.
+        if event.keyCode == 125, isCaretOnLastLine() {
+            onJumpToAdjacent?(+1)
+            return
+        }
+        // Plain ↑ on the visually-first line → jump to previous SQL cell.
+        if event.keyCode == 126, isCaretOnFirstLine() {
+            onJumpToAdjacent?(-1)
             return
         }
         super.keyDown(with: event)
     }
 
-    /// Determine run target(s) from current selection and dispatch them in
-    /// document order. Selection wins over statement-under-caret.
-    @MainActor
-    func runCurrent() {
-        guard let notebook, let service, let client = service.client else { return }
-        let selection = selectedRange()
-        let fullText = string
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if ok { onBecomeFirstResponder?() }
+        return ok
+    }
 
-        let plans: [(range: NSRange, sql: String)]
-        if selection.length > 0 {
-            plans = statementsInSelection(selection: selection, fullText: fullText)
-        } else if let single = statementAtCaret(offset: selection.location, fullText: fullText) {
-            plans = [single]
+    override var intrinsicContentSize: NSSize {
+        guard let lm = layoutManager, let tc = textContainer else {
+            return NSSize(width: NSView.noIntrinsicMetric, height: 24)
+        }
+        lm.ensureLayout(for: tc)
+        let used = lm.usedRect(for: tc)
+        return NSSize(width: NSView.noIntrinsicMetric, height: max(24, used.height + 8))
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        invalidateIntrinsicContentSize()
+    }
+
+    /// True if the caret is on the visually first (top) line of the cell.
+    /// Clamps the caret to a valid character index before resolving its
+    /// glyph — `glyphIndexForCharacter(at:)` with `caret == string.length`
+    /// returns garbage that incorrectly matches the first-line rect.
+    private func isCaretOnFirstLine() -> Bool {
+        guard let lm = layoutManager, let tc = textContainer else { return true }
+        lm.ensureLayout(for: tc)
+        let nsLen = (string as NSString).length
+        let caret = max(0, min(selectedRange().location, nsLen))
+        let clampedChar = max(0, min(caret, nsLen - 1))  // -1 not allowed; ok when nsLen=0
+        let caretGlyph = nsLen == 0 ? 0 : lm.glyphIndexForCharacter(at: clampedChar)
+        let firstLine = lm.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
+        let caretLine = lm.lineFragmentRect(forGlyphAt: caretGlyph, effectiveRange: nil)
+        return abs(caretLine.minY - firstLine.minY) < 0.5
+    }
+
+    /// True if the caret is on the visually last (bottom) line of the cell.
+    private func isCaretOnLastLine() -> Bool {
+        guard let lm = layoutManager, let tc = textContainer else { return true }
+        lm.ensureLayout(for: tc)
+        let nsLen = (string as NSString).length
+        let caret = max(0, min(selectedRange().location, nsLen))
+        let lastGlyphIndex = lm.numberOfGlyphs > 0 ? lm.numberOfGlyphs - 1 : 0
+        let clampedChar = max(0, min(caret, nsLen - 1))
+        let caretGlyph = nsLen == 0 ? 0
+            : (caret >= nsLen ? lastGlyphIndex : lm.glyphIndexForCharacter(at: clampedChar))
+        let lastLineRect = lm.lineFragmentRect(forGlyphAt: lastGlyphIndex, effectiveRange: nil)
+        let caretLine = lm.lineFragmentRect(forGlyphAt: caretGlyph, effectiveRange: nil)
+        return abs(caretLine.minY - lastLineRect.minY) < 0.5
+    }
+}
+
+// MARK: - Result cell
+
+private struct ResultCellView: View {
+    let resultID: UUID
+    @Bindable var notebook: Notebook
+
+    var body: some View {
+        if let result = notebook.result(id: resultID) {
+            ResultBody(result: result, notebook: notebook)
         } else {
-            plans = []
+            EmptyView()
+        }
+    }
+}
+
+private struct ResultBody: View {
+    @Bindable var result: NotebookResult
+    let notebook: Notebook
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            if !result.isCollapsed {
+                Divider().opacity(0.4)
+                body(for: result.status)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(borderColor, lineWidth: 1)
+        )
+        .padding(.horizontal, Tokens.Spacing.md)
+        .padding(.vertical, 4)
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            // Chevron now lives on the LEFT as a visual indicator; the
+            // entire header is the tap target (sans the explicit X button).
+            Image(systemName: result.isCollapsed ? "chevron.right" : "chevron.down")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .frame(width: 14)
+            statusGlyph
+            Text(result.preview)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            outcomeSummary
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            Button {
+                if let cellIdx = notebook.cells.firstIndex(where: {
+                    if case .result(let r) = $0.kind { return r == result.id } else { return false }
+                }) {
+                    notebook.remove(cellID: notebook.cells[cellIdx].id)
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption2)
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .help("Remove this result")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            result.isCollapsed.toggle()
+        }
+    }
+
+    @ViewBuilder
+    private func body(for status: NotebookResult.Status) -> some View {
+        switch status {
+        case .running:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Running…").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(10)
+        case .success(let q):
+            if q.page.columns.isEmpty {
+                HStack {
+                    Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+                    Text(q.commandTag ?? "OK").font(.caption.monospaced())
+                    Spacer()
+                }
+                .padding(10)
+            } else {
+                DataGridView(page: q.page)
+                    .frame(minHeight: 140, idealHeight: 260, maxHeight: 360)
+            }
+        case .failure(let message):
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(.red)
+                Text(message)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                Spacer(minLength: 0)
+            }
+            .padding(10)
+        case .cancelled:
+            HStack {
+                Image(systemName: "stop.circle.fill").foregroundStyle(.secondary)
+                Text("Cancelled").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(10)
+        }
+    }
+
+    @ViewBuilder
+    private var statusGlyph: some View {
+        switch result.status {
+        case .running: ProgressView().controlSize(.mini)
+        case .success: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        case .failure: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+        case .cancelled: Image(systemName: "stop.circle.fill").foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var outcomeSummary: some View {
+        switch result.status {
+        case .running: EmptyView()
+        case .success(let q):
+            let rows = q.page.rows.count
+            let prefix = q.page.truncated ? "\(rows)+" : "\(rows)"
+            Text("\(prefix) row\(rows == 1 ? "" : "s") · \(String(format: "%.0f ms", q.page.elapsed * 1000))")
+        case .failure: Text("error")
+        case .cancelled: Text("cancelled")
+        }
+    }
+
+    private var borderColor: Color {
+        switch result.status {
+        case .running: return .secondary.opacity(0.3)
+        case .success: return .green.opacity(0.3)
+        case .failure: return .red.opacity(0.4)
+        case .cancelled: return .secondary.opacity(0.3)
+        }
+    }
+}
+
+// MARK: - Runner
+
+/// Resolves what to run from a given SQL cell, executes via QueryRunner,
+/// and feeds results back into the notebook's cell list. Replaces the
+/// previous TextKit-attachment-based dispatcher.
+@MainActor
+enum NotebookRunner {
+    static func run(cell: NotebookCell, selection: NSRange?, notebook: Notebook, service: ConnectionService) {
+        guard cell.kind == .sql, let client = service.client else { return }
+
+        // Resolve target statements within this cell.
+        let buffer = cell.text
+        let plans: [String]
+        if let sel = selection {
+            // User selected a range → just those statements.
+            let ns = buffer as NSString
+            guard sel.location + sel.length <= ns.length else { return }
+            let slice = ns.substring(with: sel)
+            plans = SQLStatementSplitter.split(slice).map { $0.trimmed }
+        } else {
+            // No selection → run *every* statement in the cell, Jupyter-
+            // style. Multi-statement cells get one result widget each.
+            let split = SQLStatementSplitter.split(buffer).map { $0.trimmed }
+            if !split.isEmpty {
+                plans = split
+            } else {
+                let trimmed = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+                plans = trimmed.isEmpty ? [] : [trimmed]
+            }
         }
         guard !plans.isEmpty else { return }
 
-        // Destructive-on-prod guard — single confirmation for the whole batch.
+        // Production-destructive guardrail.
         if service.connection.isProduction {
             let destructive = plans.contains {
-                let v = SQLSafety.classify($0.sql)
+                let v = SQLSafety.classify($0)
                 return v == .destructiveUnscoped || v == .ddl
             }
-            if destructive, !confirmProductionRun(plans: plans) { return }
+            if destructive, !confirmProductionRun(plans: plans, service: service) { return }
         }
 
-        // JetBrains-style green outline = union of all run target ranges.
-        let unionStart = plans.map(\.range.location).min() ?? 0
-        let unionEnd = plans.map { $0.range.location + $0.range.length }.max() ?? 0
-        notebook.runningRange = NSRange(location: unionStart, length: unionEnd - unionStart)
-        refreshRunningOutline()
+        notebook.runningCellID = cell.id
 
-        // Walk forward from unionEnd looking for an existing chain of result
-        // attachments. Reuse each in turn so re-running the same selection
-        // replaces its previous results in place; insert fresh attachments
-        // when the chain runs out.
-        var cursor = unionEnd
-        var pending: [(id: UUID, sql: String)] = []
-        for plan in plans {
-            let outcome = reuseOrInsertAttachment(at: cursor)
-            cursor = outcome.cursorAfter
-            pending.append((outcome.id, plan.sql))
+        // Generate fresh IDs OR reuse the IDs of the result cells already
+        // adjacent to this SQL cell (replace-in-place semantics).
+        let existing = notebook.adjacentResults(after: cell.id)
+        var ids: [UUID] = []
+        for i in 0..<plans.count {
+            ids.append(i < existing.count ? existing[i].resultID : UUID())
+        }
+        notebook.replaceAdjacentResults(after: cell.id, with: ids)
+
+        // Mark each result as running before kicking off the async pipeline
+        // so the SwiftUI cells flip to the "Running…" state immediately.
+        // Multi-statement runs default each widget to collapsed so the
+        // user sees a scannable stack of headers instead of N expanded
+        // grids — click any header to drill in.
+        let collapseAll = plans.count > 1
+        for (sql, id) in zip(plans, ids) {
+            let r = notebook.startResult(id: id, statement: sql)
+            r.isCollapsed = collapseAll
         }
 
-        // Spawn the async run; each result lands as we go.
         Task { @MainActor in
-            defer {
-                notebook.runningRange = nil
-                self.refreshRunningOutline()
-            }
-            for entry in pending {
-                let result = notebook.startResult(id: entry.id, statement: entry.sql)
-                let op = service.operations.begin(
-                    kind: .query,
-                    summary: QueryRunner.summary(of: entry.sql)
-                )
+            defer { notebook.runningCellID = nil }
+            for (sql, id) in zip(plans, ids) {
+                let op = service.operations.begin(kind: .query, summary: QueryRunner.summary(of: sql))
+                let result = notebook.startResult(id: id, statement: sql)
+                // Re-apply collapse policy after startResult — the
+                // synchronous pre-loop already did, but we want to be
+                // explicit so future code changes don't reintroduce the
+                // "always expanded" regression.
+                result.isCollapsed = collapseAll
                 do {
                     let qr = try await QueryRunner.run(
-                        entry.sql,
-                        on: client,
-                        operationID: op.id,
-                        tracker: service.operations
+                        sql, on: client,
+                        operationID: op.id, tracker: service.operations,
+                        searchPath: notebook.searchPath
                     )
                     result.status = .success(qr)
                     result.finishedAt = Date()
@@ -258,126 +639,18 @@ final class NotebookTextView: NSTextView {
                     result.finishedAt = Date()
                     service.operations.finish(op, status: .cancelled)
                 } catch {
-                    result.status = .failure(error.localizedDescription)
+                    let message = PostgresErrorMessage.describe(error)
+                    result.status = .failure(message)
                     result.finishedAt = Date()
-                    service.operations.finish(op, status: .failed(error.localizedDescription))
+                    service.operations.finish(op, status: .failed(message))
                 }
             }
         }
     }
 
-    /// If a `ResultAttachment` (ours) is the next non-whitespace character at
-    /// or after `from`, return its `resultID` and a cursor positioned just
-    /// past it. Otherwise insert a fresh attachment on its own line at
-    /// `from` and return the new ID plus the post-insertion cursor.
-    private func reuseOrInsertAttachment(at from: Int) -> (id: UUID, cursorAfter: Int) {
-        guard let notebook, let storage = textStorage else {
-            return (UUID(), from)
-        }
-        let nsString = storage.string as NSString
-        var probe = from
-        while probe < nsString.length {
-            let ch = nsString.character(at: probe)
-            if ch == 0x20 || ch == 0x09 || ch == 0x0A || ch == 0x0D {
-                probe += 1
-            } else { break }
-        }
-        if probe < nsString.length {
-            let attribs = storage.attributes(at: probe, effectiveRange: nil)
-            if let existing = attribs[.attachment] as? ResultAttachment, existing.notebook === notebook {
-                // Skip past the attachment + a following newline if present.
-                var nextCursor = probe + 1
-                if nextCursor < nsString.length, nsString.character(at: nextCursor) == 0x0A {
-                    nextCursor += 1
-                }
-                return (existing.resultID, nextCursor)
-            }
-        }
-        // Insert a new attachment line at `from`. Lead with a newline if
-        // we're inline with text; trail with a newline so the user can keep
-        // typing below.
-        let newID = UUID()
-        let attachment = ResultAttachment(resultID: newID, notebook: notebook)
-        let insert = NSMutableAttributedString()
-        let needLeadingNewline = from < nsString.length
-            ? nsString.character(at: from) != 0x0A
-            : true
-        if needLeadingNewline { insert.append(NSAttributedString(string: "\n")) }
-        insert.append(NSAttributedString(attachment: attachment))
-        insert.append(NSAttributedString(string: "\n"))
-        if let baseFont = self.font {
-            insert.addAttribute(.font, value: baseFont, range: NSRange(location: 0, length: insert.length))
-        }
-        storage.beginEditing()
-        storage.insert(insert, at: from)
-        storage.endEditing()
-        let cursorAfter = from + insert.length
-        return (newID, cursorAfter)
-    }
-
-    /// JetBrains-style: green border around the SQL being executed.
-    /// Implementation: query glyph bounds for the running range, stroke a
-    /// rounded rectangle in `draw(_:)`. Storage changes trigger
-    /// `refreshRunningOutline` which calls `needsDisplay = true`.
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        guard let notebook, let range = notebook.runningRange, range.length > 0,
-              let layoutManager, let textContainer
-        else { return }
-        let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
-        let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
-        let inset = NSRect(
-            x: rect.origin.x + textContainerOrigin.x - 2,
-            y: rect.origin.y + textContainerOrigin.y - 2,
-            width: rect.width + 4,
-            height: rect.height + 4
-        )
-        let path = NSBezierPath(roundedRect: inset, xRadius: 4, yRadius: 4)
-        NSColor.systemGreen.withAlphaComponent(0.65).setStroke()
-        path.lineWidth = 1.5
-        path.stroke()
-        NSColor.systemGreen.withAlphaComponent(0.06).setFill()
-        path.fill()
-    }
-
-    func refreshRunningOutline() {
-        needsDisplay = true
-    }
-
-    /// Resolve the statement under `offset` (UTF-16 code-unit offset within
-    /// `fullText`) into an absolute `NSRange` + its trimmed SQL.
     @MainActor
-    private func statementAtCaret(offset: Int, fullText: String) -> (range: NSRange, sql: String)? {
-        // NSRange offsets are UTF-16. Convert to a String.Index via the
-        // utf16 view, then defer to SQLStatementSplitter.
-        guard let strIdx = String.Index(utf16Offset: offset, in: fullText),
-              let stmt = SQLStatementSplitter.statementAt(caret: strIdx, in: fullText)
-        else { return nil }
-        let nsRange = NSRange(stmt.range, in: fullText)
-        return (nsRange, stmt.trimmed)
-    }
-
-    /// Split the SQL slice covered by `selection` into individual statements.
-    /// Returned ranges are absolute (in `fullText`'s UTF-16 space).
-    @MainActor
-    private func statementsInSelection(selection: NSRange, fullText: String) -> [(range: NSRange, sql: String)] {
-        let nsString = fullText as NSString
-        guard selection.location + selection.length <= nsString.length else { return [] }
-        let slice = nsString.substring(with: selection)
-        let statements = SQLStatementSplitter.split(slice)
-        var out: [(NSRange, String)] = []
-        for s in statements {
-            let local = NSRange(s.range, in: slice)
-            let absolute = NSRange(location: selection.location + local.location, length: local.length)
-            out.append((absolute, s.trimmed))
-        }
-        return out
-    }
-
-    @MainActor
-    private func confirmProductionRun(plans: [(range: NSRange, sql: String)]) -> Bool {
-        guard let service else { return false }
-        let preview = plans.prefix(3).map { $0.sql }.joined(separator: "\n\n").prefix(360)
+    private static func confirmProductionRun(plans: [String], service: ConnectionService) -> Bool {
+        let preview = plans.prefix(3).joined(separator: "\n\n").prefix(360)
         let alert = NSAlert()
         alert.messageText = "Run on production?"
         alert.informativeText = """
@@ -390,18 +663,5 @@ final class NotebookTextView: NSTextView {
         alert.addButton(withTitle: "Run on PROD")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
-    }
-}
-
-private extension String.Index {
-    /// Bridges a UTF-16 offset (what `NSTextView.selectedRange` returns)
-    /// into a Swift `String.Index`. Returns nil if the offset is out of
-    /// bounds or lands inside a surrogate pair.
-    init?(utf16Offset offset: Int, in string: String) {
-        let utf16 = string.utf16
-        guard let raw = utf16.index(utf16.startIndex, offsetBy: offset, limitedBy: utf16.endIndex),
-              let idx = String.Index(raw, within: string)
-        else { return nil }
-        self = idx
     }
 }

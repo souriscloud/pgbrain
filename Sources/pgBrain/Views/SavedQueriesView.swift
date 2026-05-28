@@ -67,16 +67,18 @@ struct SavedQueriesView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 Button("Insert") {
-                    // Replace the document text wholesale. The text storage
-                    // is owned by the notebook so the live NSTextView picks
-                    // up the change immediately.
-                    let attributed = NSMutableAttributedString(string: q.sql)
-                    if let font = NSFont(name: "Menlo", size: CGFloat(AppSettings.shared.editorFontSize)) {
-                        attributed.addAttribute(.font, value: font, range: NSRange(location: 0, length: attributed.length))
+                    // Drop the snippet into the last (or only) SQL cell in
+                    // the notebook so the user can edit + run it
+                    // immediately. The cell editor picks up the change via
+                    // SwiftUI binding.
+                    if let target = notebook.cells.last(where: { $0.kind == .sql }) {
+                        target.text = q.sql
+                    } else {
+                        // No SQL cell present (shouldn't happen — Notebook
+                        // always seeds one — but be defensive).
+                        notebook.insert(NotebookCell(kind: .sql, text: q.sql),
+                                        after: notebook.cells.last?.id ?? UUID())
                     }
-                    notebook.textStorage.beginEditing()
-                    notebook.textStorage.setAttributedString(attributed)
-                    notebook.textStorage.endEditing()
                     onClose()
                 }
                 .buttonStyle(.borderedProminent)

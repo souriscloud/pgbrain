@@ -62,16 +62,33 @@ struct ConnectionEditorView: View {
                     .textFieldStyle(.roundedBorder)
             }
 
-            HStack(spacing: Tokens.Spacing.md) {
-                field("Host", flex: 2) {
+            HStack(alignment: .top, spacing: Tokens.Spacing.md) {
+                // Port gets a fixed 100pt; Host takes the remaining width.
+                // Earlier we used `.layoutPriority(2/1)`, which doesn't
+                // proportion — the higher priority just claims everything
+                // and the lower-priority field collapses to zero.
+                field("Host") {
                     TextField("localhost", text: $connection.host)
                         .textFieldStyle(.roundedBorder)
                         .autocorrectionDisabled()
+                        // Users routinely paste "localhost:5444" into the
+                        // host field; PostgresNIO then DNS-looks that up
+                        // verbatim and fails. Split it on the fly so the
+                        // port lands where it belongs.
+                        .onChange(of: connection.host) { _, newValue in
+                            if let (h, p) = splitHostPort(newValue) {
+                                connection.host = h
+                                connection.port = p
+                            }
+                        }
                 }
-                field("Port", flex: 1) {
+                .frame(maxWidth: .infinity)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Port").font(.caption).foregroundStyle(.secondary)
                     TextField("5432", value: $connection.port, format: .number.grouping(.never))
                         .textFieldStyle(.roundedBorder)
                 }
+                .frame(width: 100)
             }
 
             field("Database") {
@@ -181,11 +198,16 @@ struct ConnectionEditorView: View {
         defer { isTesting = false }
         testMessage = nil
 
-        let result = await Self.probe(connection: connection, password: password)
-        switch result {
-        case .ok(let version):
+        // Delegate to the same pre-flight probe ConnectionService uses, so
+        // both surfaces give identical, actionable errors. We don't pull a
+        // version string back from this — the probe just answers "can we
+        // authenticate against this server?" — and on success we tell the
+        // user as much.
+        let outcome = await ConnectionService.probe(connection: connection, password: password)
+        switch outcome {
+        case .ok:
             testOK = true
-            testMessage = "Connected — \(version)"
+            testMessage = "Connected to \(connection.host):\(connection.port) — credentials accepted."
         case .failure(let message):
             testOK = false
             testMessage = message
@@ -195,6 +217,15 @@ struct ConnectionEditorView: View {
     private enum ProbeResult: Sendable {
         case ok(String)
         case failure(String)
+    }
+
+    /// "host:port" → ("host", port). Accepts IPv4/hostname forms only —
+    /// bracketed IPv6 (`[::1]:5432`) is left alone so we don't mangle it.
+    private func splitHostPort(_ raw: String) -> (String, Int)? {
+        guard !raw.contains("["), let colon = raw.lastIndex(of: ":") else { return nil }
+        let portPart = raw[raw.index(after: colon)...]
+        guard let port = Int(portPart), port > 0, port < 65_536 else { return nil }
+        return (String(raw[..<colon]), port)
     }
 
     nonisolated private static func probe(connection: Connection, password: String) async -> ProbeResult {

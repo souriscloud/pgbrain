@@ -84,11 +84,17 @@ enum UpdateApplier {
                 let originalRow = originalRows[edit.rowIndex]
 
                 // SET clauses with positional binds + server-side casts.
+                // Type names from `format_type()` are already in canonical
+                // PG syntax (`integer`, `timestamp with time zone`,
+                // `character varying(255)`, …) and MUST NOT be wrapped in
+                // double quotes — quoting makes PG look up a
+                // case-sensitive user-defined type with that literal
+                // name (`type "bigint" does not exist`).
                 var binds = PostgresBindings()
                 var setPieces: [String] = []
                 for (index, change) in edit.cells.enumerated() {
                     let placeholder = "$\(index + 1)"
-                    let typeCast = "::" + SQLIdent.quote(change.column.typeName)
+                    let typeCast = "::" + change.column.typeName
                     setPieces.append("\(SQLIdent.quote(change.column.name)) = \(placeholder)\(typeCast)")
                     if let v = change.newValue {
                         binds.append(v)
@@ -105,7 +111,7 @@ enum UpdateApplier {
                     }
                     let placeholderIndex = edit.cells.count + offset + 1
                     let placeholder = "$\(placeholderIndex)"
-                    let typeCast = "::" + SQLIdent.quote(pkCol.typeName)
+                    let typeCast = "::" + pkCol.typeName
                     wherePieces.append("\(SQLIdent.quote(pkCol.name)) = \(placeholder)\(typeCast)")
                     if let v = originalRow[colIndex] {
                         binds.append(v)
