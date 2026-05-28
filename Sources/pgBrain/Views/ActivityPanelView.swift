@@ -21,6 +21,8 @@ struct ActivityPanelView: View {
         case slow     = "Slow queries"
         case sizes    = "Sizes"
         case roles    = "Roles"
+        case replication = "Replication"
+        case foreign  = "Foreign"
         var id: String { rawValue }
     }
 
@@ -35,6 +37,12 @@ struct ActivityPanelView: View {
     @State private var roleRows: [RoleRow] = []
     @State private var grantRows: [GrantRow] = []
     @State private var rolesSubtab: RolesSubtab = .roles
+    @State private var showGrantEditor = false
+    @State private var publications: [PublicationRow] = []
+    @State private var subscriptions: [SubscriptionRow] = []
+    @State private var slots: [ReplicationSlotRow] = []
+    @State private var foreignServers: [ForeignServerRow] = []
+    @State private var foreignTables: [ForeignTableRow] = []
     @State private var error: String?
 
     enum RolesSubtab: String, CaseIterable, Identifiable {
@@ -72,6 +80,14 @@ struct ActivityPanelView: View {
             Button("Cancel", role: .cancel) { pendingTerminate = nil }
         } message: {
             Text("Forcibly disconnects the session. Anything mid-flight rolls back.")
+        }
+        .sheet(isPresented: $showGrantEditor) {
+            GrantEditorSheet(
+                service: service,
+                roles: roleRows.map(\.name),
+                onClose: { showGrantEditor = false },
+                onDone: { Task { await refreshOnce() } }
+            )
         }
     }
 
@@ -113,6 +129,8 @@ struct ActivityPanelView: View {
         case .slow:     return stmtInstalled == false ? "(extension not installed)" : "(top \(stmtRows.count))"
         case .sizes:    return sizes.map { "(\(formatSize($0.databaseBytes)) total)" } ?? ""
         case .roles:    return "(\(roleRows.count) roles · \(grantRows.count) grants)"
+        case .replication: return "(\(publications.count) pub · \(subscriptions.count) sub · \(slots.count) slots)"
+        case .foreign:  return "(\(foreignServers.count) servers · \(foreignTables.count) tables)"
         }
     }
 
@@ -125,18 +143,134 @@ struct ActivityPanelView: View {
         case .slow:     slowContent
         case .sizes:    sizesContent
         case .roles:    rolesContent
+        case .replication: replicationContent
+        case .foreign:  foreignContent
         }
+    }
+
+    @ViewBuilder
+    private var replicationContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Tokens.Spacing.lg) {
+                replSection("Publications") {
+                    if publications.isEmpty {
+                        emptyLine("No publications")
+                    } else {
+                        Table(publications) {
+                            TableColumn("Name") { Text($0.name).font(.system(.caption, design: .monospaced).weight(.medium)) }
+                            TableColumn("Owner") { Text($0.owner).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary) }
+                            TableColumn("All tables") { flagChip($0.allTables) }.width(min: 70, ideal: 80)
+                            TableColumn("Operations") { p in
+                                Text([p.insert ? "INS" : nil, p.update ? "UPD" : nil, p.delete ? "DEL" : nil, p.truncate ? "TRUNC" : nil]
+                                    .compactMap { $0 }.joined(separator: " "))
+                                    .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(minHeight: 100, maxHeight: 160)
+                    }
+                }
+                replSection("Subscriptions") {
+                    if subscriptions.isEmpty {
+                        emptyLine("No subscriptions (or not visible to this role)")
+                    } else {
+                        Table(subscriptions) {
+                            TableColumn("Name") { Text($0.name).font(.system(.caption, design: .monospaced).weight(.medium)) }
+                            TableColumn("Enabled") { flagChip($0.enabled) }.width(min: 70, ideal: 80)
+                            TableColumn("Workers") { Text("\($0.workerCount)").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary) }.width(min: 60, ideal: 70)
+                            TableColumn("Publications") { Text($0.publications).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary) }
+                        }
+                        .frame(minHeight: 80, maxHeight: 140)
+                    }
+                }
+                replSection("Replication slots") {
+                    if slots.isEmpty {
+                        emptyLine("No replication slots")
+                    } else {
+                        Table(slots) {
+                            TableColumn("Name") { Text($0.name).font(.system(.caption, design: .monospaced).weight(.medium)) }
+                            TableColumn("Type") { Text($0.slotType).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary) }.width(min: 80, ideal: 90)
+                            TableColumn("Active") { flagChip($0.active) }.width(min: 60, ideal: 70)
+                            TableColumn("Database") { Text($0.database ?? "—").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary) }
+                            TableColumn("Plugin") { Text($0.plugin ?? "—").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary) }
+                        }
+                        .frame(minHeight: 80, maxHeight: 160)
+                    }
+                }
+                Spacer(minLength: Tokens.Spacing.md)
+            }
+            .padding(Tokens.Spacing.md)
+        }
+    }
+
+    @ViewBuilder
+    private var foreignContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Tokens.Spacing.lg) {
+                replSection("Foreign servers") {
+                    if foreignServers.isEmpty {
+                        emptyLine("No foreign servers")
+                    } else {
+                        Table(foreignServers) {
+                            TableColumn("Server") { Text($0.name).font(.system(.caption, design: .monospaced).weight(.medium)) }
+                            TableColumn("Wrapper") { Text($0.wrapper).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary) }
+                            TableColumn("Owner") { Text($0.owner).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary) }
+                            TableColumn("Type") { Text($0.type ?? "—").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary) }
+                            TableColumn("Version") { Text($0.version ?? "—").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary) }
+                        }
+                        .frame(minHeight: 80, maxHeight: 160)
+                    }
+                }
+                replSection("Foreign tables") {
+                    if foreignTables.isEmpty {
+                        emptyLine("No foreign tables")
+                    } else {
+                        Table(foreignTables) {
+                            TableColumn("Schema.Table") { Text("\($0.schema).\($0.name)").font(.system(.caption, design: .monospaced)) }
+                            TableColumn("Server") { Text($0.server).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary) }
+                        }
+                        .frame(minHeight: 100, maxHeight: 220)
+                    }
+                }
+                Spacer(minLength: Tokens.Spacing.md)
+            }
+            .padding(Tokens.Spacing.md)
+        }
+    }
+
+    @ViewBuilder
+    private func replSection<Body: View>(_ title: String, @ViewBuilder content: () -> Body) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .font(.system(.caption2, design: .monospaced).weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .tracking(0.6)
+            content()
+        }
+    }
+
+    private func emptyLine(_ s: String) -> some View {
+        Text(s).font(.caption).foregroundStyle(.tertiary)
     }
 
     @ViewBuilder
     private var rolesContent: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $rolesSubtab) {
-                ForEach(RolesSubtab.allCases) { Text($0.rawValue).tag($0) }
+            HStack {
+                Picker("", selection: $rolesSubtab) {
+                    ForEach(RolesSubtab.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                Spacer()
+                Button {
+                    showGrantEditor = true
+                } label: {
+                    Label("Grant / Revoke…", systemImage: "key")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
             .padding(.horizontal, Tokens.Spacing.md)
             .padding(.bottom, 6)
             if rolesSubtab == .roles {
@@ -599,6 +733,15 @@ struct ActivityPanelView: View {
             case .roles:
                 roleRows = try await RolesFetcher.fetchRoles(client: client)
                 grantRows = try await RolesFetcher.fetchGrants(client: client)
+            case .replication:
+                publications = try await ReplicationFetcher.publications(client: client)
+                // Subscriptions are superuser-only; treat a permission
+                // error as "none visible" rather than failing the tab.
+                subscriptions = (try? await ReplicationFetcher.subscriptions(client: client)) ?? []
+                slots = try await ReplicationFetcher.slots(client: client)
+            case .foreign:
+                foreignServers = try await ForeignDataFetcher.servers(client: client)
+                foreignTables = try await ForeignDataFetcher.tables(client: client)
             }
             error = nil
         } catch {

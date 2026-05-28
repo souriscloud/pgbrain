@@ -24,6 +24,8 @@ extension Notification.Name {
     /// Asks the matching window to open a function in the editor.
     /// `userInfo["schema"]` + `userInfo["name"]` + `userInfo["args"]` identify it.
     static let pgbrainEditFunction = Notification.Name("cloud.souris.pgbrain.editFunction")
+    /// Asks the matching window to open the ERD for `userInfo["schema"]`.
+    static let pgbrainShowERD = Notification.Name("cloud.souris.pgbrain.showERD")
     /// Asks the matching window to prompt the user for a name and
     /// save the current tab set as a workspace.
     static let pgbrainSaveWorkspace = Notification.Name("cloud.souris.pgbrain.saveWorkspace")
@@ -76,6 +78,10 @@ struct ConnectionWindowContent: View {
     @State private var dropDatabaseTarget: IdentifiedString?
     @State private var findUsagesTarget: CommentsTarget?
     @State private var editFunction: FunctionNode?
+    @State private var truncateTarget: CommentsTarget?
+    @State private var generateDataTarget: TableNode?
+    @State private var editViewTarget: TableNode?
+    @State private var erdSchema: IdentifiedString?
 
     /// Convenience pass-through to `service.visibleSchema` so views
     /// in this file can read the filtered snapshot without re-doing
@@ -173,6 +179,39 @@ struct ConnectionWindowContent: View {
                 onClose: { editFunction = nil }
             )
         }
+        .sheet(item: $truncateTarget) { target in
+            TruncateSheet(
+                service: service, schema: target.schema, table: target.table,
+                onClose: { truncateTarget = nil },
+                onDone: { reloadActiveTab() }
+            )
+        }
+        .sheet(item: $generateDataTarget) { node in
+            GenerateDataSheet(
+                service: service, table: node,
+                onClose: { generateDataTarget = nil },
+                onDone: { reloadActiveTab() }
+            )
+        }
+        .sheet(item: $editViewTarget) { node in
+            ViewEditorView(
+                service: service, table: node,
+                onClose: { editViewTarget = nil },
+                onSaved: { Task { await service.loadSchema() } }
+            )
+        }
+        .sheet(item: $erdSchema) { target in
+            if let schemaNode = service.visibleSchema.schemas.first(where: { $0.name == target.value }) {
+                ERDView(
+                    schema: schemaNode,
+                    onOpenTable: { node in
+                        erdSchema = nil
+                        service.workspace.openTable(node)
+                    },
+                    onClose: { erdSchema = nil }
+                )
+            }
+        }
         .confirmationDialog(
             confirmTitle(for: pendingMaintenance),
             isPresented: Binding(
@@ -224,6 +263,11 @@ struct ConnectionWindowContent: View {
                 .functions.first(where: { $0.name == name }) {
                 editFunction = fn
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainShowERD)) { notif in
+            guard let id = notif.object as? UUID, id == service.connection.id,
+                  let schema = notif.userInfo?["schema"] as? String else { return }
+            erdSchema = IdentifiedString(id: schema)
         }
         .sheet(isPresented: $showQueryHistory) {
             QueryHistoryView(
@@ -593,6 +637,18 @@ struct ConnectionWindowContent: View {
                     },
                     onOpenFunction: { fn in
                         editFunction = fn
+                    },
+                    onTruncate: { table in
+                        truncateTarget = CommentsTarget(schema: table.schema, table: table.name)
+                    },
+                    onGenerateData: { table in
+                        generateDataTarget = table
+                    },
+                    onEditView: { table in
+                        editViewTarget = table
+                    },
+                    onShowERD: { name in
+                        erdSchema = IdentifiedString(id: name)
                     }
                 )
             case .loading, .idle:

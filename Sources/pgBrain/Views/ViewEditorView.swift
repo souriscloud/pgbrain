@@ -1,24 +1,24 @@
 import SwiftUI
 import PostgresNIO
 
-/// Sheet for editing the body of a function / procedure. We fetch the
-/// existing CREATE OR REPLACE via `pg_get_functiondef`, pre-populate
-/// the editor, and let the user save → that's a full
-/// `CREATE OR REPLACE FUNCTION …` round-trip.
-///
-/// Read-only fallback: if the user lacks the permission to fetch the
-/// body (e.g. SECURITY DEFINER owned by another role) we still show the
-/// signature and disable the editor.
-struct FunctionEditorView: View {
+/// Editor for a view / materialized view body. Loads the current
+/// `pg_get_viewdef` and wraps it in a `CREATE OR REPLACE VIEW … AS`
+/// (plain views) or `DROP + CREATE MATERIALIZED VIEW` (matviews can't
+/// be replaced in place). Save re-runs the whole statement.
+struct ViewEditorView: View {
     let service: ConnectionService
-    let function: FunctionNode
+    let table: TableNode    // kind is .view or .materializedView
     let onClose: () -> Void
+    let onSaved: () -> Void
 
     @State private var body_: String = ""
     @State private var loading = true
     @State private var error: String?
     @State private var saving = false
     @State private var savedToast = false
+
+    private var isMatview: Bool { table.kind == .materializedView }
+    private var qualified: String { SQLIdent.quote(table.schema) + "." + SQLIdent.quote(table.name) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,7 +27,7 @@ struct FunctionEditorView: View {
             if loading {
                 VStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("Loading function body…").font(.caption).foregroundStyle(.secondary)
+                    Text("Loading view definition…").font(.caption).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -52,19 +52,17 @@ struct FunctionEditorView: View {
                 ScrollView {
                     Text(error)
                         .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.red)
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundStyle(.red).textSelection(.enabled)
+                        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: 100)
             }
             Divider()
             HStack {
-                Text(function.qualifiedSignature)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                if isMatview {
+                    Label("Matview: saved via DROP + CREATE", systemImage: "exclamationmark.triangle")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
                 Spacer()
                 Button("Close", action: onClose).keyboardShortcut(.cancelAction)
                 Button("Save") { save() }
@@ -80,13 +78,12 @@ struct FunctionEditorView: View {
 
     private var header: some View {
         HStack {
-            Image(systemName: "function").foregroundStyle(Tokens.Brand.primary)
+            Image(systemName: isMatview ? "rectangle.stack.fill" : "rectangle.stack")
+                .foregroundStyle(Tokens.Brand.primary)
             VStack(alignment: .leading, spacing: 1) {
-                Text(function.signature)
-                    .font(.system(.title3, design: .monospaced).weight(.semibold))
-                Text("\(function.schema) · \(function.kind.rawValue)")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
+                Text(table.name).font(.system(.title3, design: .monospaced).weight(.semibold))
+                Text("\(table.schema) · \(isMatview ? "materialized view" : "view")")
+                    .font(.caption.monospaced()).foregroundStyle(.secondary)
             }
             Spacer()
         }
@@ -97,16 +94,16 @@ struct FunctionEditorView: View {
         guard let client = service.client else {
             error = "Not connected."; loading = false; return
         }
-        let qualified = "\(SQLIdent.quote(function.schema)).\(SQLIdent.quote(function.name))\(function.arguments)"
-        let sql = "SELECT pg_get_functiondef('\(qualified.replacingOccurrences(of: "'", with: "''"))'::regprocedure)"
+        let sql = "SELECT pg_get_viewdef('\(qualified.replacingOccurrences(of: "'", with: "''"))'::regclass, true)"
         do {
             let rows = try await client.query(PostgresQuery(unsafeSQL: sql))
             for try await def in rows.decode(String.self) {
-                self.body_ = def
+                let kindWord = isMatview ? "MATERIALIZED VIEW" : "VIEW"
+                self.body_ = "CREATE OR REPLACE \(kindWord) \(qualified) AS\n\(def)"
                 self.loading = false
                 return
             }
-            self.error = "Function body wasn't returned."
+            self.error = "View definition wasn't returned."
             self.loading = false
         } catch {
             self.error = PostgresErrorMessage.describe(error)
@@ -117,11 +114,26 @@ struct FunctionEditorView: View {
     private func save() {
         saving = true
         Task {
-            let result = await AdminActions.saveFunctionBody(body_, service: service)
+            // Matviews don't support CREATE OR REPLACE — rewrite the
+            // editor's "CREATE OR REPLACE MATERIALIZED VIEW" into a
+            // DROP + CREATE pair so the save actually lands.
+            let ddl: String
+            if isMatview {
+                let createPart = body_.replacingOccurrences(
+                    of: "CREATE OR REPLACE MATERIALIZED VIEW",
+                    with: "CREATE MATERIALIZED VIEW",
+                    options: [.caseInsensitive]
+                )
+                ddl = "DROP MATERIALIZED VIEW IF EXISTS \(qualified);\n\(createPart)"
+            } else {
+                ddl = body_
+            }
+            let result = await AdminActions.saveViewBody(ddl, service: service)
             saving = false
             switch result {
             case .success:
                 error = nil
+                onSaved()
                 withAnimation { savedToast = true }
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 1_400_000_000)
@@ -133,4 +145,3 @@ struct FunctionEditorView: View {
         }
     }
 }
-

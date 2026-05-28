@@ -138,6 +138,14 @@ struct SidebarOutlineView: NSViewRepresentable {
     var onFindUsages: ((TableNode) -> Void)? = nil
     /// Open a function in the editor sheet.
     var onOpenFunction: ((FunctionNode) -> Void)? = nil
+    /// TRUNCATE a table (pops the confirm sheet).
+    var onTruncate: ((TableNode) -> Void)? = nil
+    /// Generate test data into a table.
+    var onGenerateData: ((TableNode) -> Void)? = nil
+    /// Edit a view / matview body.
+    var onEditView: ((TableNode) -> Void)? = nil
+    /// Open the ERD for a schema.
+    var onShowERD: ((String) -> Void)? = nil
 
     @MainActor
     final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
@@ -158,6 +166,10 @@ struct SidebarOutlineView: NSViewRepresentable {
         var onCreateSchema: (() -> Void)?
         var onFindUsages: ((TableNode) -> Void)?
         var onOpenFunction: ((FunctionNode) -> Void)?
+        var onTruncate: ((TableNode) -> Void)?
+        var onGenerateData: ((TableNode) -> Void)?
+        var onEditView: ((TableNode) -> Void)?
+        var onShowERD: ((String) -> Void)?
 
         var activeRoot: SidebarNode { filteredRoot ?? root }
 
@@ -244,8 +256,15 @@ struct SidebarOutlineView: NSViewRepresentable {
         }
 
         private func schemaMenu(name: String) -> NSMenu? {
-            guard onRenameSchema != nil || onDropSchema != nil || onCreateSchema != nil else { return nil }
+            guard onRenameSchema != nil || onDropSchema != nil || onCreateSchema != nil || onShowERD != nil else { return nil }
             let menu = NSMenu()
+            if onShowERD != nil {
+                let erd = NSMenuItem(title: "Show ERD…", action: #selector(handleShowERD(_:)), keyEquivalent: "")
+                erd.target = self
+                erd.representedObject = name
+                menu.addItem(erd)
+                menu.addItem(.separator())
+            }
             if onCreateSchema != nil {
                 let new = NSMenuItem(title: "New schema…", action: #selector(handleCreateSchema(_:)), keyEquivalent: "")
                 new.target = self
@@ -296,6 +315,28 @@ struct SidebarOutlineView: NSViewRepresentable {
                 find.target = self
                 find.representedObject = table
                 menu.addItem(find)
+            }
+            // View body editor — only for views / matviews.
+            if onEditView != nil, table.kind != .table {
+                let editView = NSMenuItem(title: "Edit view definition…", action: #selector(handleEditView(_:)), keyEquivalent: "")
+                editView.target = self
+                editView.representedObject = table
+                menu.addItem(editView)
+            }
+            // Data tools — real tables only.
+            if table.kind == .table {
+                if onGenerateData != nil {
+                    let gen = NSMenuItem(title: "Generate data…", action: #selector(handleGenerateData(_:)), keyEquivalent: "")
+                    gen.target = self
+                    gen.representedObject = table
+                    menu.addItem(gen)
+                }
+                if onTruncate != nil {
+                    let trunc = NSMenuItem(title: "Truncate…", action: #selector(handleTruncate(_:)), keyEquivalent: "")
+                    trunc.target = self
+                    trunc.representedObject = table
+                    menu.addItem(trunc)
+                }
             }
             // Maintenance bloc — tables + matviews only.
             if onMaintenance != nil, table.kind != .view {
@@ -383,6 +424,22 @@ struct SidebarOutlineView: NSViewRepresentable {
         @objc private func handleOpenFunction(_ sender: NSMenuItem) {
             guard let box = sender.representedObject as? FunctionBox else { return }
             onOpenFunction?(box.fn)
+        }
+        @objc private func handleTruncate(_ sender: NSMenuItem) {
+            guard let table = sender.representedObject as? TableNode else { return }
+            onTruncate?(table)
+        }
+        @objc private func handleGenerateData(_ sender: NSMenuItem) {
+            guard let table = sender.representedObject as? TableNode else { return }
+            onGenerateData?(table)
+        }
+        @objc private func handleEditView(_ sender: NSMenuItem) {
+            guard let table = sender.representedObject as? TableNode else { return }
+            onEditView?(table)
+        }
+        @objc private func handleShowERD(_ sender: NSMenuItem) {
+            guard let name = sender.representedObject as? String else { return }
+            onShowERD?(name)
         }
 
         @objc private func handleOpen(_ sender: NSMenuItem) {
@@ -502,6 +559,10 @@ struct SidebarOutlineView: NSViewRepresentable {
         coord.onCreateSchema = onCreateSchema
         coord.onFindUsages = onFindUsages
         coord.onOpenFunction = onOpenFunction
+        coord.onTruncate = onTruncate
+        coord.onGenerateData = onGenerateData
+        coord.onEditView = onEditView
+        coord.onShowERD = onShowERD
     }
 
     func makeNSView(context: Context) -> NSScrollView {

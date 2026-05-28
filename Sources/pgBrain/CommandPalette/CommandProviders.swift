@@ -19,6 +19,7 @@ enum CommandProviders {
         out.append(contentsOf: tables(service: service))
         out.append(contentsOf: functions(service: service))
         out.append(contentsOf: schemas(service: service))
+        out.append(contentsOf: erds(service: service))
         return out
     }
 
@@ -334,6 +335,29 @@ enum CommandProviders {
             }
         }
         return out
+    }
+
+    // MARK: - ERD per schema
+
+    private static func erds(service: ConnectionService) -> [CommandItem] {
+        service.visibleSchema.schemas.map { schema in
+            let name = schema.name
+            return CommandItem(
+                id: "erd.\(name)",
+                icon: "point.3.connected.trianglepath.dotted",
+                title: "Show ERD: \(name)",
+                subtitle: "\(schema.tables.count) tables",
+                category: .schema,
+                shortcut: nil,
+                action: {
+                    AppDelegate.shared?.openConnection(service.connection)
+                    NotificationCenter.default.post(
+                        name: .pgbrainShowERD, object: service.connection.id,
+                        userInfo: ["schema": name]
+                    )
+                }
+            )
+        }
     }
 
     // MARK: - Functions

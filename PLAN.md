@@ -404,6 +404,23 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launched. Not yet released — polish sits on top of v0.5.0 pending a bump.
 
+### Iter 22 — Breadth round 5: ERD, form view, more object types, data tooling (2026-05-29)
+**Goal**: another wave of DataGrip-parity surface — schema visualization, single-row editing, view/matview editing, replication + FDW visibility, and data-management tooling (truncate, generate, grant).
+
+- **ERD diagram** (`ERDView.swift`) — schema relationship canvas: table boxes (PK/FK-flagged columns) on a grid, FK lines drawn with `Canvas`, draggable boxes, zoom, double-click to open a table. Reachable from a schema's context menu and ⌘K ("Show ERD: …").
+- **Row form view** (`RowFormView.swift`) — Grid/Form segmented toggle in the pager strip. Form mode shows one row as a vertical label+value list with ←/→ row stepping; editable fields write through the same `EditBuffer` as the grid (shared dirty set + Apply path).
+- **View / matview editor** (`ViewEditorView.swift`) — loads `pg_get_viewdef`, wraps in `CREATE OR REPLACE VIEW … AS`; matviews save via `DROP + CREATE`. Reuses the new shared `SQLEditorTextView` (extracted from the function editor).
+- **Replication tab** (`ReplicationFetcher.swift`) — Activity panel gains Replication: publications (`pg_publication`), subscriptions (`pg_subscription`, gracefully empty when not superuser-visible), and slots (`pg_replication_slots`).
+- **Foreign tab** — foreign servers (`pg_foreign_server` + wrapper) and foreign tables (`pg_foreign_table`).
+- **TRUNCATE** (`TruncateSheet.swift`) — sidebar table menu → Truncate… with CASCADE + RESTART IDENTITY toggles and retype-to-confirm.
+- **Generate test data** (`GenerateDataSheet.swift`) — per-column strategy (skip/sequence/random int·numeric·text·bool·timestamp/now/uuid/null/fixed), builds one `INSERT … SELECT FROM generate_series(1,N)` with a live SQL preview.
+- **Grant / Revoke editor** (`GrantEditorSheet.swift`) — from the Roles pane: role × table × privilege checkboxes → GRANT or REVOKE.
+- **Partitions in Structure pane** — partition strategy + key (`pg_get_partkeydef`) and child partitions with bounds (`pg_get_expr(relpartbound)`), via `TableInspector.Partitioning`.
+- **Open / Save .sql** — scratchpad header menu: open a `.sql` into a cell (⌘O), save the notebook text to `.sql` (⌘⇧S).
+- **Shared `SQLEditorTextView`** — extracted the function editor's NSTextView+highlighter wrapper into one reusable component (function + view editors share it).
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launched. Still not exercised against a live DB — same caveat as iters 19–21.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

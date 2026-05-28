@@ -325,6 +325,61 @@ enum AdminActions {
         return await runDDL(sql, summary: "ALTER COLUMN \(column) TYPE \(newType)", service: service)
     }
 
+    // MARK: - TRUNCATE
+
+    static func truncate(
+        schema: String, table: String, cascade: Bool, restartIdentity: Bool,
+        service: ConnectionService
+    ) async -> Result<Void, Error> {
+        let qualified = SQLIdent.quote(schema) + "." + SQLIdent.quote(table)
+        var sql = "TRUNCATE TABLE \(qualified)"
+        if restartIdentity { sql += " RESTART IDENTITY" }
+        if cascade { sql += " CASCADE" }
+        return await runDDL(sql, summary: "TRUNCATE \(schema).\(table)", service: service)
+    }
+
+    // MARK: - Views
+
+    /// Save a view body. Views use CREATE OR REPLACE; matviews can't be
+    /// replaced in place so we DROP + CREATE (caller is warned). `body`
+    /// is the full statement the editor produced.
+    static func saveViewBody(_ ddl: String, service: ConnectionService) async -> Result<Void, Error> {
+        await runDDL(ddl, summary: "CREATE OR REPLACE VIEW", service: service)
+    }
+
+    // MARK: - GRANT / REVOKE
+
+    /// Build + run a GRANT or REVOKE for a set of privileges on one
+    /// table. `privileges` are raw SQL keywords (SELECT, INSERT, …).
+    static func setPrivileges(
+        grant: Bool, privileges: [String],
+        schema: String, table: String, role: String,
+        service: ConnectionService
+    ) async -> Result<Void, Error> {
+        guard !privileges.isEmpty else { return .success(()) }
+        let qualified = SQLIdent.quote(schema) + "." + SQLIdent.quote(table)
+        let privList = privileges.joined(separator: ", ")
+        let sql: String
+        if grant {
+            sql = "GRANT \(privList) ON TABLE \(qualified) TO \(SQLIdent.quote(role))"
+        } else {
+            sql = "REVOKE \(privList) ON TABLE \(qualified) FROM \(SQLIdent.quote(role))"
+        }
+        return await runDDL(
+            sql,
+            summary: "\(grant ? "GRANT" : "REVOKE") \(privList) · \(role)",
+            service: service
+        )
+    }
+
+    // MARK: - Bulk INSERT (data generator)
+
+    /// Run a generated INSERT … SELECT FROM generate_series statement.
+    /// The caller builds the SQL; we just execute + track it.
+    static func runGeneratedInsert(_ sql: String, summary: String, service: ConnectionService) async -> Result<Void, Error> {
+        await runDDL(sql, summary: summary, service: service)
+    }
+
     // MARK: - LISTEN / NOTIFY
 
     /// Fire a NOTIFY from a regular pooled connection. Payload is wrapped

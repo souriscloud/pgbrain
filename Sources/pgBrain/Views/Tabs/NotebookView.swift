@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Observation
 import PostgresNIO
+import UniformTypeIdentifiers
 
 /// Cell-based notebook scratchpad. Replaces the iter-15
 /// NSTextAttachmentViewProvider design which never managed to render an
@@ -149,6 +150,19 @@ struct NotebookView: View {
             }
             .buttonStyle(.borderless)
             .help("Saved query library")
+
+            Menu {
+                Button("Open .sql…") { openSQLFile() }
+                    .keyboardShortcut("o", modifiers: .command)
+                Button("Save as .sql…") { saveSQLFile() }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
+            } label: {
+                Image(systemName: "doc.badge.ellipsis")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Open / save SQL files")
         }
         .padding(.horizontal, Tokens.Spacing.md)
         .padding(.vertical, 6)
@@ -197,6 +211,37 @@ struct NotebookView: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help("search_path for this scratchpad")
+    }
+
+    /// Open a `.sql` file into a new SQL cell at the end of the
+    /// notebook. We append rather than replace so the user doesn't lose
+    /// what they were working on.
+    private func openSQLFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "sql") ?? .plainText, .plainText]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url,
+              let text = try? String(contentsOf: url, encoding: .utf8)
+        else { return }
+        // Reuse the first empty SQL cell if there is one, else append.
+        if let empty = notebook.cells.first(where: { $0.kind == .sql && $0.text.isEmpty }) {
+            empty.text = text
+        } else if let lastSQL = notebook.cells.last(where: { $0.kind == .sql }) {
+            let sep = lastSQL.text.isEmpty ? "" : "\n\n"
+            lastSQL.text += sep + text
+        }
+        notebook.title = url.deletingPathExtension().lastPathComponent
+    }
+
+    /// Save the notebook's combined SQL text to a `.sql` file.
+    private func saveSQLFile() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "sql") ?? .plainText]
+        panel.nameFieldStringValue = "\(notebook.title).sql"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        try? notebook.plainText.write(to: url, atomically: true, encoding: .utf8)
     }
 
     /// Find the two most-recent successful results in the notebook

@@ -31,6 +31,10 @@ struct TableTabView: View {
     @State private var pane: WorkspaceState.TablePane = .data
     @State private var showFindBar = false
     @State private var distinctValuesColumn: ColumnNameID?
+    @State private var rowViewMode: RowViewMode = .grid
+    @State private var formRowIndex = 0
+
+    enum RowViewMode { case grid, form }
     @FocusState private var findFocused: Bool
 
     init(table: TableNode, tab: WorkspaceState.Tab, service: ConnectionService) {
@@ -462,6 +466,16 @@ struct TableTabView: View {
 
             Spacer()
 
+            // Grid / Form view toggle.
+            Picker("", selection: $rowViewMode) {
+                Image(systemName: "tablecells").tag(RowViewMode.grid)
+                Image(systemName: "list.bullet.rectangle.portrait").tag(RowViewMode.form)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("Switch between grid and single-row form")
+
             Button {
                 Task { await loader.loadFirstPage() }
             } label: { Image(systemName: "chevron.left.2") }
@@ -807,6 +821,14 @@ struct TableTabView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if rowViewMode == .form {
+                        RowFormView(
+                            page: visible,
+                            sourceIndices: sourceIndices,
+                            rowIndex: $formRowIndex,
+                            editBuffer: table.isEditable ? loader.editBuffer : nil
+                        )
+                        pagerStrip(visible: visible)
                     } else {
                         DataGridView(
                             page: visible,
@@ -1506,6 +1528,41 @@ private struct StructureBody: View {
                         VStack(alignment: .leading, spacing: 10) {
                             ForEach(snapshot.triggers, id: \.name) { t in
                                 triggerRow(t)
+                            }
+                        }
+                    }
+                }
+
+                if let part = snapshot.partitioning {
+                    section("Partitioning") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 6) {
+                                Text(part.strategy.uppercased())
+                                    .font(.system(.caption2, design: .monospaced).weight(.bold))
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(Tokens.Brand.primary.opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
+                                    .foregroundStyle(Tokens.Brand.primary)
+                                Text(part.key)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                            }
+                            ForEach(part.children, id: \.name) { child in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(child.schema).\(child.name)")
+                                        .font(.system(.caption, design: .monospaced).weight(.medium))
+                                    Text(child.bound.isEmpty ? "DEFAULT" : child.bound)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .padding(8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.secondary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
+                            }
+                            if part.children.isEmpty {
+                                Text("No partitions yet")
+                                    .font(.caption).foregroundStyle(.tertiary)
                             }
                         }
                     }

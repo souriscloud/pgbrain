@@ -42,6 +42,19 @@ enum TableInspector {
         let definition: String    // result of pg_get_triggerdef(oid)
     }
 
+    /// Partitioning metadata for a partitioned table (`relkind = 'p'`).
+    /// `nil` on the snapshot means the table isn't partitioned.
+    struct Partitioning: Sendable {
+        let strategy: String      // "range" / "list" / "hash"
+        let key: String           // pg_get_partkeydef output, e.g. "RANGE (created_at)"
+        let children: [Child]
+        struct Child: Sendable {
+            let schema: String
+            let name: String
+            let bound: String     // pg_get_expr(relpartbound) — e.g. "FOR VALUES FROM ('2024-01-01') TO ('2024-02-01')"
+        }
+    }
+
     struct Snapshot: Sendable {
         let schema: String
         let table: String
@@ -54,6 +67,7 @@ enum TableInspector {
         /// definitions in the rendered DDL).
         let indexes: [Index]
         let triggers: [Trigger]
+        let partitioning: Partitioning?
     }
 
     static func fetch(
@@ -71,6 +85,7 @@ enum TableInspector {
         async let cons = fetchConstraints(client: client, oid: oid)
         async let idxs = fetchIndexes(client: client, oid: oid)
         async let trigs = fetchTriggers(client: client, oid: oid)
+        async let parts = fetchPartitioning(client: client, oid: oid)
         async let tableComment = fetchTableComment(client: client, oid: oid)
         return Snapshot(
             schema: schema,
@@ -80,7 +95,8 @@ enum TableInspector {
             columns: try await cols,
             constraints: try await cons,
             indexes: try await idxs,
-            triggers: try await trigs
+            triggers: try await trigs,
+            partitioning: try await parts
         )
     }
 
@@ -312,6 +328,43 @@ enum TableInspector {
             out.append(Trigger(name: name, enabled: enabled, definition: def))
         }
         return out
+    }
+
+    private static func fetchPartitioning(client: PostgresClient, oid: Int64) async throws -> Partitioning? {
+        // pg_partitioned_table exists only for partitioned parents.
+        let keySQL: PostgresQuery = """
+        SELECT
+          CASE pt.partstrat WHEN 'r' THEN 'range' WHEN 'l' THEN 'list' WHEN 'h' THEN 'hash' ELSE pt.partstrat::text END,
+          pg_get_partkeydef(\(oid)::oid)
+        FROM pg_partitioned_table pt
+        WHERE pt.partrelid = \(oid)::oid
+        """
+        let keyRows = try await client.query(keySQL)
+        var strategy = ""
+        var key = ""
+        for try await (strat, def) in keyRows.decode((String, String?).self) {
+            strategy = strat
+            key = def ?? ""
+        }
+        guard !strategy.isEmpty else { return nil }
+
+        // Children + their bounds.
+        let childSQL: PostgresQuery = """
+        SELECT n.nspname,
+               c.relname,
+               pg_get_expr(c.relpartbound, c.oid)
+        FROM pg_inherits i
+        JOIN pg_class c ON c.oid = i.inhrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE i.inhparent = \(oid)::oid
+        ORDER BY n.nspname, c.relname
+        """
+        let childRows = try await client.query(childSQL)
+        var children: [Partitioning.Child] = []
+        for try await (schema, name, bound) in childRows.decode((String, String, String?).self) {
+            children.append(Partitioning.Child(schema: schema, name: name, bound: bound ?? ""))
+        }
+        return Partitioning(strategy: strategy, key: key, children: children)
     }
 
     private static func fetchTableComment(client: PostgresClient, oid: Int64) async throws -> String? {
