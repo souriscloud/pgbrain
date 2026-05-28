@@ -54,6 +54,10 @@ struct DataGridView: NSViewRepresentable {
     /// ⌘-click navigation. Receiver checks whether the cell is on
     /// an FK column and opens the parent table if so.
     var onCommandClickCell: ((Int /*sourceRow*/, Int /*dataCol*/) -> Void)? = nil
+    /// "Show distinct values" cell-menu action. Receiver runs
+    /// `SELECT col, COUNT(*) GROUP BY 1 ORDER BY 2 DESC` and pops a
+    /// list. Nil hides the menu entry (scratchpad result grids etc.).
+    var onShowColumnDistinct: ((String) -> Void)? = nil
     /// `(connectionID, schema, table)` for the column-layout store
     /// keying. Nil disables persisted widths (e.g. for scratchpad
     /// result grids that don't have a stable table identity).
@@ -75,6 +79,7 @@ struct DataGridView: NSViewRepresentable {
         var onCopyAsMarkdown: (() -> Void)?
         var onCopyAsSlack: (() -> Void)?
         var onCommandClickCell: ((Int, Int) -> Void)?
+        var onShowColumnDistinct: ((String) -> Void)?
         var columnLayoutKey: (UUID, String, String)?
 
         @objc func columnDidResize(_ notification: Notification) {
@@ -346,6 +351,18 @@ struct DataGridView: NSViewRepresentable {
             copyName.representedObject = column.name
             menu.addItem(copyName)
 
+            if onShowColumnDistinct != nil {
+                menu.addItem(.separator())
+                let item = NSMenuItem(
+                    title: "Distinct values for \(column.name)…",
+                    action: #selector(handleDistinctValues(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = column.name
+                menu.addItem(item)
+            }
+
             // Filter-to-value bloc. Available regardless of edit
             // buffer — these write to the WHERE strip, no PK needed.
             if onFilterEqualsCell != nil || onFilterColumn != nil {
@@ -486,6 +503,11 @@ struct DataGridView: NSViewRepresentable {
 
         @objc private func handleCopyMarkdown(_ sender: NSMenuItem) { onCopyAsMarkdown?() }
         @objc private func handleCopySlack(_ sender: NSMenuItem) { onCopyAsSlack?() }
+
+        @objc private func handleDistinctValues(_ sender: NSMenuItem) {
+            guard let name = sender.representedObject as? String else { return }
+            onShowColumnDistinct?(name)
+        }
 
         /// When the buffer has a pending edit for the source row, show it
         /// (which may be `nil` for an explicit Set NULL). Otherwise fall
@@ -653,6 +675,7 @@ struct DataGridView: NSViewRepresentable {
         coordinator.onCopyAsMarkdown = onCopyAsMarkdown
         coordinator.onCopyAsSlack = onCopyAsSlack
         coordinator.onCommandClickCell = onCommandClickCell
+        coordinator.onShowColumnDistinct = onShowColumnDistinct
         coordinator.columnLayoutKey = columnLayoutKey
     }
 

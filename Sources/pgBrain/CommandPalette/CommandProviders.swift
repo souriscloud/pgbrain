@@ -138,6 +138,42 @@ enum CommandProviders {
                 }
             ),
             CommandItem(
+                id: "action.sequenceInspector",
+                icon: "number",
+                title: "Sequences…",
+                subtitle: "Inspect + setval / nextval / restart",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    AppDelegate.shared?.openConnection(service.connection)
+                    NotificationCenter.default.post(name: .pgbrainOpenSequenceInspector, object: service.connection.id)
+                }
+            ),
+            CommandItem(
+                id: "action.notifyPanel",
+                icon: "antenna.radiowaves.left.and.right",
+                title: "LISTEN / NOTIFY…",
+                subtitle: "Subscribe to a NOTIFY channel",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    AppDelegate.shared?.openConnection(service.connection)
+                    NotificationCenter.default.post(name: .pgbrainOpenNotifyPanel, object: service.connection.id)
+                }
+            ),
+            CommandItem(
+                id: "action.snippets",
+                icon: "doc.text",
+                title: "Snippets…",
+                subtitle: "Manage saved SQL fragments",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    AppDelegate.shared?.openConnection(service.connection)
+                    NotificationCenter.default.post(name: .pgbrainOpenSnippets, object: service.connection.id)
+                }
+            ),
+            CommandItem(
                 id: "action.saveWorkspace",
                 icon: "square.stack.3d.up",
                 title: "Save Workspace…",

@@ -1,9 +1,22 @@
 import SwiftUI
 
+/// Identifiable wrapper so SwiftUI can drive sheet/dialog presentation
+/// from a single String like a schema name.
+struct IdentifiedString: Identifiable, Equatable {
+    let id: String
+    var value: String { id }
+}
+
 extension Notification.Name {
     /// Posted by the command palette to ask the connection-window
     /// matching `object as? UUID` to show its Activity Panel sheet.
     static let pgbrainOpenActivityPanel = Notification.Name("cloud.souris.pgbrain.openActivityPanel")
+    /// Asks the matching window to open the sequence inspector sheet.
+    static let pgbrainOpenSequenceInspector = Notification.Name("cloud.souris.pgbrain.openSequenceInspector")
+    /// Asks the matching window to open the LISTEN/NOTIFY sheet.
+    static let pgbrainOpenNotifyPanel = Notification.Name("cloud.souris.pgbrain.openNotifyPanel")
+    /// Asks the matching window to open the snippets library sheet.
+    static let pgbrainOpenSnippets = Notification.Name("cloud.souris.pgbrain.openSnippets")
     /// Asks the matching window to prompt the user for a name and
     /// save the current tab set as a workspace.
     static let pgbrainSaveWorkspace = Notification.Name("cloud.souris.pgbrain.saveWorkspace")
@@ -12,6 +25,26 @@ extension Notification.Name {
     static let pgbrainSwitchWorkspace = Notification.Name("cloud.souris.pgbrain.switchWorkspace")
     /// Asks the matching window to show the query-history sheet.
     static let pgbrainOpenQueryHistory = Notification.Name("cloud.souris.pgbrain.openQueryHistory")
+}
+
+/// Drives the confirmation dialog for destructive maintenance actions
+/// (VACUUM FULL, REINDEX). Identifiable so `.confirmationDialog(item:)`
+/// can pop and dismiss it.
+struct MaintenanceRequest: Identifiable {
+    let id = UUID()
+    let table: TableNode
+    let action: AdminActions.Maintenance
+}
+
+struct CommentsTarget: Identifiable {
+    let id: String
+    let schema: String
+    let table: String
+    init(schema: String, table: String) {
+        self.schema = schema
+        self.table = table
+        self.id = "\(schema).\(table)"
+    }
 }
 
 struct ConnectionWindowContent: View {
@@ -24,6 +57,14 @@ struct ConnectionWindowContent: View {
     @State private var showQueryHistory = false
     @State private var showSaveWorkspaceDialog = false
     @State private var workspaceNameDraft = ""
+    @State private var showCreateSchema = false
+    @State private var renameSchemaTarget: IdentifiedString?
+    @State private var dropSchemaTarget: IdentifiedString?
+    @State private var commentsTarget: CommentsTarget?
+    @State private var pendingMaintenance: MaintenanceRequest?
+    @State private var showSequenceInspector = false
+    @State private var showNotifyPanel = false
+    @State private var showSnippets = false
 
     /// Convenience pass-through to `service.visibleSchema` so views
     /// in this file can read the filtered snapshot without re-doing
@@ -58,6 +99,72 @@ struct ConnectionWindowContent: View {
         }
         .sheet(isPresented: $showActivityPanel) {
             ActivityPanelView(service: service) { showActivityPanel = false }
+        }
+        .sheet(isPresented: $showCreateSchema) {
+            CreateSchemaSheet(service: service) { showCreateSchema = false }
+        }
+        .sheet(item: $renameSchemaTarget) { target in
+            RenameSchemaSheet(service: service, original: target.value) {
+                renameSchemaTarget = nil
+            }
+        }
+        .sheet(item: $dropSchemaTarget) { target in
+            DropSchemaSheet(service: service, target: target.value) {
+                dropSchemaTarget = nil
+            }
+        }
+        .sheet(item: $commentsTarget) { target in
+            CommentsEditorSheet(
+                service: service,
+                schema: target.schema,
+                table: target.table,
+                onClose: { commentsTarget = nil },
+                onSaved: { reloadInspectorFor(schema: target.schema, table: target.table) }
+            )
+        }
+        .sheet(isPresented: $showSequenceInspector) {
+            SequenceInspectorView(service: service) { showSequenceInspector = false }
+        }
+        .sheet(isPresented: $showNotifyPanel) {
+            NotifyPanelView(service: service) { showNotifyPanel = false }
+        }
+        .sheet(isPresented: $showSnippets) {
+            SnippetsView(
+                onInsert: { body in insertSnippet(body) },
+                onClose: { showSnippets = false }
+            )
+        }
+        .confirmationDialog(
+            confirmTitle(for: pendingMaintenance),
+            isPresented: Binding(
+                get: { pendingMaintenance != nil && pendingMaintenance!.action.isDestructive },
+                set: { if !$0 { pendingMaintenance = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingMaintenance
+        ) { req in
+            Button(req.action.label, role: .destructive) {
+                runMaintenance(req.action, on: req.table)
+                pendingMaintenance = nil
+            }
+            Button("Cancel", role: .cancel) { pendingMaintenance = nil }
+        } message: { req in
+            Text(req.action.help)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainOpenSequenceInspector)) { notif in
+            if let id = notif.object as? UUID, id == service.connection.id {
+                showSequenceInspector = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainOpenNotifyPanel)) { notif in
+            if let id = notif.object as? UUID, id == service.connection.id {
+                showNotifyPanel = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainOpenSnippets)) { notif in
+            if let id = notif.object as? UUID, id == service.connection.id {
+                showSnippets = true
+            }
         }
         .sheet(isPresented: $showQueryHistory) {
             QueryHistoryView(
@@ -321,6 +428,43 @@ struct ConnectionWindowContent: View {
         }
     }
 
+    // MARK: - Admin action helpers
+
+    private func runMaintenance(_ action: AdminActions.Maintenance, on table: TableNode) {
+        Task {
+            _ = await AdminActions.runMaintenance(action, on: table.schema, table: table.name, service: service)
+        }
+    }
+
+    private func confirmTitle(for req: MaintenanceRequest?) -> String {
+        guard let req else { return "" }
+        return "\(req.action.label) \(req.table.schema).\(req.table.name)?"
+    }
+
+    private func reloadInspectorFor(schema: String, table: String) {
+        if let tab = service.workspace.tabs.first(where: {
+            if case .table(let t) = $0.kind { return t.schema == schema && t.name == table } else { return false }
+        }),
+           case .table(let t) = tab.kind {
+            let inspector = service.inspector(for: tab, table: t)
+            Task { await inspector.load() }
+        }
+    }
+
+    private func insertSnippet(_ body: String) {
+        let pad: Notebook
+        if let active = service.workspace.tabs.first(where: { $0.id == service.workspace.selectedID }),
+           case .scratchpad(let existing) = active.kind {
+            pad = existing
+        } else {
+            pad = service.workspace.openScratchpad()
+        }
+        if let firstSql = pad.cells.first(where: { $0.kind == .sql }) {
+            let separator = firstSql.text.isEmpty ? "" : "\n\n"
+            firstSql.text += separator + SnippetStore.expand(body).text
+        }
+    }
+
     /// ⌘R hook: re-fetch whatever the active tab is showing. Table
     /// tabs reload rows (and the inspector if it had been visited);
     /// no-op for tabs that don't have a meaningful "reload" notion.
@@ -359,7 +503,32 @@ struct ConnectionWindowContent: View {
                     onOpenTable: { service.workspace.openTable($0) },
                     onCopyTable: { copySource = $0 },
                     onShowStructure: { service.workspace.openTable($0, focusPane: .structure) },
-                    onShowDDL: { service.workspace.openTable($0, focusPane: .ddl) }
+                    onShowDDL: { service.workspace.openTable($0, focusPane: .ddl) },
+                    onMaintenance: { table, action in
+                        if action.isDestructive {
+                            pendingMaintenance = MaintenanceRequest(table: table, action: action)
+                        } else {
+                            runMaintenance(action, on: table)
+                        }
+                    },
+                    onRefreshMatView: { table, concurrently in
+                        Task {
+                            _ = await AdminActions.refreshMaterializedView(
+                                schema: table.schema, name: table.name,
+                                concurrently: concurrently, service: service
+                            )
+                        }
+                    },
+                    onEditComments: { table in
+                        commentsTarget = CommentsTarget(schema: table.schema, table: table.name)
+                    },
+                    onRenameSchema: { name in
+                        renameSchemaTarget = IdentifiedString(id: name)
+                    },
+                    onDropSchema: { name in
+                        dropSchemaTarget = IdentifiedString(id: name)
+                    },
+                    onCreateSchema: { showCreateSchema = true }
                 )
             case .loading, .idle:
                 VStack(spacing: Tokens.Spacing.sm) {
@@ -449,6 +618,11 @@ struct ConnectionWindowContent: View {
                 Button("Diff schemas…") { showSchemaDiff = true }
                 Button("Activity…") { showActivityPanel = true }
                 Button("Query history…") { showQueryHistory = true }
+                Button("Sequences…") { showSequenceInspector = true }
+                Button("LISTEN / NOTIFY…") { showNotifyPanel = true }
+                Button("Snippets…") { showSnippets = true }
+                Divider()
+                Button("New schema…") { showCreateSchema = true }
                 Divider()
                 Menu("Workspaces") {
                     Button("Save current as workspace…") {

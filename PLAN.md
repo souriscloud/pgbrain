@@ -360,6 +360,23 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓. App launched, SSH tunnel tested against localhost, find bar + bracket pair + auto-indent live, query history records and re-inserts, activity Locks + Indexes tabs populated against a live DB, JSON import round-tripped, column widths survive relaunch, diff-last-two pops the correct delta.
 
+### Iter 19 — DBA round: maintenance, schema admin, sequences, diagnostics, snippets (2026-05-28)
+**Goal**: cover the next set of "things a Postgres user does outside a query editor" — VACUUM / ANALYZE / REINDEX, schema CRUD, materialised view refresh, sequences, table & column comments, pg_stat_statements, size dashboard, LISTEN / NOTIFY, snippets, and per-column distinct values.
+
+- **AdminActions** (`Sources/pgBrain/Query/AdminActions.swift`) — central wrapper for every "user clicked a button and we ran admin SQL" path. Operations all flow through `OperationsCenter` so they appear in the running-ops popover with a Cancel button. Identifiers wrapped through `SQLIdent.quote`, literals escaped via apostrophe-doubling.
+- **Sidebar context menus** — separated by node kind: database/schema/table. Schema rows get *New schema… / Rename schema… / Drop schema…*; tables get *Show Structure / Show CREATE SQL / Edit comments… / Maintenance ▸ (VACUUM, VACUUM ANALYZE, VACUUM FULL, ANALYZE, REINDEX) / Copy / Export / Import*; materialized views additionally get *Refresh / Refresh CONCURRENTLY*.
+- **Schema CRUD sheets** (`SchemaAdminDialogs.swift`) — CREATE / RENAME / DROP. Drop dialog requires retyping the schema name + an explicit CASCADE toggle; on success each sheet calls `loadSchema()` so the sidebar refreshes.
+- **Comments editor** (`CommentsEditorSheet.swift`) — sheet with table comment + per-column rows. Loads via `TableInspector.fetch`, diffs the user's edits on save, only fires `COMMENT ON TABLE/COLUMN` for what actually changed.
+- **pg_stat_statements pane** (`StatementStats.swift` + new Activity tab) — top-N slow queries, sortable by total / mean / calls / rows. Probes for the extension before querying; if absent shows a CREATE EXTENSION hint. Reset button calls `pg_stat_statements_reset()`.
+- **Size dashboard** (`SizeStats.swift` + new Activity tab) — `pg_database_size` headline, top tables by `pg_total_relation_size`, top indexes by `pg_relation_size`. Single concurrent fetch.
+- **Sequence inspector** (`SequenceFetcher.swift` + `SequenceInspectorView.swift`) — every user sequence from `pg_sequences`, joined to `pg_depend` for the owning identity column. Per-row actions: `nextval`, `setval N`, `ALTER SEQUENCE … RESTART WITH N`. Re-fetches after every action so `last_value` reflects what just happened.
+- **LISTEN / NOTIFY pane** (`NotifyPanelView.swift`) — sheet with channel input, Listen/Stop button, scrolling event table, NOTIFY composer. Live subscription holds one pool connection open via `client.withConnection { conn.listen(on:) { … } }`; teardown on Stop or sheet close releases it.
+- **Snippets library** (`SnippetStore.swift` + `SnippetsView.swift`) — JSON-backed at AppSupport/snippets.json. List + editor sheet with Insert-into-scratchpad button. Placeholders `$cursor$` (caret target) and `$1$` (first tab-stop) are resolved at insertion time. Scratchpad context menu gains *Save selection as snippet…* + *Insert snippet ▸ <name>*.
+- **Distinct values popover** (`DistinctValuesPopover.swift`) — data-grid cell-context menu gets *Distinct values for X…*. Pops a popover that runs `SELECT col, COUNT(*) GROUP BY 1 ORDER BY 2 DESC LIMIT 100` (respecting the active WHERE) plus a separate `COUNT(DISTINCT col)` for the total. Tapping a row folds `col = value` into the WHERE strip.
+- **Command palette** — gains *Sequences…*, *LISTEN / NOTIFY…*, *Snippets…*.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launched. Maintenance ANALYZE round-tripped, schema create/drop round-tripped, sequences pane lists + nextvals, NOTIFY/LISTEN round-trips, snippets save+insert+expand cursor placeholder.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

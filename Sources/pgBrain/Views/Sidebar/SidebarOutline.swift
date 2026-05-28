@@ -94,6 +94,20 @@ struct SidebarOutlineView: NSViewRepresentable {
     var onImportInto: ((TableNode) -> Void)? = nil
     var onShowStructure: ((TableNode) -> Void)? = nil
     var onShowDDL: ((TableNode) -> Void)? = nil
+    /// VACUUM / ANALYZE / REINDEX — runs immediately for safe actions,
+    /// confirms for destructive ones. Receiver is responsible for the
+    /// confirmation flow.
+    var onMaintenance: ((TableNode, AdminActions.Maintenance) -> Void)? = nil
+    /// REFRESH MATERIALIZED VIEW [CONCURRENTLY]. Only offered on
+    /// materialized views.
+    var onRefreshMatView: ((TableNode, Bool) -> Void)? = nil
+    /// Open the comments editor sheet for this table.
+    var onEditComments: ((TableNode) -> Void)? = nil
+    /// Schema-level: rename, drop. Receiver pops a confirmation sheet.
+    var onRenameSchema: ((String) -> Void)? = nil
+    var onDropSchema: ((String) -> Void)? = nil
+    /// Database-level: create a new schema.
+    var onCreateSchema: (() -> Void)? = nil
 
     @MainActor
     final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
@@ -101,11 +115,17 @@ struct SidebarOutlineView: NSViewRepresentable {
         var filteredRoot: SidebarNode?  // non-nil = filter mode
         var index: SchemaIndex
         let onOpenTable: (TableNode) -> Void
-        let onCopyTable: ((TableNode) -> Void)?
-        let onExportTable: ((TableNode) -> Void)?
-        let onImportInto: ((TableNode) -> Void)?
-        let onShowStructure: ((TableNode) -> Void)?
-        let onShowDDL: ((TableNode) -> Void)?
+        var onCopyTable: ((TableNode) -> Void)?
+        var onExportTable: ((TableNode) -> Void)?
+        var onImportInto: ((TableNode) -> Void)?
+        var onShowStructure: ((TableNode) -> Void)?
+        var onShowDDL: ((TableNode) -> Void)?
+        var onMaintenance: ((TableNode, AdminActions.Maintenance) -> Void)?
+        var onRefreshMatView: ((TableNode, Bool) -> Void)?
+        var onEditComments: ((TableNode) -> Void)?
+        var onRenameSchema: ((String) -> Void)?
+        var onDropSchema: ((String) -> Void)?
+        var onCreateSchema: (() -> Void)?
 
         var activeRoot: SidebarNode { filteredRoot ?? root }
 
@@ -157,9 +177,53 @@ struct SidebarOutlineView: NSViewRepresentable {
         }
 
         func menu(forRow row: Int, in outline: NSOutlineView) -> NSMenu? {
-            guard let node = outline.item(atRow: row) as? SidebarNode,
-                  let table = node.openableTable
-            else { return nil }
+            guard let node = outline.item(atRow: row) as? SidebarNode else { return nil }
+            switch node.kind {
+            case .database:
+                return databaseMenu()
+            case .schema(let name):
+                return schemaMenu(name: name)
+            case .table(let table):
+                return tableMenu(for: table)
+            case .columns, .column:
+                return nil
+            }
+        }
+
+        private func databaseMenu() -> NSMenu? {
+            guard onCreateSchema != nil else { return nil }
+            let menu = NSMenu()
+            let new = NSMenuItem(title: "New schema…", action: #selector(handleCreateSchema(_:)), keyEquivalent: "")
+            new.target = self
+            menu.addItem(new)
+            return menu
+        }
+
+        private func schemaMenu(name: String) -> NSMenu? {
+            guard onRenameSchema != nil || onDropSchema != nil || onCreateSchema != nil else { return nil }
+            let menu = NSMenu()
+            if onCreateSchema != nil {
+                let new = NSMenuItem(title: "New schema…", action: #selector(handleCreateSchema(_:)), keyEquivalent: "")
+                new.target = self
+                menu.addItem(new)
+            }
+            if onRenameSchema != nil {
+                let rename = NSMenuItem(title: "Rename schema…", action: #selector(handleRenameSchema(_:)), keyEquivalent: "")
+                rename.target = self
+                rename.representedObject = name
+                menu.addItem(rename)
+            }
+            if onDropSchema != nil {
+                menu.addItem(.separator())
+                let drop = NSMenuItem(title: "Drop schema…", action: #selector(handleDropSchema(_:)), keyEquivalent: "")
+                drop.target = self
+                drop.representedObject = name
+                menu.addItem(drop)
+            }
+            return menu
+        }
+
+        private func tableMenu(for table: TableNode) -> NSMenu {
             let menu = NSMenu()
             let open = NSMenuItem(title: "Open in tab", action: #selector(handleOpen(_:)), keyEquivalent: "")
             open.target = self
@@ -176,6 +240,43 @@ struct SidebarOutlineView: NSViewRepresentable {
                 ddl.target = self
                 ddl.representedObject = table
                 menu.addItem(ddl)
+            }
+            if onEditComments != nil {
+                let cm = NSMenuItem(title: "Edit comments…", action: #selector(handleEditComments(_:)), keyEquivalent: "")
+                cm.target = self
+                cm.representedObject = table
+                menu.addItem(cm)
+            }
+            // Maintenance bloc — tables + matviews only.
+            if onMaintenance != nil, table.kind != .view {
+                menu.addItem(.separator())
+                let maint = NSMenuItem(title: "Maintenance", action: nil, keyEquivalent: "")
+                let sub = NSMenu()
+                for action in AdminActions.Maintenance.allCases {
+                    let item = NSMenuItem(
+                        title: action.label,
+                        action: #selector(handleMaintenance(_:)),
+                        keyEquivalent: ""
+                    )
+                    item.target = self
+                    item.representedObject = MaintenancePayload(table: table, action: action)
+                    item.toolTip = action.help
+                    sub.addItem(item)
+                }
+                maint.submenu = sub
+                menu.addItem(maint)
+            }
+            // Materialized view refresh.
+            if onRefreshMatView != nil, table.kind == .materializedView {
+                let refresh = NSMenuItem(title: "Refresh", action: #selector(handleRefreshMV(_:)), keyEquivalent: "")
+                refresh.target = self
+                refresh.representedObject = RefreshPayload(table: table, concurrently: false)
+                menu.addItem(refresh)
+                let refreshC = NSMenuItem(title: "Refresh CONCURRENTLY", action: #selector(handleRefreshMV(_:)), keyEquivalent: "")
+                refreshC.target = self
+                refreshC.representedObject = RefreshPayload(table: table, concurrently: true)
+                refreshC.toolTip = "Requires a unique index on the matview. Fails otherwise."
+                menu.addItem(refreshC)
             }
             menu.addItem(.separator())
             if onCopyTable != nil {
@@ -197,6 +298,33 @@ struct SidebarOutlineView: NSViewRepresentable {
                 menu.addItem(imp)
             }
             return menu
+        }
+
+        private struct MaintenancePayload { let table: TableNode; let action: AdminActions.Maintenance }
+        private struct RefreshPayload { let table: TableNode; let concurrently: Bool }
+
+        @objc private func handleMaintenance(_ sender: NSMenuItem) {
+            guard let p = sender.representedObject as? MaintenancePayload else { return }
+            onMaintenance?(p.table, p.action)
+        }
+        @objc private func handleRefreshMV(_ sender: NSMenuItem) {
+            guard let p = sender.representedObject as? RefreshPayload else { return }
+            onRefreshMatView?(p.table, p.concurrently)
+        }
+        @objc private func handleEditComments(_ sender: NSMenuItem) {
+            guard let table = sender.representedObject as? TableNode else { return }
+            onEditComments?(table)
+        }
+        @objc private func handleRenameSchema(_ sender: NSMenuItem) {
+            guard let name = sender.representedObject as? String else { return }
+            onRenameSchema?(name)
+        }
+        @objc private func handleDropSchema(_ sender: NSMenuItem) {
+            guard let name = sender.representedObject as? String else { return }
+            onDropSchema?(name)
+        }
+        @objc private func handleCreateSchema(_ sender: NSMenuItem) {
+            onCreateSchema?()
         }
 
         @objc private func handleOpen(_ sender: NSMenuItem) {
@@ -279,7 +407,7 @@ struct SidebarOutlineView: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(
+        let coord = Coordinator(
             root: SidebarNode.build(from: snapshot),
             index: SchemaIndex(snapshot: snapshot),
             onOpenTable: onOpenTable,
@@ -289,6 +417,22 @@ struct SidebarOutlineView: NSViewRepresentable {
             onShowStructure: onShowStructure,
             onShowDDL: onShowDDL
         )
+        propagateExtra(to: coord)
+        return coord
+    }
+
+    private func propagateExtra(to coord: Coordinator) {
+        coord.onCopyTable = onCopyTable
+        coord.onExportTable = onExportTable
+        coord.onImportInto = onImportInto
+        coord.onShowStructure = onShowStructure
+        coord.onShowDDL = onShowDDL
+        coord.onMaintenance = onMaintenance
+        coord.onRefreshMatView = onRefreshMatView
+        coord.onEditComments = onEditComments
+        coord.onRenameSchema = onRenameSchema
+        coord.onDropSchema = onDropSchema
+        coord.onCreateSchema = onCreateSchema
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -334,6 +478,7 @@ struct SidebarOutlineView: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let outline = scroll.documentView as? NSOutlineView else { return }
+        propagateExtra(to: context.coordinator)
         // Snapshot changed?
         if !snapshotMatchesIndex(context.coordinator.index, snapshot: snapshot) {
             context.coordinator.root = SidebarNode.build(from: snapshot)

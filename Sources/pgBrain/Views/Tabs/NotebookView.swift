@@ -728,6 +728,26 @@ final class SqlCellNSTextView: NSTextView {
         explain.target = self
         menu.addItem(explain)
 
+        // Snippets bloc.
+        menu.addItem(.separator())
+        let saveSnippet = NSMenuItem(title: "Save selection as snippet…", action: #selector(saveSelectionAsSnippet(_:)), keyEquivalent: "")
+        saveSnippet.target = self
+        saveSnippet.isEnabled = selectedRange().length > 0 || !string.isEmpty
+        menu.addItem(saveSnippet)
+        let allSnippets = SnippetStore.shared.snippets
+        if !allSnippets.isEmpty {
+            let insertMenu = NSMenuItem(title: "Insert snippet", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            for snip in allSnippets {
+                let item = NSMenuItem(title: snip.name, action: #selector(insertSnippetMenu(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = snip.id
+                sub.addItem(item)
+            }
+            insertMenu.submenu = sub
+            menu.addItem(insertMenu)
+        }
+
         // SQL-specific block, only when we can resolve something.
         let snapshot = schemaProvider.flatMap { $0() }
         if let ident = identifier,
@@ -769,6 +789,51 @@ final class SqlCellNSTextView: NSTextView {
         guard let info = sender.representedObject as? String else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(info, forType: .string)
+    }
+
+    @objc private func saveSelectionAsSnippet(_ sender: Any?) {
+        let sel = selectedRange()
+        let ns = string as NSString
+        let body: String
+        if sel.length > 0 {
+            body = ns.substring(with: sel)
+        } else {
+            body = self.string
+        }
+        guard !body.isEmpty else { return }
+        // Pop a tiny modal alert for the name — sidesteps having to
+        // route through ConnectionWindowContent for a one-shot dialog.
+        let alert = NSAlert()
+        alert.messageText = "Save snippet"
+        alert.informativeText = "Name this snippet so you can find it later."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(string: "")
+        field.placeholderString = "snippet name"
+        field.frame = NSRect(x: 0, y: 0, width: 240, height: 24)
+        alert.accessoryView = field
+        if alert.runModal() == .alertFirstButtonReturn {
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                SnippetStore.shared.add(name: name, body: body)
+            }
+        }
+    }
+
+    @objc private func insertSnippetMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID,
+              let snip = SnippetStore.shared.snippets.first(where: { $0.id == id })
+        else { return }
+        let expanded = SnippetStore.expand(snip.body)
+        let sel = selectedRange()
+        if shouldChangeText(in: sel, replacementString: expanded.text) {
+            textStorage?.replaceCharacters(in: sel, with: expanded.text)
+            didChangeText()
+            // Place the caret at the resolved $cursor$ offset (relative
+            // to the insertion start).
+            let insertStart = sel.location
+            setSelectedRange(NSRange(location: insertStart + expanded.caret, length: 0))
+        }
     }
 
     /// Resolve the statement under the caret (or selection) and ask

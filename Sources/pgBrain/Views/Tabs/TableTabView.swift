@@ -7,6 +7,12 @@ import PostgresNIO
 /// edit buffer, and switches between loading / error / loaded grid states.
 /// A segmented picker switches between Data (the row grid), Structure
 /// (columns + constraints + indexes), and DDL (`CREATE TABLE …`).
+/// Identifiable wrapper used to drive the distinct-values popover off
+/// `.popover(item:)`. A plain String can't be Identifiable directly.
+struct ColumnNameID: Identifiable, Hashable {
+    let id: String
+}
+
 struct TableTabView: View {
     let table: TableNode
     let tab: WorkspaceState.Tab
@@ -17,6 +23,7 @@ struct TableTabView: View {
     @State private var showApplyErrorPopover = false
     @State private var pane: WorkspaceState.TablePane = .data
     @State private var showFindBar = false
+    @State private var distinctValuesColumn: ColumnNameID?
     @FocusState private var findFocused: Bool
 
     init(table: TableNode, tab: WorkspaceState.Tab, service: ConnectionService) {
@@ -586,6 +593,21 @@ struct TableTabView: View {
         Task { await loader.load() }
     }
 
+    /// Picking a row in the Distinct Values popover folds it into the
+    /// active WHERE clause. We need the column's PG type to produce
+    /// the right literal so we look it up on the loaded page.
+    private func applyDistinctFilter(column: String, value: String?) {
+        guard case .loaded(let page) = loader.state,
+              let col = page.columns.first(where: { $0.name == column })
+        else { return }
+        let fragment: String = {
+            if value == nil { return "\(SQLIdent.quote(column)) IS NULL" }
+            let lit = sqlLiteral(value, typeName: col.typeName)
+            return "\(SQLIdent.quote(column)) = \(lit)"
+        }()
+        appendToWhere(fragment)
+    }
+
     /// Serialise the current row selection (or all visible rows if
     /// nothing's selected) as either GitHub-flavoured Markdown table
     /// or a Slack-style ``` block with tab-separated columns.
@@ -810,8 +832,23 @@ struct TableTabView: View {
                             onCommandClickCell: { row, col in
                                 navigateForeignKey(row: row, col: col)
                             },
+                            onShowColumnDistinct: { col in
+                                distinctValuesColumn = ColumnNameID(id: col)
+                            },
                             columnLayoutKey: (service.connection.id, table.schema, table.name)
                         )
+                        .popover(item: $distinctValuesColumn, arrowEdge: .top) { colName in
+                            DistinctValuesPopover(
+                                service: service,
+                                schema: table.schema,
+                                table: table.name,
+                                column: colName.id,
+                                extraWhere: loader.filter.whereClause
+                            ) { value in
+                                applyDistinctFilter(column: colName.id, value: value)
+                                distinctValuesColumn = nil
+                            }
+                        }
                         pagerStrip(visible: visible)
                     }
                 }
