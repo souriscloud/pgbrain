@@ -221,9 +221,14 @@ struct NotebookView: View {
         panel.allowedContentTypes = [UTType(filenameExtension: "sql") ?? .plainText, .plainText]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url,
-              let text = try? String(contentsOf: url, encoding: .utf8)
-        else { return }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let text: String
+        do {
+            text = try String(contentsOf: url, encoding: .utf8)
+        } catch {
+            service.toasts.show(.error, "Couldn't open \(url.lastPathComponent) — \(error.localizedDescription)")
+            return
+        }
         // Reuse the first empty SQL cell if there is one, else append.
         if let empty = notebook.cells.first(where: { $0.kind == .sql && $0.text.isEmpty }) {
             empty.text = text
@@ -241,7 +246,12 @@ struct NotebookView: View {
         panel.nameFieldStringValue = "\(notebook.title).sql"
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        try? notebook.plainText.write(to: url, atomically: true, encoding: .utf8)
+        do {
+            try notebook.plainText.write(to: url, atomically: true, encoding: .utf8)
+            service.toasts.show(.success, "Saved \(url.lastPathComponent)")
+        } catch {
+            service.toasts.show(.error, "Couldn't save \(url.lastPathComponent) — \(error.localizedDescription)")
+        }
     }
 
     /// Find the two most-recent successful results in the notebook
@@ -286,7 +296,7 @@ private struct CellRow: View {
                         isRunning: notebook.runningCellID == cell.id,
                         focusedCellID: $focusedCellID)
         case .result(let resultID):
-            ResultCellView(resultID: resultID, notebook: notebook)
+            ResultCellView(resultID: resultID, notebook: notebook, toasts: service.toasts)
         }
     }
 }
@@ -1031,6 +1041,7 @@ final class SqlCellNSTextView: NSTextView {
 /// reuse the same `RowsFetcher.Page` — no extra fetch.
 private struct ResultGridWithViews: View {
     let page: RowsFetcher.Page
+    let toasts: ToastCenter
     @State private var showPivot = false
     @State private var showChart = false
 
@@ -1039,7 +1050,24 @@ private struct ResultGridWithViews: View {
             // Thin toolbar above the grid so the buttons never cover
             // the top-right data cells.
             HStack(spacing: 8) {
+                Text("\(page.rows.count) row\(page.rows.count == 1 ? "" : "s")\(page.truncated ? "+" : "") · \(page.columns.count) col\(page.columns.count == 1 ? "" : "s")")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 Spacer()
+                Menu {
+                    ForEach(ClipboardCopy.Format.allCases) { fmt in
+                        Button(fmt.menuLabel) {
+                            let n = ClipboardCopy.copy(page, as: fmt)
+                            toasts.show(.success, "Copied \(n) row\(n == 1 ? "" : "s") as \(fmt.menuLabel)")
+                        }
+                    }
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc").font(.caption2)
+                }
+                .menuStyle(.borderlessButton)
+                .controlSize(.mini)
+                .fixedSize()
+                .help("Copy this result to the clipboard")
                 Button {
                     showPivot = true
                 } label: {
@@ -1075,10 +1103,11 @@ private struct ResultGridWithViews: View {
 private struct ResultCellView: View {
     let resultID: UUID
     @Bindable var notebook: Notebook
+    let toasts: ToastCenter
 
     var body: some View {
         if let result = notebook.result(id: resultID) {
-            ResultBody(result: result, notebook: notebook)
+            ResultBody(result: result, notebook: notebook, toasts: toasts)
         } else {
             EmptyView()
         }
@@ -1088,6 +1117,7 @@ private struct ResultCellView: View {
 private struct ResultBody: View {
     @Bindable var result: NotebookResult
     let notebook: Notebook
+    let toasts: ToastCenter
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1168,7 +1198,7 @@ private struct ResultBody: View {
                 }
                 .padding(10)
             } else {
-                ResultGridWithViews(page: q.page)
+                ResultGridWithViews(page: q.page, toasts: toasts)
             }
         case .failure(let message):
             HStack(alignment: .top, spacing: 8) {

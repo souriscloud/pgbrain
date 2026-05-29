@@ -395,6 +395,13 @@ enum AdminActions {
         )
     }
 
+    /// Run an arbitrary statement as a tracked `.update` operation. Used by
+    /// the data grid's row-delete action; success/failure surface through the
+    /// usual operation → toast path.
+    static func execute(_ sql: String, summary: String, service: ConnectionService) async -> Result<Void, Error> {
+        await runDDL(sql, summary: summary, service: service)
+    }
+
     // MARK: - Internals
 
     private static func runDDL(_ sql: String, summary: String, service: ConnectionService) async -> Result<Void, Error> {

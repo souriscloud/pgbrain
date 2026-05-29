@@ -81,6 +81,11 @@ final class OperationsCenter {
 
     private(set) var operations: [Operation] = []
 
+    /// Fired every time an operation reaches a terminal status. Wired by
+    /// `ConnectionService` to flash a toast — keeps this type decoupled from
+    /// the toast presentation layer.
+    @ObservationIgnored var onFinish: ((Operation) -> Void)?
+
     var runningCount: Int {
         operations.lazy.filter { !$0.isFinished }.count
     }
@@ -101,6 +106,7 @@ final class OperationsCenter {
         if op.elapsed > 30, NSApp.isActive == false {
             LongQueryNotifier.notify(operation: op)
         }
+        onFinish?(op)
     }
 
     /// User-initiated cancellation from the popover. Fires the cancel handler

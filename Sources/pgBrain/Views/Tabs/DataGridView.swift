@@ -58,6 +58,12 @@ struct DataGridView: NSViewRepresentable {
     /// `SELECT col, COUNT(*) GROUP BY 1 ORDER BY 2 DESC` and pops a
     /// list. Nil hides the menu entry (scratchpad result grids etc.).
     var onShowColumnDistinct: ((String) -> Void)? = nil
+    /// Profile a column (counts, nulls, distinct, min/max/avg). Nil hides
+    /// the menu entry on grids without a backing table (scratchpad results).
+    var onProfileColumn: ((String) -> Void)? = nil
+    /// Delete the given source-row indices. Nil hides the menu entry
+    /// (read-only grids — scratchpad results, no edit buffer).
+    var onDeleteRows: (([Int]) -> Void)? = nil
     /// `(connectionID, schema, table)` for the column-layout store
     /// keying. Nil disables persisted widths (e.g. for scratchpad
     /// result grids that don't have a stable table identity).
@@ -80,6 +86,8 @@ struct DataGridView: NSViewRepresentable {
         var onCopyAsSlack: (() -> Void)?
         var onCommandClickCell: ((Int, Int) -> Void)?
         var onShowColumnDistinct: ((String) -> Void)?
+        var onProfileColumn: ((String) -> Void)?
+        var onDeleteRows: (([Int]) -> Void)?
         var columnLayoutKey: (UUID, String, String)?
 
         @objc func columnDidResize(_ notification: Notification) {
@@ -363,6 +371,18 @@ struct DataGridView: NSViewRepresentable {
                 menu.addItem(item)
             }
 
+            if onProfileColumn != nil {
+                if onShowColumnDistinct == nil { menu.addItem(.separator()) }
+                let item = NSMenuItem(
+                    title: "Profile column \(column.name)…",
+                    action: #selector(handleProfileColumn(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = column.name
+                menu.addItem(item)
+            }
+
             // Filter-to-value bloc. Available regardless of edit
             // buffer — these write to the WHERE strip, no PK needed.
             if onFilterEqualsCell != nil || onFilterColumn != nil {
@@ -440,6 +460,20 @@ struct DataGridView: NSViewRepresentable {
                     menu.addItem(setNull)
                 }
             }
+
+            // Destructive: delete the right-clicked row, or the whole
+            // selection if the clicked row is part of a multi-row selection.
+            if onDeleteRows != nil {
+                let selected = tableView?.selectedRowIndexes ?? []
+                let targetsVisible: [Int] = selected.contains(visibleRow) ? Array(selected) : [visibleRow]
+                let sourceRows = targetsVisible.map { sourceIndex(forVisibleRow: $0) }
+                menu.addItem(.separator())
+                let title = sourceRows.count == 1 ? "Delete row…" : "Delete \(sourceRows.count) rows…"
+                let del = NSMenuItem(title: title, action: #selector(handleDeleteRows(_:)), keyEquivalent: "")
+                del.target = self
+                del.representedObject = sourceRows
+                menu.addItem(del)
+            }
             return menu
         }
 
@@ -507,6 +541,16 @@ struct DataGridView: NSViewRepresentable {
         @objc private func handleDistinctValues(_ sender: NSMenuItem) {
             guard let name = sender.representedObject as? String else { return }
             onShowColumnDistinct?(name)
+        }
+
+        @objc private func handleProfileColumn(_ sender: NSMenuItem) {
+            guard let name = sender.representedObject as? String else { return }
+            onProfileColumn?(name)
+        }
+
+        @objc private func handleDeleteRows(_ sender: NSMenuItem) {
+            guard let rows = sender.representedObject as? [Int] else { return }
+            onDeleteRows?(rows)
         }
 
         /// When the buffer has a pending edit for the source row, show it
@@ -676,6 +720,8 @@ struct DataGridView: NSViewRepresentable {
         coordinator.onCopyAsSlack = onCopyAsSlack
         coordinator.onCommandClickCell = onCommandClickCell
         coordinator.onShowColumnDistinct = onShowColumnDistinct
+        coordinator.onProfileColumn = onProfileColumn
+        coordinator.onDeleteRows = onDeleteRows
         coordinator.columnLayoutKey = columnLayoutKey
     }
 

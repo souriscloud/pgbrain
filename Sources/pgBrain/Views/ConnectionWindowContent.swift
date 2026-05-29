@@ -104,6 +104,7 @@ struct ConnectionWindowContent: View {
             }
             mainArea
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay { ToastOverlay(center: service.toasts) }
             Divider()
             StatusFooter(service: service)
         }
@@ -826,22 +827,16 @@ struct ConnectionWindowContent: View {
         let tracker = service.operations
         Task {
             do {
-                _ = try await PgDumpCLI.dump(
+                let result = try await PgDumpCLI.dump(
                     connection: conn,
                     password: password,
                     format: format,
                     destination: url
                 )
+                op.summary += " · \(ByteCountFormatter.string(fromByteCount: Int64(result.bytesWritten), countStyle: .file))"
                 tracker.finish(op, status: .succeeded)
             } catch {
                 tracker.finish(op, status: .failed(error.localizedDescription))
-                await MainActor.run {
-                    let alert = NSAlert()
-                    alert.messageText = "pg_dump failed"
-                    alert.informativeText = error.localizedDescription
-                    alert.alertStyle = .warning
-                    alert.runModal()
-                }
             }
         }
     }

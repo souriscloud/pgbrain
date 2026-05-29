@@ -52,9 +52,11 @@ struct ERDView: View {
             Spacer()
             Button { scale = max(0.4, scale - 0.1) } label: { Image(systemName: "minus.magnifyingglass") }
                 .buttonStyle(.borderless)
+                .help("Zoom out")
             Text("\(Int(scale * 100))%").font(.caption.monospaced()).foregroundStyle(.secondary).frame(width: 44)
             Button { scale = min(2.0, scale + 0.1) } label: { Image(systemName: "plus.magnifyingglass") }
                 .buttonStyle(.borderless)
+                .help("Zoom in")
             Button("Reset layout") { positions = [:]; layoutIfNeeded(force: true) }
                 .buttonStyle(.borderless)
             Button("Close", action: onClose).keyboardShortcut(.cancelAction)

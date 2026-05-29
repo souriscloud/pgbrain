@@ -25,6 +25,9 @@ JetBrains tools are powerful but feel like a Java app glued to your menu bar. Th
 - 🔎 **Filter, sort, paginate.** WHERE/ORDER BY strip with autocomplete, sortable headers, keyset-friendly paging, filter-to-cell, distinct-values popover per column, FK ⌘-click navigation.
 - 📊 **Pivot & chart.** Pivot any result (row/col/value + agg) or chart it (bar/line/point) without leaving the result block.
 - 🪄 **Generate test data.** Per-column strategies → one `INSERT … SELECT generate_series` with a live SQL preview.
+- 🧮 **Column profiler.** Right-click any column → rows / nulls (with a populated bar) / distinct / min·max·avg, scoped to your active filter.
+- 🗑️ **Delete rows.** Right-click one or a multi-selection → a primary-key-keyed `DELETE` behind a confirmation. Refuses tables without a PK.
+- 📑 **Copy as…** Markdown, JSON, TSV (paste into spreadsheets), or CSV — from any result block or the table grid.
 
 ### The notebook scratchpad
 - 📝 **Inline results.** SQL and result widgets in one flowing document. Cmd+⏎ runs the statement under your caret; the result inlines right after it. JetBrains feel, Jupyter ergonomics.

@@ -31,6 +31,8 @@ struct TableTabView: View {
     @State private var pane: WorkspaceState.TablePane = .data
     @State private var showFindBar = false
     @State private var distinctValuesColumn: ColumnNameID?
+    @State private var profileColumn: ColumnNameID?
+    @State private var pendingDelete: PendingRowDelete?
     @State private var rowViewMode: RowViewMode = .grid
     @State private var formRowIndex = 0
 
@@ -216,6 +218,17 @@ struct TableTabView: View {
                         }
                     }
                 }
+                if case .loaded(let page) = loader.state, !page.rows.isEmpty {
+                    Divider()
+                    Menu("Copy visible page to clipboard") {
+                        ForEach(ClipboardCopy.Format.allCases) { fmt in
+                            Button(fmt.menuLabel) {
+                                let n = ClipboardCopy.copy(page, as: fmt)
+                                service.toasts.show(.success, "Copied \(rowsLabel(n)) as \(fmt.menuLabel)")
+                            }
+                        }
+                    }
+                }
                 Divider()
                 Button("Import CSV into this table…", action: importCSV)
                 Button("Import JSON into this table…", action: importJSON)
@@ -246,7 +259,7 @@ struct TableTabView: View {
         let opID = op.id
         Task {
             do {
-                _ = try await Exporter.exportTable(
+                let stats = try await Exporter.exportTable(
                     table,
                     format: format,
                     destination: url,
@@ -254,6 +267,7 @@ struct TableTabView: View {
                     tracker: tracker,
                     operationID: opID
                 )
+                op.summary += " · \(rowsLabel(stats.rowsWritten))"
                 tracker.finish(op, status: .succeeded)
             } catch is CancellationError {
                 tracker.finish(op, status: .cancelled)
@@ -268,9 +282,20 @@ struct TableTabView: View {
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = "\(table.schema).\(table.name)_page.\(format.fileExtension)"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = try? Exporter.exportPage(page, format: format, destination: url, tableNameHint: table.name)
+        let op = service.operations.begin(kind: .export, summary: "Export result → \(url.lastPathComponent)")
+        do {
+            let stats = try Exporter.exportPage(page, format: format, destination: url, tableNameHint: table.name)
+            op.summary += " · \(rowsLabel(stats.rowsWritten))"
+            service.operations.finish(op, status: .succeeded)
+        } catch {
+            service.operations.finish(op, status: .failed(error.localizedDescription))
         }
+    }
+
+    /// "1 row" / "1,234 rows" with grouping separators.
+    private func rowsLabel(_ n: Int) -> String {
+        let formatted = NumberFormatter.localizedString(from: NSNumber(value: n), number: .decimal)
+        return "\(formatted) row\(n == 1 ? "" : "s")"
     }
 
     private func importCSV() {
@@ -287,13 +312,14 @@ struct TableTabView: View {
         let opID = op.id
         Task {
             do {
-                _ = try await Importer.importCSV(
+                let stats = try await Importer.importCSV(
                     into: table,
                     from: url,
                     client: client,
                     tracker: tracker,
                     operationID: opID
                 )
+                op.summary += " · \(rowsLabel(stats.rowsImported))"
                 tracker.finish(op, status: .succeeded)
                 await loader.load()
             } catch is CancellationError {
@@ -318,13 +344,14 @@ struct TableTabView: View {
         let opID = op.id
         Task {
             do {
-                _ = try await Importer.importJSON(
+                let stats = try await Importer.importJSON(
                     into: table,
                     from: url,
                     client: client,
                     tracker: tracker,
                     operationID: opID
                 )
+                op.summary += " · \(rowsLabel(stats.rowsImported))"
                 tracker.finish(op, status: .succeeded)
                 await loader.load()
             } catch is CancellationError {
@@ -684,6 +711,62 @@ struct TableTabView: View {
     /// Build SQL for a single source row and put it on the clipboard.
     /// The source row index is into `loader.state`'s underlying page,
     /// independent of any active filter.
+    /// A delete the user has asked for but not yet confirmed.
+    private struct PendingRowDelete: Identifiable {
+        let id = UUID()
+        let count: Int
+        let sql: String
+    }
+
+    /// Build the combined DELETE for the chosen source rows and stage a
+    /// confirmation. Requires a primary key — without one we can't target
+    /// the exact rows, so we refuse rather than risk a broad match.
+    private func requestDelete(sourceRows: [Int]) {
+        guard case .loaded(let page) = loader.state else { return }
+        guard !table.primaryKey.isEmpty else {
+            service.toasts.show(.error, "Can't delete — \(table.qualifiedName) has no primary key.")
+            return
+        }
+        guard let sql = buildDeleteSQL(sourceRows: sourceRows, page: page) else {
+            service.toasts.show(.error, "Couldn't build a delete for the selected rows.")
+            return
+        }
+        pendingDelete = PendingRowDelete(count: sourceRows.count, sql: sql)
+    }
+
+    /// `DELETE FROM t WHERE (pk… ) OR (pk…) …` — one OR-group per row,
+    /// keyed on the table's primary key. Returns nil if any selected row
+    /// is missing a PK value (shouldn't happen for a real PK, but we bail
+    /// safely rather than emit a partial predicate).
+    private func buildDeleteSQL(sourceRows: [Int], page: RowsFetcher.Page) -> String? {
+        let qualified = SQLIdent.qualified(schema: table.schema, name: table.name)
+        let cols = page.columns
+        var clauses: [String] = []
+        for r in sourceRows {
+            guard r >= 0, r < page.rows.count else { continue }
+            let row = page.rows[r]
+            let parts = table.primaryKey.compactMap { name -> String? in
+                guard let idx = cols.firstIndex(where: { $0.name == name }) else { return nil }
+                if row[idx] == nil { return "\(SQLIdent.quote(name)) IS NULL" }
+                return "\(SQLIdent.quote(name)) = \(sqlLiteral(row[idx], typeName: cols[idx].typeName))"
+            }
+            guard parts.count == table.primaryKey.count else { return nil }
+            clauses.append("(" + parts.joined(separator: " AND ") + ")")
+        }
+        guard !clauses.isEmpty else { return nil }
+        return "DELETE FROM \(qualified) WHERE \(clauses.joined(separator: " OR "))"
+    }
+
+    private func runDelete(_ req: PendingRowDelete) {
+        let summary = "DELETE \(table.qualifiedName) (\(req.count) row\(req.count == 1 ? "" : "s"))"
+        Task {
+            let result = await AdminActions.execute(req.sql, summary: summary, service: service)
+            if case .success = result {
+                await loader.load()
+            }
+        }
+    }
+
     private func copySQL(_ kind: RowSQLKind, for sourceRow: Int) {
         guard case .loaded(let page) = loader.state,
               sourceRow >= 0, sourceRow < page.rows.count
@@ -870,6 +953,12 @@ struct TableTabView: View {
                             onShowColumnDistinct: { col in
                                 distinctValuesColumn = ColumnNameID(id: col)
                             },
+                            onProfileColumn: { col in
+                                profileColumn = ColumnNameID(id: col)
+                            },
+                            onDeleteRows: { sourceRows in
+                                requestDelete(sourceRows: sourceRows)
+                            },
                             columnLayoutKey: (service.connection.id, table.schema, table.name)
                         )
                         .popover(item: $distinctValuesColumn, arrowEdge: .top) { colName in
@@ -883,6 +972,34 @@ struct TableTabView: View {
                                 applyDistinctFilter(column: colName.id, value: value)
                                 distinctValuesColumn = nil
                             }
+                        }
+                        .popover(item: $profileColumn, arrowEdge: .top) { colName in
+                            if let node = table.columns.first(where: { $0.name == colName.id }) {
+                                ColumnProfilePopover(
+                                    service: service,
+                                    schema: table.schema,
+                                    table: table.name,
+                                    column: node,
+                                    extraWhere: loader.filter.whereClause
+                                )
+                            }
+                        }
+                        .confirmationDialog(
+                            pendingDelete.map { "Delete \($0.count) row\($0.count == 1 ? "" : "s")?" } ?? "",
+                            isPresented: Binding(
+                                get: { pendingDelete != nil },
+                                set: { if !$0 { pendingDelete = nil } }
+                            ),
+                            titleVisibility: .visible,
+                            presenting: pendingDelete
+                        ) { req in
+                            Button("Delete", role: .destructive) {
+                                runDelete(req)
+                                pendingDelete = nil
+                            }
+                            Button("Cancel", role: .cancel) { pendingDelete = nil }
+                        } message: { req in
+                            Text("Permanently deletes \(req.count) row\(req.count == 1 ? "" : "s") from \(table.qualifiedName) by primary key. This can't be undone.")
                         }
                         pagerStrip(visible: visible)
                     }

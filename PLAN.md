@@ -421,6 +421,37 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launched. Still not exercised against a live DB — same caveat as iters 19–21.
 
+### Iter 23 — Polish: toast feedback + no-silent-failures (2026-05-29)
+**Goal**: nothing succeeds or fails silently. Before this, the only way to learn an export/import/dump/maintenance outcome was to open the operations popover, and a couple of file-IO paths swallowed errors entirely.
+
+- **`ToastCenter` + `ToastOverlay`** — per-connection queue of transient bottom-trailing toasts (success/error/info). Errors linger 6s, successes/info 3s; click to dismiss; material bubble with tinted border, capped at 380pt, selectable text. Overlaid on the workspace area, above the status footer.
+- **One wiring point covers the whole app** — `OperationsCenter.finish` gained an `onFinish` hook; `ConnectionService` wires it to a toast policy. *Failures and cancellations toast for every kind* (query, update, export, import, schema); *successes toast only for the notable actions* (export, import, update) — queries/schema fetches succeed constantly and would be noise. Server error messages are clipped to 160 chars in the toast; the popover keeps the full text.
+- **Silent file IO fixed** — notebook `.sql` save (was `try?`) now toasts "Saved X" / the error; `.sql` open surfaces a read error instead of doing nothing; result-block export (`exportPage`, was a fire-and-forget `try?` on a background queue) now registers a real operation so it toasts like every other export.
+- **Redundant modal removed** — `pg_dump` failure no longer pops an `NSAlert` on top of the toast; the toast + ops popover are the single channel.
+- **Tooltips** — added `.help()` to the icon-only row-form steppers (Previous/Next row) and ERD zoom in/out buttons.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches and stays up with the overlay mounted. Not yet released — sits on top of v0.6.0 pending the end-of-plan bump.
+
+### Iter 24 — Features: copy-as, column profiler, delete rows (2026-05-29)
+**Goal**: close real DataGrip-parity gaps that survived the earlier breadth rounds — verified against the seeded `pgbrain_demo` DB this time.
+
+- **Copy result as… (`ClipboardCopy.swift`)** — notebook result blocks gained a "Copy ▾" menu (Markdown table / JSON / TSV / CSV) plus a `N rows · M cols` badge in the toolbar. The notebook grid previously had *no* copy affordance (the table grid's rich copy menu was never wired to it). Confirms via toast: "Copied 42 rows as Markdown table". TSV pastes straight into spreadsheets; JSON is type-aware (numbers/bools/json unquoted).
+- **Column profiler (`ColumnProfiler.swift` + `ColumnProfilePopover.swift`)** — right-click any data cell → "Profile column …": rows, non-null, null (+ % and a populated-fraction bar), distinct (+ % and a "unique" callout), min/max, and avg for numerics. Honours the tab's active WHERE clause. One aggregate query; always projects six columns (NULL-casting min/max for json+bool and avg for non-numerics) so the decode shape is stable. **Verified across integer/jsonb/bool/text/array/timestamp** — which caught that Postgres has no `min(boolean)` aggregate (fixed: bool joins json on the no-min/max path).
+- **Delete rows from the grid** — right-click → "Delete row…" / "Delete N rows…" (operates on the multi-selection when the clicked row is part of it). Builds one `DELETE … WHERE (pk…) OR (pk…)` keyed on the primary key, behind a destructive confirmation; refuses with a toast when the table has no PK. Routes through `AdminActions.execute` → operation → toast, then reloads. Verified the generated predicate deletes exactly the selected rows (rolled back) against the demo DB.
+- Plumbed a `ToastCenter` reference down the notebook result-view chain; added `onProfileColumn` / `onDeleteRows` callbacks to `DataGridView` + coordinator.
+
+**Note**: the "commandTag for non-SELECT" open question below is already resolved — zero-column results render `q.commandTag` ("UPDATE 12"), with "OK" only as a nil fallback.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches; profiler + delete predicates exercised against `pgbrain_demo`. Not released — sits on v0.6.0 pending the end-of-plan bump.
+
+### Iter 25 — Polish #2: concrete operation feedback (2026-05-29)
+**Goal**: every data-moving operation should report *how much* it moved — the iter-23 toasts said "Export app.tasks → file.csv" but swallowed the row count the IO layer already computed.
+
+- **Row counts in toasts + ops popover** — export, result-block export, CSV/JSON import, and cross-DB copy now fold their `Stats` into the operation summary (`… · 1,234 rows`, grouped via `NumberFormatter`). pg_dump appends a human-readable file size (`… · 4.2 MB`) via `ByteCountFormatter`. The toast and the operations popover both read the enriched summary.
+- **Table grid Copy-as parity** — the import/export menu gained "Copy visible page to clipboard" (Markdown / JSON / TSV / CSV) so the table grid matches the notebook result block's copy affordance; confirms with a row-count toast.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

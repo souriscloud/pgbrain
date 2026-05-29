@@ -50,6 +50,7 @@ final class ConnectionService {
     }
     let workspace = WorkspaceState()
     let operations = OperationsCenter()
+    let toasts = ToastCenter()
 
     enum SchemaState: Sendable, Equatable {
         case idle, loading, loaded, error(String)
@@ -67,6 +68,34 @@ final class ConnectionService {
         workspace.onTabClosed = { [weak self] id in
             self?.loaderCache.removeValue(forKey: id)
             self?.inspectorCache.removeValue(forKey: id)
+        }
+        // Surface operation outcomes as toasts. Failures and cancellations
+        // toast for every kind; successes only for the "notable" actions —
+        // queries and schema fetches succeed constantly and would be noise.
+        operations.onFinish = { [weak self] op in
+            self?.emitToast(for: op)
+        }
+    }
+
+    private func emitToast(for op: OperationsCenter.Operation) {
+        switch op.status {
+        case .running:
+            break
+        case .succeeded:
+            switch op.kind {
+            case .export, .importJob, .update:
+                toasts.show(.success, op.summary)
+            case .query, .schema:
+                break
+            }
+        case .cancelled:
+            toasts.show(.info, "Cancelled: \(op.summary)")
+        case .failed(let message):
+            // Server messages can be paragraphs; keep the toast tight and
+            // let the operations popover hold the full text.
+            let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            let clipped = trimmed.count > 160 ? String(trimmed.prefix(160)) + "…" : trimmed
+            toasts.show(.error, "\(op.kind.label) failed — \(clipped)")
         }
     }
 

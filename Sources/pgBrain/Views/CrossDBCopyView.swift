@@ -146,6 +146,7 @@ struct CrossDBCopyView: View {
 
         do {
             let stats = try await CrossDBCopy.execute(plan: plan, tracker: tracker, operationID: opID)
+            op.summary += " · \(stats.rowsCopied) row\(stats.rowsCopied == 1 ? "" : "s")"
             tracker.finish(op, status: .succeeded)
             statusMessage = "Copied \(stats.rowsCopied) rows in \(String(format: "%.1fs", stats.elapsed))."
             submitting = false

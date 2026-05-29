@@ -43,6 +43,7 @@ struct RowFormView: View {
                 .buttonStyle(.borderless)
                 .disabled(rowIndex <= 0)
                 .keyboardShortcut(.leftArrow, modifiers: [])
+                .help("Previous row (←)")
             Text("Row \(rowIndex + 1) of \(page.rows.count)")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
@@ -50,6 +51,7 @@ struct RowFormView: View {
                 .buttonStyle(.borderless)
                 .disabled(rowIndex >= page.rows.count - 1)
                 .keyboardShortcut(.rightArrow, modifiers: [])
+                .help("Next row (→)")
             Spacer()
         }
         .padding(.horizontal, Tokens.Spacing.md)
