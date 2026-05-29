@@ -125,16 +125,24 @@ final class WindowTitleSync {
 }
 
 /// A thin full-width colour band pinned to the bottom of the title bar.
+/// The accessory's height is the view's height, so it MUST be pinned with an
+/// explicit constraint — a frame-only height gets stretched to fill the
+/// titlebar's accessory band (which is what made it a fat red block).
 final class TitlebarBandAccessory: NSTitlebarAccessoryViewController {
+    private static let bandHeight: CGFloat = 3
+
     init(color: NSColor) {
         super.init(nibName: nil, bundle: nil)
-        let band = NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 3))
+        let band = NSView()
         band.wantsLayer = true
         band.layer?.backgroundColor = color.cgColor
-        band.autoresizingMask = [.width]
+        band.translatesAutoresizingMaskIntoConstraints = false
         view = band
+        NSLayoutConstraint.activate([
+            band.heightAnchor.constraint(equalToConstant: Self.bandHeight),
+        ])
         layoutAttribute = .bottom
-        fullScreenMinHeight = 0
+        fullScreenMinHeight = Self.bandHeight
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
