@@ -25,6 +25,9 @@ struct DataGridView: NSViewRepresentable {
     /// rendering paints them with a fading green tint for a few seconds
     /// so the user can see exactly what landed.
     var appliedHighlights: Set<EditBuffer.CellKey> = []
+    /// Source-row indices that are draft INSERTs — drawn with a green wash
+    /// and a ✦ in the gutter so a not-yet-committed row reads as new.
+    var insertRowIndices: Set<Int> = []
     /// Maps each visible grid row index back to its index in the
     /// unfiltered loaded page — so edits + applies still target the
     /// correct underlying row when a filter is active. Identity map
@@ -74,6 +77,7 @@ struct DataGridView: NSViewRepresentable {
         var page: RowsFetcher.Page
         var editBuffer: EditBuffer?
         var appliedHighlights: Set<EditBuffer.CellKey> = []
+        var insertRowIndices: Set<Int> = []
         var sourceRowIndices: [Int] = []
         var sortDirectionFor: ((String) -> TypedHeaderCell.SortDirection)?
         var onHeaderClick: ((String, TypedHeaderCell.SortDirection) -> Void)?
@@ -186,7 +190,8 @@ struct DataGridView: NSViewRepresentable {
                 let cell = reuseGutterCell(in: tableView)
                 cell.configure(
                     rowNumber: sourceIndex(forVisibleRow: row) + 1,
-                    isFocused: focusedRow == row
+                    isFocused: focusedRow == row,
+                    isInsert: insertRowIndices.contains(sourceIndex(forVisibleRow: row))
                 )
                 return cell
             }
@@ -214,11 +219,14 @@ struct DataGridView: NSViewRepresentable {
 
         func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
             let id = NSUserInterfaceItemIdentifier("HoverRow")
+            let isInsert = insertRowIndices.contains(sourceIndex(forVisibleRow: row))
             if let v = tableView.makeView(withIdentifier: id, owner: self) as? HoverableRowView {
+                v.isInsertRow = isInsert
                 return v
             }
             let v = HoverableRowView()
             v.identifier = id
+            v.isInsertRow = isInsert
             return v
         }
 
@@ -746,6 +754,7 @@ struct DataGridView: NSViewRepresentable {
         context.coordinator.page = page
         context.coordinator.editBuffer = editBuffer
         context.coordinator.appliedHighlights = appliedHighlights
+        context.coordinator.insertRowIndices = insertRowIndices
         context.coordinator.rebuildIndex()
         propagateState(to: context.coordinator)
         if identityChanged || sourceRowIndices.count != table.numberOfRows {
@@ -1004,6 +1013,10 @@ final class HoverableRowView: NSTableRowView {
     private var isHovered = false {
         didSet { if oldValue != isHovered { needsDisplay = true } }
     }
+    /// Draft INSERT row — painted with a soft green wash until committed.
+    var isInsertRow = false {
+        didSet { if oldValue != isInsertRow { needsDisplay = true } }
+    }
     private var trackingArea: NSTrackingArea?
 
     override func updateTrackingAreas() {
@@ -1033,10 +1046,15 @@ final class HoverableRowView: NSTableRowView {
     override func prepareForReuse() {
         super.prepareForReuse()
         isHovered = false
+        isInsertRow = false
     }
 
     override func drawBackground(in dirtyRect: NSRect) {
         super.drawBackground(in: dirtyRect)
+        if isInsertRow {
+            NSColor.systemGreen.withAlphaComponent(0.10).setFill()
+            bounds.fill()
+        }
         if isHovered && !isSelected {
             NSColor.controlAccentColor.withAlphaComponent(0.06).setFill()
             bounds.fill()
@@ -1081,10 +1099,15 @@ final class RowNumberCellView: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(rowNumber: Int, isFocused: Bool) {
-        label.stringValue = String(rowNumber)
+    func configure(rowNumber: Int, isFocused: Bool, isInsert: Bool = false) {
+        if isInsert {
+            label.stringValue = "✦"
+            label.textColor = .systemGreen
+        } else {
+            label.stringValue = String(rowNumber)
+            label.textColor = isFocused ? .labelColor : .tertiaryLabelColor
+        }
         self.isFocused = isFocused
-        label.textColor = isFocused ? .labelColor : .tertiaryLabelColor
         needsDisplay = true
     }
 

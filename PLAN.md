@@ -454,6 +454,16 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Released**: iters 23–25 shipped together as **v0.7.0** (2026-05-29) — notarized DMG + GitHub release + appcast, and the apps.souris.cloud listing was updated to v0.7.0 with profiler/delete/copy-as/toast highlights.
 
+### Iter 26 — Feature: insert rows in the grid (2026-05-30, unreleased)
+**Goal**: complete the data-editing story — the grid could edit cells (iter-5) and delete rows (iter-24) but couldn't INSERT. Now it can.
+
+- **Add row (＋ in the table toolbar)** appends a blank draft row to the bottom of the grid, marked with a green wash + a ✦ in the gutter. Fill its cells through the normal cell editor; **Apply** commits it. **Revert** drops all drafts.
+- **One transaction, updates + inserts together.** `UpdateApplier` gained an `Insert` type and runs INSERTs after UPDATEs inside the same `withTransaction`. Each insert lists only the columns the user filled in — everything else is left out so the table's DEFAULT applies (identity sequences, `now()`, `BEFORE INSERT` triggers). An all-blank draft becomes `INSERT … DEFAULT VALUES`.
+- **Draft model.** Drafts are real blank rows appended to the loaded page, flagged by `RowsLoader.pendingInsertRows` (source indices); their cell values live in the existing `EditBuffer`, so the cell editor, dirty tracking, and undo all work unchanged. `apply()` splits pending edits into UPDATEs (existing rows) and INSERTs (flagged rows). After an insert-bearing Apply the grid **refetches** so server-assigned identity/defaults show; update-only Applies still splice in place.
+- Apply bar reads `loader.hasPendingChanges` and shows "N pending · M new rows".
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches. INSERT pattern exercised against `pgbrain_demo` — partial-column insert correctly auto-filled identity PK (601), `priority` default (3), `done` default (false), and the `created_at` trigger; `DEFAULT VALUES` surfaces NOT-NULL errors as a toast. **Not yet released** — sits on top of v0.7.0.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

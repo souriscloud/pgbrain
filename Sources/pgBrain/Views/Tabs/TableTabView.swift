@@ -197,6 +197,16 @@ struct TableTabView: View {
                     EmptyView()
                 }
             }
+            if table.isEditable, case .loaded = loader.state {
+                Button {
+                    loader.addInsertRow()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+                .disabled(loader.isApplying)
+                .help("Add a new row (fill cells, then Apply)")
+            }
             Button {
                 Task { await loader.load() }
             } label: {
@@ -362,6 +372,18 @@ struct TableTabView: View {
         }
     }
 
+    /// "3 pending" / "2 new rows" / "3 pending · 2 new rows".
+    private var pendingLabel: String {
+        var parts: [String] = []
+        let dirty = loader.editBuffer.dirtyCount - loader.pendingInsertRows.reduce(0) { acc, idx in
+            acc + (loader.editBuffer.editsByRow().first { $0.row == idx }?.cells.count ?? 0)
+        }
+        if dirty > 0 { parts.append("\(dirty) pending") }
+        let inserts = loader.pendingInsertRows.count
+        if inserts > 0 { parts.append("\(inserts) new row\(inserts == 1 ? "" : "s")") }
+        return parts.isEmpty ? "\(loader.editBuffer.dirtyCount) pending" : parts.joined(separator: " · ")
+    }
+
     @ViewBuilder
     private var editControls: some View {
         if let applyError = loader.applyError {
@@ -390,8 +412,8 @@ struct TableTabView: View {
                 .lineLimit(1)
                 .transition(.opacity)
         }
-        if loader.editBuffer.isDirty {
-            Text("\(loader.editBuffer.dirtyCount) pending")
+        if loader.hasPendingChanges {
+            Text(pendingLabel)
                 .font(.caption)
                 .foregroundStyle(.orange)
             Button {
@@ -917,6 +939,7 @@ struct TableTabView: View {
                             page: visible,
                             editBuffer: table.isEditable ? loader.editBuffer : nil,
                             appliedHighlights: loader.appliedHighlights,
+                            insertRowIndices: loader.pendingInsertRows,
                             sourceRowIndices: sourceIndices,
                             sortDirectionFor: { col in
                                 switch loader.headerSortDirection(for: col) {
@@ -1101,6 +1124,25 @@ final class RowsLoader {
     /// timer so the highlight doesn't loiter.
     private(set) var appliedHighlights: Set<EditBuffer.CellKey> = []
 
+    /// Source-row indices (into the loaded page) that are draft INSERTs —
+    /// blank rows appended to the bottom of the grid, awaiting Apply. Their
+    /// cell values live in `editBuffer` like any other edit; this set just
+    /// flags which rows become INSERTs instead of UPDATEs.
+    private(set) var pendingInsertRows: Set<Int> = []
+
+    /// Apply is meaningful when there are dirty cells OR pending new rows.
+    var hasPendingChanges: Bool { editBuffer.isDirty || !pendingInsertRows.isEmpty }
+
+    /// Append a blank draft row to the loaded page and flag it as a pending
+    /// insert. Cells are filled through the normal cell editor afterwards.
+    func addInsertRow() {
+        guard case .loaded(var page) = state else { return }
+        let newIndex = page.rows.count
+        page.rows.append([String?](repeating: nil, count: page.columns.count))
+        pendingInsertRows.insert(newIndex)
+        state = .loaded(page)
+    }
+
     /// JetBrains-style raw filter — user-typed `WHERE` and `ORDER BY`
     /// fragments spliced server-side. Setting either triggers a reload
     /// (the row-limit slice would otherwise lie).
@@ -1200,6 +1242,7 @@ final class RowsLoader {
             hadLoadedPage = false
         }
         editBuffer.clear()
+        pendingInsertRows.removeAll()
         applyError = nil
         // Clear the exact-count cache on any reload — it's tied to a
         // specific filter + page set.
@@ -1313,6 +1356,13 @@ final class RowsLoader {
 
     func revert() {
         editBuffer.clear()
+        // Drop the trailing draft rows (always appended at the end).
+        if !pendingInsertRows.isEmpty, case .loaded(var page) = state {
+            let n = pendingInsertRows.count
+            if page.rows.count >= n { page.rows.removeLast(n) }
+            pendingInsertRows.removeAll()
+            state = .loaded(page)
+        }
         applyError = nil
     }
 
@@ -1323,27 +1373,42 @@ final class RowsLoader {
         }
         guard case .loaded(var page) = state else { return }
         let pending = editBuffer.editsByRow()
-        guard !pending.isEmpty else { return }
 
-        let edits: [UpdateApplier.Edit] = pending.map { rowEdits in
-            let cells: [UpdateApplier.CellChange] = rowEdits.cells.map { c in
-                UpdateApplier.CellChange(column: page.columns[c.column], newValue: c.value)
+        // Split pending edits: rows flagged as drafts become INSERTs, the
+        // rest are UPDATEs against existing rows.
+        let edits: [UpdateApplier.Edit] = pending
+            .filter { !pendingInsertRows.contains($0.row) }
+            .map { rowEdits in
+                let cells = rowEdits.cells.map {
+                    UpdateApplier.CellChange(column: page.columns[$0.column], newValue: $0.value)
+                }
+                return UpdateApplier.Edit(rowIndex: rowEdits.row, cells: cells)
             }
-            return UpdateApplier.Edit(rowIndex: rowEdits.row, cells: cells)
+        let inserts: [UpdateApplier.Insert] = pendingInsertRows.sorted().map { idx in
+            let cells = (pending.first { $0.row == idx }?.cells ?? []).map {
+                UpdateApplier.CellChange(column: page.columns[$0.column], newValue: $0.value)
+            }
+            return UpdateApplier.Insert(cells: cells)
         }
+        guard !edits.isEmpty || !inserts.isEmpty else { return }
 
         isApplying = true
         applyError = nil
         applySuccess = nil
         defer { isApplying = false }
+        let summaryParts = [
+            edits.isEmpty ? nil : "\(edits.count) update\(edits.count == 1 ? "" : "s")",
+            inserts.isEmpty ? nil : "\(inserts.count) insert\(inserts.count == 1 ? "" : "s")",
+        ].compactMap { $0 }
         let op = service.operations.begin(
             kind: .update,
-            summary: "UPDATE \(table.qualifiedName) (\(edits.count) row\(edits.count == 1 ? "" : "s"))"
+            summary: "\(table.qualifiedName) · \(summaryParts.joined(separator: ", "))"
         )
         let started = Date()
         do {
             try await UpdateApplier.apply(
                 edits: edits,
+                inserts: inserts,
                 table: table,
                 originalRows: page.rows,
                 client: client,
@@ -1351,28 +1416,37 @@ final class RowsLoader {
                 tracker: service.operations
             )
             service.operations.finish(op, status: .succeeded)
-            // Splice the applied values into the in-memory page so the grid
-            // shows the new state without a round-trip refetch.
-            for edit in edits {
-                for cell in edit.cells {
-                    page.rows[edit.rowIndex][page.columns.firstIndex(where: { $0.name == cell.column.name }) ?? 0] = cell.newValue
-                }
-            }
-            state = .loaded(page)
             let elapsed = Date().timeIntervalSince(started)
-            applySuccess = "Applied \(edits.count) row\(edits.count == 1 ? "" : "s") · \(String(format: "%.0f ms", elapsed * 1000))"
-            // Flash every applied (row, col) green in the grid for a few
-            // seconds before fading.
-            var highlights: Set<EditBuffer.CellKey> = []
-            for edit in edits {
-                for cell in edit.cells {
-                    if let colIdx = page.columns.firstIndex(where: { $0.name == cell.column.name }) {
-                        highlights.insert(EditBuffer.CellKey(row: edit.rowIndex, column: colIdx))
+
+            if !inserts.isEmpty {
+                // New rows get server-assigned identity/defaults — refetch so
+                // the grid shows their real values instead of the blank draft.
+                applySuccess = "Applied \(summaryParts.joined(separator: ", ")) · \(String(format: "%.0f ms", elapsed * 1000))"
+                editBuffer.clear()
+                pendingInsertRows.removeAll()
+                await load()
+            } else {
+                // Update-only: splice the applied values into the in-memory
+                // page so the grid updates without a round-trip refetch.
+                for edit in edits {
+                    for cell in edit.cells {
+                        page.rows[edit.rowIndex][page.columns.firstIndex(where: { $0.name == cell.column.name }) ?? 0] = cell.newValue
                     }
                 }
+                state = .loaded(page)
+                applySuccess = "Applied \(edits.count) row\(edits.count == 1 ? "" : "s") · \(String(format: "%.0f ms", elapsed * 1000))"
+                // Flash every applied (row, col) green in the grid before fading.
+                var highlights: Set<EditBuffer.CellKey> = []
+                for edit in edits {
+                    for cell in edit.cells {
+                        if let colIdx = page.columns.firstIndex(where: { $0.name == cell.column.name }) {
+                            highlights.insert(EditBuffer.CellKey(row: edit.rowIndex, column: colIdx))
+                        }
+                    }
+                }
+                appliedHighlights = highlights
+                editBuffer.clear()
             }
-            appliedHighlights = highlights
-            editBuffer.clear()
             let snapshot = applySuccess
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 3_500_000_000)

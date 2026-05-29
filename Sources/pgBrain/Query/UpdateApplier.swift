@@ -21,6 +21,14 @@ enum UpdateApplier {
         let newValue: String?
     }
 
+    /// A brand-new row to INSERT. `cells` holds only the columns the user
+    /// actually filled in — every other column is left out so the table's
+    /// DEFAULT (identity sequences, `now()`, …) applies. An empty `cells`
+    /// becomes `INSERT … DEFAULT VALUES`.
+    struct Insert: Sendable {
+        let cells: [CellChange]
+    }
+
     enum Failure: Error, LocalizedError {
         case noPrimaryKey
         case unknownPrimaryKeyColumn(String)
@@ -42,6 +50,7 @@ enum UpdateApplier {
     /// so the user can cancel the in-flight UPDATE batch from the ops popover.
     static func apply(
         edits: [Edit],
+        inserts: [Insert] = [],
         table: TableNode,
         originalRows: [[String?]],
         client: PostgresClient,
@@ -124,6 +133,29 @@ enum UpdateApplier {
                 let sql = "UPDATE \(qualifiedTable) SET \(setPieces.joined(separator: ", ")) WHERE \(wherePieces.joined(separator: " AND "))"
                 let query = PostgresQuery(unsafeSQL: sql, binds: binds)
                 _ = try await connection.query(query, logger: logger)
+            }
+
+            // INSERTs run after UPDATEs, still inside the one transaction.
+            for insert in inserts {
+                if insert.cells.isEmpty {
+                    let sql = "INSERT INTO \(qualifiedTable) DEFAULT VALUES"
+                    _ = try await connection.query(PostgresQuery(unsafeSQL: sql), logger: logger)
+                    continue
+                }
+                var binds = PostgresBindings()
+                var cols: [String] = []
+                var placeholders: [String] = []
+                for (index, change) in insert.cells.enumerated() {
+                    cols.append(SQLIdent.quote(change.column.name))
+                    placeholders.append("$\(index + 1)::" + change.column.typeName)
+                    if let v = change.newValue {
+                        binds.append(v)
+                    } else {
+                        binds.appendNull()
+                    }
+                }
+                let sql = "INSERT INTO \(qualifiedTable) (\(cols.joined(separator: ", "))) VALUES (\(placeholders.joined(separator: ", ")))"
+                _ = try await connection.query(PostgresQuery(unsafeSQL: sql, binds: binds), logger: logger)
             }
         }
     }

@@ -6,6 +6,14 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
+## Unreleased
+
+### Added
+- **Insert rows.** The table grid's **＋** button adds a blank draft row (green
+  wash, ✦ gutter marker); fill its cells and **Apply** to `INSERT`. Only the
+  columns you touch are sent, so identity sequences, defaults, and triggers fill
+  the rest. Updates and inserts commit together in one transaction.
+
 ## v0.7.0 — 2026-05-29
 
 **Feedback you can see, data tools you reach for.**
