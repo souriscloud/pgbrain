@@ -94,14 +94,9 @@ struct ConnectionWindowContent: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Thin coloured stripe at the very top — connection colour, or
-            // red on production. Disappears entirely for an uncoloured,
-            // non-prod connection.
-            if appearance.connection.colorTag != .none || appearance.connection.isProduction {
-                Rectangle()
-                    .fill(appearance.emphasized)
-                    .frame(height: 3)
-            }
+            // The connection-colour / production stripe now lives in the
+            // window title bar itself (see TitlebarBandAccessory) so the
+            // whole window header carries the connection's identity.
             mainArea
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay { ToastOverlay(center: service.toasts) }

@@ -473,6 +473,14 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches; vitals queries exercised against `pgbrain_demo` (PostgreSQL 18.3 · 9198 kB · 8 tables; app.tasks 296 kB). **Not yet released** — sits with iter-26 on top of v0.7.0.
 
+### Iter 28 — Live window title bar (2026-05-30, unreleased)
+**Goal**: make the actual macOS window header (traffic-light row) active, not a static name.
+
+- **`WindowTitleSync`** drives `window.title` + `window.subtitle` from the live `ConnectionService` via `withObservationTracking` (re-arms on each change). Subtitle reflects state + active tab: "Connecting…" / "Connection failed" / "Disconnected", and when connected `[PRODUCTION · ]<db> · <current tab>`. The subtitle renders in the title bar, so the header updates as you connect and move between tabs.
+- **`TitlebarBandAccessory`** — a thin full-width colour band pinned to the bottom of the title bar (`NSTitlebarAccessoryViewController`, `.bottom`), red for production, the tag colour otherwise. The old in-content 3px stripe was removed in favour of this, moving the identity colour into the window header itself.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches (Welcome path). The band + subtitle render on connection windows — best seen by opening a connection (not auto-verified headlessly; I don't auto-connect, especially not to prod). **Not yet released** — sits with iters 26–27 on top of v0.7.0.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

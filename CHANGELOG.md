@@ -16,6 +16,10 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 - **Live header vitals.** The sidebar header shows the server version and live
   database size + table count; the table toolbar shows the open table's on-disk
   size. Sizes refresh on load and animate as they change.
+- **Live window title bar.** The window subtitle tracks connection state and the
+  active tab (e.g. "PRODUCTION · valuo_api · public.reports"), and a coloured band
+  across the title bar carries the connection's identity — red for production,
+  the tag colour otherwise.
 
 ## v0.7.0 — 2026-05-29
 
