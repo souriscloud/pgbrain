@@ -183,11 +183,18 @@ struct TableTabView: View {
                 case .loaded(let page):
                     HStack(spacing: 6) {
                         Text(page.truncated ? "\(page.rows.count)+ rows" : "\(page.rows.count) rows")
+                        if let size = loader.tableSizePretty {
+                            Text("·").foregroundStyle(.tertiary)
+                            Text(size)
+                                .contentTransition(.numericText())
+                                .help("Total on-disk size (table + indexes + TOAST)")
+                        }
                         Text(String(format: "%.0f ms", page.elapsed * 1000))
                             .foregroundStyle(.tertiary)
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .animation(.easeInOut(duration: 0.25), value: loader.tableSizePretty)
                 case .loading:
                     HStack(spacing: 4) {
                         ProgressView().controlSize(.small)
@@ -1176,6 +1183,9 @@ final class RowsLoader {
     /// True while the exact-count query is in flight (drives the
     /// pager's button spinner).
     var isCountingExact: Bool = false
+    /// On-disk size of the open table (`pg_total_relation_size`), shown in
+    /// the toolbar. Refreshed on every load so it tracks inserts/deletes.
+    private(set) var tableSizePretty: String?
     /// Whether the previously-loaded page reported "there's more
     /// after this" (so the Next arrow stays enabled).
     var hasMoreAfterCurrentPage: Bool {
@@ -1255,6 +1265,7 @@ final class RowsLoader {
             async let estimate: Int64? = filter.whereClause.trimmingCharacters(in: .whitespaces).isEmpty
                 ? (try? RowsFetcher.estimatedRowCount(table: table, client: client))
                 : nil
+            async let size: String? = Self.fetchTableSize(table: table, client: client)
             let page = try await RowsFetcher.page(
                 offset: pageOffset,
                 pageSize: pageSize,
@@ -1262,6 +1273,7 @@ final class RowsLoader {
             )
             state = .loaded(page)
             estimatedTotal = await estimate
+            tableSizePretty = await size
             refreshError = nil
         } catch {
             let message = PostgresErrorMessage.describe(error)
@@ -1271,6 +1283,23 @@ final class RowsLoader {
                 state = .error(message)
             }
         }
+    }
+
+    /// On-disk total size of a table/matview (`pg_total_relation_size`).
+    /// Plain views have no storage, so we skip them. Best-effort — any
+    /// failure just leaves the toolbar size off.
+    nonisolated static func fetchTableSize(table: TableNode, client: PostgresClient) async -> String? {
+        guard table.kind != .view else { return nil }
+        let qualified = (SQLIdent.quote(table.schema) + "." + SQLIdent.quote(table.name))
+            .replacingOccurrences(of: "'", with: "''")
+        let sql = "SELECT pg_size_pretty(pg_total_relation_size('\(qualified)'::regclass))"
+        do {
+            let rows = try await client.query(PostgresQuery(unsafeSQL: sql))
+            for try await s in rows.decode(String.self) { return s }
+        } catch {
+            // Decorative — stay silent.
+        }
+        return nil
     }
 
     /// Run a `SELECT COUNT(*)` honouring the active filter. Wired to

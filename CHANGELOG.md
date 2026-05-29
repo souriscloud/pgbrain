@@ -13,6 +13,9 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
   wash, ✦ gutter marker); fill its cells and **Apply** to `INSERT`. Only the
   columns you touch are sent, so identity sequences, defaults, and triggers fill
   the rest. Updates and inserts commit together in one transaction.
+- **Live header vitals.** The sidebar header shows the server version and live
+  database size + table count; the table toolbar shows the open table's on-disk
+  size. Sizes refresh on load and animate as they change.
 
 ## v0.7.0 — 2026-05-29
 

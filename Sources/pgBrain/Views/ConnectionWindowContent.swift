@@ -711,15 +711,41 @@ struct ConnectionWindowContent: View {
                       ? Color.secondary.opacity(0.25)
                       : appearance.connection.colorTag.swiftUIColor)
                 .frame(width: 10, height: 10)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(appearance.connection.name)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                Text(appearance.connection.database.isEmpty ? appearance.connection.host : appearance.connection.database)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Text(appearance.connection.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    if let info = service.serverInfo {
+                        Text(info.versionShort)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 0.5)
+                            .background(Color.secondary.opacity(0.12), in: Capsule())
+                            .transition(.opacity)
+                    }
+                }
+                // Live vitals: database · size · table count. Size tracks
+                // inserts/imports because it refreshes on every schema reload.
+                HStack(spacing: 4) {
+                    Text(appearance.connection.database.isEmpty ? appearance.connection.host : appearance.connection.database)
+                        .lineLimit(1)
+                    if let info = service.serverInfo {
+                        Text("·").foregroundStyle(.tertiary)
+                        Text(info.databaseSize)
+                            .contentTransition(.numericText())
+                    }
+                    if service.schemaState == .loaded, service.tableCount > 0 {
+                        Text("·").foregroundStyle(.tertiary)
+                        Text("\(service.tableCount) table\(service.tableCount == 1 ? "" : "s")")
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
+            .animation(.easeInOut(duration: 0.25), value: service.serverInfo)
             Spacer()
             if appearance.connection.isProduction {
                 Text("PROD")

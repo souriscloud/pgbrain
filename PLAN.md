@@ -464,6 +464,15 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches. INSERT pattern exercised against `pgbrain_demo` — partial-column insert correctly auto-filled identity PK (601), `priority` default (3), `done` default (false), and the `created_at` trigger; `DEFAULT VALUES` surfaces NOT-NULL errors as a toast. **Not yet released** — sits on top of v0.7.0.
 
+### Iter 27 — Live header vitals (2026-05-30, unreleased)
+**Goal**: make the top chrome feel active — surface real, refreshing server/table info instead of a static name.
+
+- **Sidebar connection header** now shows a `PostgreSQL <version>` chip beside the name and a vitals line: `database · <db size> · <N tables>`. Version + size come from a best-effort `current_setting('server_version')` + `pg_database_size()` fetch (`ConnectionService.serverInfo`, `loadServerInfo()`), refreshed on every schema (re)load so the size tracks inserts/imports. Counts derive from the loaded snapshot.
+- **Table toolbar** shows the open table's on-disk size (`pg_total_relation_size`, table+indexes+TOAST) next to the row count; fetched in parallel with the page on each load (`RowsLoader.tableSizePretty`), skipped for plain views.
+- Both sizes use `.contentTransition(.numericText())` so they visibly tick when they change. Vitals are decorative — fetch failures stay silent, never a toast or error.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches; vitals queries exercised against `pgbrain_demo` (PostgreSQL 18.3 · 9198 kB · 8 tables; app.tasks 296 kB). **Not yet released** — sits with iter-26 on top of v0.7.0.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

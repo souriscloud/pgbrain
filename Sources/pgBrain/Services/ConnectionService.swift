@@ -52,6 +52,19 @@ final class ConnectionService {
     let operations = OperationsCenter()
     let toasts = ToastCenter()
 
+    /// Lightweight, decorative server vitals shown in the sidebar header.
+    /// Refreshed whenever the schema (re)loads, so the database size tracks
+    /// inserts/imports. Never surfaces errors — it's chrome, not a feature.
+    struct ServerInfo: Sendable, Equatable {
+        var versionShort: String     // "PostgreSQL 16.2"
+        var databaseSize: String     // "24 MB"
+    }
+    private(set) var serverInfo: ServerInfo?
+
+    /// Table/schema counts for the header, derived from the loaded snapshot.
+    var schemaCount: Int { schema.schemas.count }
+    var tableCount: Int { schema.schemas.reduce(0) { $0 + $1.tables.count } }
+
     enum SchemaState: Sendable, Equatable {
         case idle, loading, loaded, error(String)
     }
@@ -352,6 +365,26 @@ final class ConnectionService {
         }
     }
 
+    /// Fetch the server version + database size for the header. Best-effort:
+    /// any failure leaves `serverInfo` as-is (decorative, never alarming).
+    func loadServerInfo() async {
+        guard let client else { return }
+        do {
+            let rows = try await client.query(
+                "SELECT current_setting('server_version'), pg_size_pretty(pg_database_size(current_database()))"
+            )
+            for try await (version, size) in rows.decode((String, String).self) {
+                // server_version can read "16.2" or "14.11 (Ubuntu …)" — keep
+                // just the version number.
+                let short = version.split(separator: " ").first.map(String.init) ?? version
+                serverInfo = ServerInfo(versionShort: "PostgreSQL \(short)", databaseSize: size)
+                break
+            }
+        } catch {
+            // Intentionally silent.
+        }
+    }
+
     func loadSchema() async {
         guard let client else { return }
         schemaState = .loading
@@ -362,6 +395,8 @@ final class ConnectionService {
             schema = try await SchemaFetcher.fetch(client: client)
             schemaState = .loaded
             operations.finish(op, status: .succeeded)
+            // Refresh header vitals off the critical path.
+            Task { [weak self] in await self?.loadServerInfo() }
             // Phase 2 — background column enrichment so completion +
             // hover light up for every table eventually, without
             // blocking the user from doing real work.
