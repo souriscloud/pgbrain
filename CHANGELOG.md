@@ -1,0 +1,68 @@
+# Changelog
+
+All notable changes to pgBrain. Newest first. Dates are release dates.
+
+pgBrain auto-updates via Sparkle, so most users land on the latest build
+without downloading anything — this log is for the curious and the changelog
+page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
+
+## v0.7.0 — 2026-05-29
+
+**Feedback you can see, data tools you reach for.**
+
+### Added
+- **Toast notifications.** Exports, imports, dumps, cross-DB copies, maintenance,
+  and edits now flash a short success/failure bubble in the corner — no more
+  opening the operations popover to find out whether something worked. Failures
+  show the server's message; click any toast to dismiss it.
+- **Column profiler.** Right-click any column → **Profile column…** for row count,
+  non-null / null counts (with a populated-fraction bar), distinct count (with a
+  "unique" callout), and min / max / avg. Respects the table's active filter.
+- **Delete rows.** Right-click a row — or a multi-row selection — → **Delete rows…**.
+  Builds a primary-key-keyed `DELETE` behind a confirmation, then reloads. Tables
+  without a primary key are refused rather than risk a broad match.
+- **Copy as…** Copy any result block or the visible table page to the clipboard as
+  a **Markdown table**, **JSON**, **TSV** (pastes straight into a spreadsheet), or
+  **CSV**.
+- Result blocks now show a `rows · cols` badge.
+
+### Changed
+- Operation results report **how much** they moved: "Exported 12,480 rows",
+  "Imported 3,001 rows", pg_dump shows the output file size.
+- Tooltips on the row-form ◀/▶ steppers and the ERD zoom controls.
+
+### Fixed
+- Saving or opening a `.sql` file that failed used to do nothing silently — it now
+  reports the error (and confirms a successful save).
+- The column profiler revealed that Postgres has no `min(boolean)` aggregate;
+  boolean and json/jsonb columns now skip min/max cleanly.
+
+## v0.6.0 — 2026-05-29
+
+DBA suite, ERD diagrams, row form view, view/matview editor, replication + FDW
+tabs, TRUNCATE, generate-data, grant editor, partitions, SQL file open/save,
+psql slash commands, run-as-transaction, pivot + charts. Plus a tolerant
+connection decoder so older `connections.json` files survive upgrades.
+
+## v0.5.x — 2026-05-29
+
+Polish pass on the DBA rounds: browsable functions in the sidebar, palette
+coverage for new object types, keyboard/consistency audit.
+
+## v0.4.0 / v0.5.0 — 2026-05-28
+
+Pro IDE rounds: structure pane, schema-aware autocomplete + hover, pagination,
+maintenance actions, schema admin, sequences, diagnostics, snippets, triggers,
+function editor, roles, database CRUD, column ALTER, find usages.
+
+## v0.3.0 — 2026-05-28
+
+Cell-stack notebook scratchpad, typed data grid, command palette (⌘K),
+SSH tunnels, production guardrails.
+
+## v0.0.1 – v0.2.x — 2026-05-20 → 2026-05-25
+
+Foundations: native window-per-connection shell, PostgresNIO-backed connect,
+Keychain passwords, editable grid, streaming export/import, pg_dump wrapper,
+cross-DB copy, state restoration, Settings, Sparkle auto-update, and the signed
++ notarized DMG release pipeline.
