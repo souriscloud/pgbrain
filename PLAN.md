@@ -452,6 +452,8 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches.
 
+**Released**: iters 23–25 shipped together as **v0.7.0** (2026-05-29) — notarized DMG + GitHub release + appcast, and the apps.souris.cloud listing was updated to v0.7.0 with profiler/delete/copy-as/toast highlights.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 
