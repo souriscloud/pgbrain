@@ -68,11 +68,13 @@ enum QueryRunner {
             // Detect that and show hex (matching `::text`) instead.
             if let s = try? cell.decode(String.self, context: .default) {
                 if s.utf8.contains(where: { $0 == 0x00 || $0 < 0x09 || ($0 > 0x0D && $0 < 0x20) }) {
-                    return hexEncode(cell.bytes)
+                    // Binary value — PostGIS geometry decodes to WKT, everything
+                    // else (bytea, …) falls back to hex like `::text`.
+                    return EWKB.toEWKT(cell.bytes) ?? hexEncode(cell.bytes)
                 }
                 return s
             }
-            return hexEncode(cell.bytes)
+            return EWKB.toEWKT(cell.bytes) ?? hexEncode(cell.bytes)
         }
     }
 

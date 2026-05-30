@@ -12,7 +12,9 @@ import PostgresNIO
 /// `ST_Transform` them.
 struct SpatialMapView: View {
     let service: ConnectionService
-    let table: TableNode
+    /// SQL FROM target — a qualified table (`"app"."places"`) for a table tab,
+    /// or a wrapped subquery (`(SELECT …) _pgb`) for a scratchpad result.
+    let fromSQL: String
     let geometryColumn: String
     let labelColumn: String?
 
@@ -93,10 +95,9 @@ struct SpatialMapView: View {
         guard let client = service.client else { error = "Not connected."; loading = false; return }
         let geomQ = SQLIdent.quote(geometryColumn)
         let labelExpr = labelColumn.map { "\(SQLIdent.quote($0))::text" } ?? "NULL::text"
-        let qualified = SQLIdent.qualified(schema: table.schema, name: table.name)
         let sql = """
         SELECT \(labelExpr) AS label, ST_AsGeoJSON(\(geomQ)) AS gj
-        FROM \(qualified)
+        FROM \(fromSQL)
         WHERE \(geomQ) IS NOT NULL
         LIMIT \(Self.fetchLimit + 1)
         """
@@ -135,6 +136,33 @@ struct SpatialMapView: View {
             longitudeDelta: max(0.01, (maxLon - minLon) * 1.4)
         )
         return MKCoordinateRegion(center: center, span: span)
+    }
+}
+
+/// Sniffs a result page for a geometry column so the scratchpad can offer a
+/// map. Geometry cells render as WKT/EWKT (via the EWKB decoder), so we match
+/// the WKT keyword prefixes.
+enum SpatialDetect {
+    static func looksLikeGeometry(_ s: String) -> Bool {
+        let u = s.uppercased()
+        return ["SRID=", "POINT", "LINESTRING", "POLYGON",
+                "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION"]
+            .contains { u.hasPrefix($0) }
+    }
+
+    /// Returns the geometry column name + a label column (the first other
+    /// column) if a majority of a column's sampled values look like WKT.
+    static func detect(_ page: RowsFetcher.Page) -> (geom: String, label: String?)? {
+        for (i, col) in page.columns.enumerated() {
+            let samples = page.rows.prefix(25).compactMap { $0.indices.contains(i) ? $0[i] : nil }
+            guard !samples.isEmpty else { continue }
+            let hits = samples.filter(looksLikeGeometry).count
+            if hits >= max(1, (samples.count + 1) / 2) {
+                let label = page.columns.enumerated().first { $0.offset != i }?.element.name
+                return (col.name, label)
+            }
+        }
+        return nil
     }
 }
 

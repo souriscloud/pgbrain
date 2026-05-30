@@ -955,7 +955,7 @@ struct TableTabView: View {
                     } else if rowViewMode == .map, let geom = spatialColumns.first {
                         SpatialMapView(
                             service: service,
-                            table: table,
+                            fromSQL: SQLIdent.qualified(schema: table.schema, name: table.name),
                             geometryColumn: geom.name,
                             labelColumn: mapLabelColumn
                         )

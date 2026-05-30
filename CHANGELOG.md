@@ -10,8 +10,7 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
 ### Fixed
 - **Scratchpad showed control-char garbage for binary columns** (PostGIS
-  geometry, `bytea`). These now show hex (matching `::text`); use `ST_AsEWKT(geom)`
-  for WKT, or open the table (the grid renders geometry as WKT).
+  geometry, `bytea`). Geometry now decodes to WKT; `bytea`/other binary shows hex.
 - **Scratchpad showed empty cells for numbers/dates** (e.g. `SELECT count(*)` was
   blank). Ad-hoc query results are now decoded per type (int, numeric, bool, uuid,
   date, timestamp) instead of only as text.
@@ -24,6 +23,10 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 - **PostGIS map view.** Any table with a geometry/geography column gets a **Map**
   toggle next to Grid/Form — it plots features on a real map (points as markers,
   linestrings as polylines, polygons as filled shapes), auto-fitting to the data.
+  Scratchpad results with a geometry column get a **Map** button too.
+- **Geometry as WKT in the scratchpad.** A built-in EWKB decoder turns raw
+  geometry into `SRID=4326;POINT(…)` (matching `ST_AsEWKT`) — `SELECT *` over a
+  PostGIS table now reads cleanly instead of showing hex.
 - **PostGIS awareness.** Spatial databases are auto-detected (no setting needed) —
   a "PostGIS x.y" badge shows in the window header, and geometry/geography columns
   render as readable WKT (`ST_AsEWKT`) in the grid instead of opaque WKB hex.

@@ -296,7 +296,7 @@ private struct CellRow: View {
                         isRunning: notebook.runningCellID == cell.id,
                         focusedCellID: $focusedCellID)
         case .result(let resultID):
-            ResultCellView(resultID: resultID, notebook: notebook, toasts: service.toasts)
+            ResultCellView(resultID: resultID, notebook: notebook, service: service)
         }
     }
 }
@@ -1041,9 +1041,18 @@ final class SqlCellNSTextView: NSTextView {
 /// reuse the same `RowsFetcher.Page` — no extra fetch.
 private struct ResultGridWithViews: View {
     let page: RowsFetcher.Page
-    let toasts: ToastCenter
+    let service: ConnectionService
+    let sourceSQL: String
     @State private var showPivot = false
     @State private var showChart = false
+    @State private var showMap = false
+
+    /// A geometry column in this result (when PostGIS is present) → enables the
+    /// Map button. Geometry renders as WKT, so we sniff for it.
+    private var spatial: (geom: String, label: String?)? {
+        guard service.hasPostGIS else { return nil }
+        return SpatialDetect.detect(page)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1058,7 +1067,7 @@ private struct ResultGridWithViews: View {
                     ForEach(ClipboardCopy.Format.allCases) { fmt in
                         Button(fmt.menuLabel) {
                             let n = ClipboardCopy.copy(page, as: fmt)
-                            toasts.show(.success, "Copied \(n) row\(n == 1 ? "" : "s") as \(fmt.menuLabel)")
+                            service.toasts.show(.success, "Copied \(n) row\(n == 1 ? "" : "s") as \(fmt.menuLabel)")
                         }
                     }
                 } label: {
@@ -1084,6 +1093,16 @@ private struct ResultGridWithViews: View {
                 .controlSize(.mini)
                 .buttonStyle(.borderless)
                 .help("Chart this result")
+                if spatial != nil {
+                    Button {
+                        showMap = true
+                    } label: {
+                        Label("Map", systemImage: "map").font(.caption2)
+                    }
+                    .controlSize(.mini)
+                    .buttonStyle(.borderless)
+                    .help("Plot this result's geometry on a map")
+                }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
@@ -1097,17 +1116,64 @@ private struct ResultGridWithViews: View {
         .sheet(isPresented: $showChart) {
             ResultChartView(page: page) { showChart = false }
         }
+        .sheet(isPresented: $showMap) {
+            if let spatial {
+                ResultMapSheet(
+                    service: service,
+                    sourceSQL: sourceSQL,
+                    geometryColumn: spatial.geom,
+                    labelColumn: spatial.label
+                ) { showMap = false }
+            }
+        }
+    }
+}
+
+/// Sheet that maps a scratchpad result's geometry by wrapping the original
+/// query as a subquery and re-fetching it as GeoJSON.
+private struct ResultMapSheet: View {
+    let service: ConnectionService
+    let sourceSQL: String
+    let geometryColumn: String
+    let labelColumn: String?
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Map · \(geometryColumn)").font(.headline)
+                Spacer()
+                Button("Done", action: onClose).keyboardShortcut(.cancelAction)
+            }
+            .padding(Tokens.Spacing.md)
+            Divider()
+            SpatialMapView(
+                service: service,
+                fromSQL: "(\(strippedSQL)\n) AS _pgbrain_map",
+                geometryColumn: geometryColumn,
+                labelColumn: labelColumn
+            )
+        }
+        .frame(width: 720, height: 540)
+    }
+
+    /// The result's source SQL, minus any trailing semicolons, so it wraps
+    /// cleanly inside `(…) AS _pgbrain_map`.
+    private var strippedSQL: String {
+        var s = sourceSQL.trimmingCharacters(in: .whitespacesAndNewlines)
+        while s.hasSuffix(";") { s = String(s.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines) }
+        return s
     }
 }
 
 private struct ResultCellView: View {
     let resultID: UUID
     @Bindable var notebook: Notebook
-    let toasts: ToastCenter
+    let service: ConnectionService
 
     var body: some View {
         if let result = notebook.result(id: resultID) {
-            ResultBody(result: result, notebook: notebook, toasts: toasts)
+            ResultBody(result: result, notebook: notebook, service: service)
         } else {
             EmptyView()
         }
@@ -1117,7 +1183,7 @@ private struct ResultCellView: View {
 private struct ResultBody: View {
     @Bindable var result: NotebookResult
     let notebook: Notebook
-    let toasts: ToastCenter
+    let service: ConnectionService
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1198,7 +1264,7 @@ private struct ResultBody: View {
                 }
                 .padding(10)
             } else {
-                ResultGridWithViews(page: q.page, toasts: toasts)
+                ResultGridWithViews(page: q.page, service: service, sourceSQL: result.statement)
             }
         case .failure(let message):
             HStack(alignment: .top, spacing: 8) {
