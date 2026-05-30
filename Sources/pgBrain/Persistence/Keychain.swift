@@ -40,26 +40,44 @@ enum Keychain {
         }
     }
 
-    /// Empty-flags access control — "available when the device is
-    /// unlocked, no user presence required, no per-binary ACL". This
-    /// is what kills the recurring `Always Allow / Allow / Deny`
-    /// dialog after a Sparkle update.
-    private static func makeAccessControl() -> SecAccessControl? {
-        var error: Unmanaged<CFError>?
-        let access = SecAccessControlCreateWithFlags(
-            nil,
-            kSecAttrAccessibleAfterFirstUnlock,
-            [],
-            &error
-        )
-        if let err = error?.takeRetainedValue() {
-            // Log and fall through with nil — caller will write the
-            // item without an ACL, which is the same behaviour as the
-            // pre-rewrite code (just no improvement).
-            NSLog("pgBrain: SecAccessControlCreateWithFlags failed: \(err)")
-            return nil
+    /// Legacy-keychain `SecAccess` whose ACL trusts **every** application, so
+    /// reads never throw the `Always Allow / Allow / Deny` dialog — no matter
+    /// how often the binary's signature changes (dev rebuilds, Sparkle
+    /// updates). The previous implementation used `kSecAttrAccessControl`,
+    /// which is a *data-protection* keychain attribute and is ignored by the
+    /// legacy file keychain we actually write to — so items kept the default
+    /// "only this exact binary" ACL and re-prompted on every new build.
+    ///
+    /// Trade-off: any process running as you can read these DB passwords once
+    /// the keychain is unlocked. That's the project's deliberate choice (see
+    /// the rewrite note above) for a developer tool that updates frequently.
+    private static func makeAllAppsAccess() -> SecAccess? {
+        var access: SecAccess?
+        guard SecAccessCreate("pgBrain connection password" as CFString, nil, &access) == errSecSuccess,
+              let access else { return nil }
+        var aclList: CFArray?
+        guard SecAccessCopyACLList(access, &aclList) == errSecSuccess,
+              let acls = aclList as? [SecACL] else { return access }
+        for acl in acls {
+            // A nil application list means "any application is trusted" — no
+            // prompt. An *empty* array would mean the opposite (always prompt).
+            SecACLSetContents(acl, nil, "pgBrain" as CFString, [])
         }
         return access
+    }
+
+    /// Connection IDs already re-written with the all-apps ACL. Persisted so
+    /// the one-time migration (a delete-then-add) runs exactly once ever, not
+    /// on every launch. UserDefaults is thread-safe.
+    private static let migratedKey = "cloud.souris.pgbrain.keychainMigratedV1"
+    private static func isMigrated(_ id: UUID) -> Bool {
+        (UserDefaults.standard.stringArray(forKey: migratedKey) ?? []).contains(id.uuidString)
+    }
+    private static func markMigrated(_ id: UUID) {
+        var ids = UserDefaults.standard.stringArray(forKey: migratedKey) ?? []
+        guard !ids.contains(id.uuidString) else { return }
+        ids.append(id.uuidString)
+        UserDefaults.standard.set(ids, forKey: migratedKey)
     }
 
     static func setPassword(_ password: String, for connectionID: UUID) throws {
@@ -79,15 +97,16 @@ enum Keychain {
 
         var addQuery = baseQuery
         addQuery[kSecValueData] = data
-        if let access = makeAccessControl() {
-            addQuery[kSecAttrAccessControl] = access
-            // kSecAttrAccessControl and kSecAttrAccessible are mutually
-            // exclusive — accessibility is baked into the access control.
+        if let access = makeAllAppsAccess() {
+            addQuery[kSecAttrAccess] = access
         } else {
             addQuery[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
         }
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-        if addStatus == errSecSuccess { return }
+        if addStatus == errSecSuccess {
+            markMigrated(connectionID)
+            return
+        }
         throw KeychainError.unhandled(addStatus)
     }
 
@@ -101,8 +120,15 @@ enum Keychain {
         ]
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        guard status == errSecSuccess, let data = result as? Data,
+              let password = String(data: data, encoding: .utf8) else { return nil }
+        // First successful read of a legacy item → re-write it with the
+        // all-apps ACL so this prompt never fires again (this build or any
+        // future one). Costs one prompt per connection, once, then silent.
+        if !isMigrated(connectionID) {
+            try? setPassword(password, for: connectionID)
+        }
+        return password
     }
 
     static func deletePassword(for connectionID: UUID) {

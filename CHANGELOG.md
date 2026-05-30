@@ -9,6 +9,11 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 ## Unreleased
 
 ### Fixed
+- **Keychain re-prompted for the password on every window / launch.** Connection
+  passwords were stored with a data-protection attribute the legacy keychain
+  ignores, so items kept a "this exact binary only" ACL and re-prompted whenever
+  the signature changed (every update). They now use an all-apps ACL; existing
+  items migrate on their next read (one prompt, once), then stay silent.
 - **Autocomplete could overwrite what you typed** — the popup preselected the
   top suggestion, which the native completer then committed on space/return (so
   typing `FROM ` could become a function name). It no longer preselects: a
