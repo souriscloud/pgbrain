@@ -88,12 +88,20 @@ enum RowsFetcher {
     /// We fetch `pageSize + 1` to detect whether more pages exist
     /// (so the pager can disable/enable the Next button without an
     /// extra COUNT(*) round-trip).
+    /// True for PostGIS geometry/geography columns. `format_type` reports these
+    /// as e.g. "geometry", "geometry(Point,4326)", "geography(Point,4326)".
+    static func isSpatialType(_ typeName: String) -> Bool {
+        let t = typeName.lowercased()
+        return t.hasPrefix("geometry") || t.hasPrefix("geography")
+    }
+
     static func page(
         offset: Int,
         pageSize: Int,
         from table: TableNode,
         client: PostgresClient,
-        filter: Filter = Filter(whereClause: "", orderByClause: "")
+        filter: Filter = Filter(whereClause: "", orderByClause: ""),
+        spatial: Bool = false
     ) async throws -> Page {
         let started = Date()
         guard !table.columns.isEmpty else {
@@ -103,9 +111,16 @@ enum RowsFetcher {
         let cappedSize   = max(1, pageSize)
 
         // Build "col1"::text AS "col1", ... so column ordering is deterministic
-        // even on tables where attnum has gaps.
+        // even on tables where attnum has gaps. With PostGIS, spatial columns
+        // render as readable WKT (ST_AsEWKT) instead of opaque WKB hex.
         let projection = table.columns
-            .map { "\(SQLIdent.quote($0.name))::text AS \(SQLIdent.quote($0.name))" }
+            .map { col -> String in
+                let q = SQLIdent.quote(col.name)
+                if spatial, Self.isSpatialType(col.typeName) {
+                    return "ST_AsEWKT(\(q)) AS \(q)"
+                }
+                return "\(q)::text AS \(q)"
+            }
             .joined(separator: ", ")
         let whereBody = filter.whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
         let orderBody = filter.orderByClause.trimmingCharacters(in: .whitespacesAndNewlines)

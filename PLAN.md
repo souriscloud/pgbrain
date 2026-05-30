@@ -498,6 +498,16 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches. CREATE INDEX SQL exercised against the demo DB. **Not yet released** — sits with iters 26–29 on top of v0.7.0.
 
+### Iter 31 — PostGIS awareness (2026-05-30, unreleased)
+**Goal**: first-class-ish support for spatial databases, auto-detected (no checkbox).
+
+- **Detection** — `loadServerInfo()` now also reads `(SELECT extversion FROM pg_extension WHERE extname='postgis')`; `ServerInfo.postgis` + `ConnectionService.hasPostGIS`. A green "PostGIS x.y" badge appears in the window chrome bar when present.
+- **Readable spatial values** — `RowsFetcher.page(spatial:)` renders geometry/geography columns with `ST_AsEWKT(col)` (e.g. `SRID=4326;POINT(14.4378 50.0755)`) instead of `col::text` (which returns opaque WKB hex). `isSpatialType` matches `geometry`/`geography` `format_type` prefixes; the loader passes `service.hasPostGIS`.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches. Installed PostGIS 3.6.3 locally, enabled it on `pgbrain_demo` with an `app.places` table — detection returns `3.6.3`, and `ST_AsEWKT` renders WKT for both geometry and geography columns. **Not yet released** — sits with iters 26–30 on top of v0.7.0.
+
+**Next (offered)**: a map view for geometry results (GeoJSON → SwiftUI Map), and a spatial-catalog browser (`geometry_columns`, `spatial_ref_sys`).
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

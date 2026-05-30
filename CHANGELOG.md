@@ -18,6 +18,9 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
   scanning the whole table. Add your own `LIMIT` to override.
 
 ### Added
+- **PostGIS awareness.** Spatial databases are auto-detected (no setting needed) —
+  a "PostGIS x.y" badge shows in the window header, and geometry/geography columns
+  render as readable WKT (`ST_AsEWKT`) in the grid instead of opaque WKB hex.
 - **JSON tree view.** The cell editor's JSON/JSONB view gains a Text / Tree
   toggle — Tree renders a collapsible, type-coloured tree of the value.
 - **New index builder.** Right-click a table → "New index…": tick columns (in

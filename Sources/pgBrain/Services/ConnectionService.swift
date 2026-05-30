@@ -58,8 +58,13 @@ final class ConnectionService {
     struct ServerInfo: Sendable, Equatable {
         var versionShort: String     // "PostgreSQL 16.2"
         var databaseSize: String     // "24 MB"
+        var postgis: String?         // PostGIS extension version, nil if absent
     }
     private(set) var serverInfo: ServerInfo?
+
+    /// True when the connected database has the PostGIS extension — gates
+    /// spatial conveniences (WKT rendering, the map view).
+    var hasPostGIS: Bool { serverInfo?.postgis != nil }
 
     /// Table/schema counts for the header, derived from the loaded snapshot.
     var schemaCount: Int { schema.schemas.count }
@@ -370,14 +375,16 @@ final class ConnectionService {
     func loadServerInfo() async {
         guard let client else { return }
         do {
-            let rows = try await client.query(
-                "SELECT current_setting('server_version'), pg_size_pretty(pg_database_size(current_database()))"
-            )
-            for try await (version, size) in rows.decode((String, String).self) {
+            let rows = try await client.query("""
+                SELECT current_setting('server_version'),
+                       pg_size_pretty(pg_database_size(current_database())),
+                       (SELECT extversion FROM pg_extension WHERE extname = 'postgis')
+                """)
+            for try await (version, size, postgis) in rows.decode((String, String, String?).self) {
                 // server_version can read "16.2" or "14.11 (Ubuntu …)" — keep
                 // just the version number.
                 let short = version.split(separator: " ").first.map(String.init) ?? version
-                serverInfo = ServerInfo(versionShort: "PostgreSQL \(short)", databaseSize: size)
+                serverInfo = ServerInfo(versionShort: "PostgreSQL \(short)", databaseSize: size, postgis: postgis)
                 break
             }
         } catch {

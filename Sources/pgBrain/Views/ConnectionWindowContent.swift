@@ -769,6 +769,16 @@ struct ConnectionWindowContent: View {
                     .padding(.horizontal, 5).padding(.vertical, 1)
                     .background(onChrome.opacity(0.14), in: Capsule())
                     .fixedSize()
+                if let postgis = info.postgis {
+                    Label("PostGIS \(postgis)", systemImage: "globe.europe.africa.fill")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(onChrome)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.green.opacity(appearance.connection.isProduction ? 0.35 : 0.22), in: Capsule())
+                        .fixedSize()
+                        .help("This database has the PostGIS spatial extension")
+                }
             }
             // Live vitals: database · size · table count, on the same line.
             HStack(spacing: 4) {

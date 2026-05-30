@@ -1269,7 +1269,8 @@ final class RowsLoader {
             let page = try await RowsFetcher.page(
                 offset: pageOffset,
                 pageSize: pageSize,
-                from: table, client: client, filter: filter
+                from: table, client: client, filter: filter,
+                spatial: service.hasPostGIS
             )
             state = .loaded(page)
             estimatedTotal = await estimate
