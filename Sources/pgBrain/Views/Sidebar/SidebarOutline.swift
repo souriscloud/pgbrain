@@ -134,6 +134,8 @@ struct SidebarOutlineView: NSViewRepresentable {
     var onDropSchema: ((String) -> Void)? = nil
     /// Database-level: create a new schema.
     var onCreateSchema: (() -> Void)? = nil
+    /// New table in the given schema (nil → let the sheet pick the schema).
+    var onNewTable: ((String?) -> Void)? = nil
     /// Find usages — pops the "where is this table referenced?" sheet.
     var onFindUsages: ((TableNode) -> Void)? = nil
     /// Open a function in the editor sheet.
@@ -164,6 +166,7 @@ struct SidebarOutlineView: NSViewRepresentable {
         var onRenameSchema: ((String) -> Void)?
         var onDropSchema: ((String) -> Void)?
         var onCreateSchema: (() -> Void)?
+        var onNewTable: ((String?) -> Void)?
         var onFindUsages: ((TableNode) -> Void)?
         var onOpenFunction: ((FunctionNode) -> Void)?
         var onTruncate: ((TableNode) -> Void)?
@@ -247,17 +250,31 @@ struct SidebarOutlineView: NSViewRepresentable {
         }
 
         private func databaseMenu() -> NSMenu? {
-            guard onCreateSchema != nil else { return nil }
+            guard onCreateSchema != nil || onNewTable != nil else { return nil }
             let menu = NSMenu()
-            let new = NSMenuItem(title: "New schema…", action: #selector(handleCreateSchema(_:)), keyEquivalent: "")
-            new.target = self
-            menu.addItem(new)
+            if onNewTable != nil {
+                let newTable = NSMenuItem(title: "New table…", action: #selector(handleNewTable(_:)), keyEquivalent: "")
+                newTable.target = self
+                menu.addItem(newTable)
+            }
+            if onCreateSchema != nil {
+                let new = NSMenuItem(title: "New schema…", action: #selector(handleCreateSchema(_:)), keyEquivalent: "")
+                new.target = self
+                menu.addItem(new)
+            }
             return menu
         }
 
         private func schemaMenu(name: String) -> NSMenu? {
-            guard onRenameSchema != nil || onDropSchema != nil || onCreateSchema != nil || onShowERD != nil else { return nil }
+            guard onRenameSchema != nil || onDropSchema != nil || onCreateSchema != nil || onShowERD != nil || onNewTable != nil else { return nil }
             let menu = NSMenu()
+            if onNewTable != nil {
+                let newTable = NSMenuItem(title: "New table in “\(name)”…", action: #selector(handleNewTable(_:)), keyEquivalent: "")
+                newTable.target = self
+                newTable.representedObject = name
+                menu.addItem(newTable)
+                menu.addItem(.separator())
+            }
             if onShowERD != nil {
                 let erd = NSMenuItem(title: "Show ERD…", action: #selector(handleShowERD(_:)), keyEquivalent: "")
                 erd.target = self
@@ -417,6 +434,9 @@ struct SidebarOutlineView: NSViewRepresentable {
         @objc private func handleCreateSchema(_ sender: NSMenuItem) {
             onCreateSchema?()
         }
+        @objc private func handleNewTable(_ sender: NSMenuItem) {
+            onNewTable?(sender.representedObject as? String)
+        }
         @objc private func handleFindUsages(_ sender: NSMenuItem) {
             guard let table = sender.representedObject as? TableNode else { return }
             onFindUsages?(table)
@@ -557,6 +577,7 @@ struct SidebarOutlineView: NSViewRepresentable {
         coord.onRenameSchema = onRenameSchema
         coord.onDropSchema = onDropSchema
         coord.onCreateSchema = onCreateSchema
+        coord.onNewTable = onNewTable
         coord.onFindUsages = onFindUsages
         coord.onOpenFunction = onOpenFunction
         coord.onTruncate = onTruncate

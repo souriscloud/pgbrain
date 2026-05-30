@@ -481,6 +481,15 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches (Welcome path). The band + subtitle render on connection windows — best seen by opening a connection (not auto-verified headlessly; I don't auto-connect, especially not to prod). **Not yet released** — sits with iters 26–27 on top of v0.7.0.
 
+### Iter 29 — Feature: CREATE TABLE builder (2026-05-30, unreleased)
+**Goal**: complete the DDL-creation story — the app could create schemas/databases and ALTER columns, but not create a table.
+
+- **`CreateTableSheet.swift`** — schema picker + table name + a list of column rows (name · type · NOT NULL · PK · default). Type field has a preset menu (bigint/text/timestamptz/uuid/jsonb/identity/serial/…) and stays free-text. A single table-level `PRIMARY KEY (...)` clause covers single or composite keys; only named columns are emitted; live SQL preview. On success it reloads the schema and opens the new table.
+- **`AdminActions.createTable(schema:name:body:service:)`** runs the assembled DDL through the usual operation → toast path.
+- Reachable from the connection `⋯` menu ("New table…", schema picker) and the sidebar context menu on a **database** ("New table…") or a **schema** ("New table in '…'", pre-selected) via a new `onNewTable` callback.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches. DDL exercised against `pgbrain_demo` — identity PK, NOT NULL, defaults (`now()`, `0`), `text[]`, and `jsonb` all create + insert correctly (rolled back). **Not yet released** — sits with iters 26–28 on top of v0.7.0.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

@@ -67,6 +67,7 @@ struct ConnectionWindowContent: View {
     @State private var showSaveWorkspaceDialog = false
     @State private var workspaceNameDraft = ""
     @State private var showCreateSchema = false
+    @State private var createTableSchema: IdentifiedString?
     @State private var renameSchemaTarget: IdentifiedString?
     @State private var dropSchemaTarget: IdentifiedString?
     @State private var commentsTarget: CommentsTarget?
@@ -119,6 +120,13 @@ struct ConnectionWindowContent: View {
         }
         .sheet(isPresented: $showCreateSchema) {
             CreateSchemaSheet(service: service) { showCreateSchema = false }
+        }
+        .sheet(item: $createTableSchema) { target in
+            CreateTableSheet(
+                service: service,
+                initialSchema: target.value.isEmpty ? nil : target.value,
+                onClose: { createTableSchema = nil }
+            )
         }
         .sheet(item: $renameSchemaTarget) { target in
             RenameSchemaSheet(service: service, original: target.value) {
@@ -630,6 +638,7 @@ struct ConnectionWindowContent: View {
                         dropSchemaTarget = IdentifiedString(id: name)
                     },
                     onCreateSchema: { showCreateSchema = true },
+                    onNewTable: { schema in createTableSchema = IdentifiedString(id: schema ?? "") },
                     onFindUsages: { table in
                         findUsagesTarget = CommentsTarget(schema: table.schema, table: table.name)
                     },
@@ -788,6 +797,7 @@ struct ConnectionWindowContent: View {
                 Button("LISTEN / NOTIFY…") { showNotifyPanel = true }
                 Button("Snippets…") { showSnippets = true }
                 Divider()
+                Button("New table…") { createTableSchema = IdentifiedString(id: "") }
                 Button("New schema…") { showCreateSchema = true }
                 Button("New database…") { showCreateDatabase = true }
                 Divider()

@@ -71,6 +71,14 @@ enum AdminActions {
         await runDDL("CREATE SCHEMA \(SQLIdent.quote(name))", summary: "CREATE SCHEMA \(name)", service: service)
     }
 
+    /// `CREATE TABLE schema.name ( <body> )`. The caller assembles `body`
+    /// (column definitions + optional PRIMARY KEY) so the sheet can show a
+    /// live preview of the exact SQL that runs.
+    static func createTable(schema: String, name: String, body: String, service: ConnectionService) async -> Result<Void, Error> {
+        let sql = "CREATE TABLE \(SQLIdent.quote(schema)).\(SQLIdent.quote(name)) (\n\(body)\n)"
+        return await runDDL(sql, summary: "CREATE TABLE \(schema).\(name)", service: service)
+    }
+
     static func renameSchema(from old: String, to new: String, service: ConnectionService) async -> Result<Void, Error> {
         await runDDL(
             "ALTER SCHEMA \(SQLIdent.quote(old)) RENAME TO \(SQLIdent.quote(new))",

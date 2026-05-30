@@ -9,6 +9,10 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 ## Unreleased
 
 ### Added
+- **New table builder.** Visual `CREATE TABLE`: pick a schema, name it, add column
+  rows (name · type · NOT NULL · PK · default) with a type-preset menu and a live
+  SQL preview. Reachable from the connection menu, or right-clicking a database or
+  schema in the sidebar. Creates, then opens the new table.
 - **Insert rows.** The table grid's **＋** button adds a blank draft row (green
   wash, ✦ gutter marker); fill its cells and **Apply** to `INSERT`. Only the
   columns you touch are sent, so identity sequences, defaults, and triggers fill
