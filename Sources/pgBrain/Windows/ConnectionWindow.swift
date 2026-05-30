@@ -63,6 +63,18 @@ final class ConnectionWindowCloseObserver: NSObject, NSWindowDelegate {
         self.onClose = onClose
     }
 
+    // The native title flips back to visible on a number of AppKit events
+    // (dismissing a sheet → the window becomes key again, fullscreen
+    // transitions, etc.) which would draw it on top of the custom chrome bar.
+    // Re-hide it whenever the window re-takes focus or changes mode.
+    private func rehideTitle(_ notification: Notification) {
+        (notification.object as? NSWindow)?.titleVisibility = .hidden
+    }
+    func windowDidBecomeKey(_ notification: Notification) { rehideTitle(notification) }
+    func windowDidBecomeMain(_ notification: Notification) { rehideTitle(notification) }
+    func windowDidExitFullScreen(_ notification: Notification) { rehideTitle(notification) }
+    func windowDidEnterFullScreen(_ notification: Notification) { rehideTitle(notification) }
+
     func windowWillClose(_ notification: Notification) {
         MainActor.assumeIsolated {
             service.shutdown()

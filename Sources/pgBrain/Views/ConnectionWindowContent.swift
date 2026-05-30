@@ -62,6 +62,10 @@ struct ConnectionWindowContent: View {
     @State private var showSchemaDiff = false
     @State private var sidebarFilter: String = ""
     @State private var sidebarVisible: Bool = true
+    /// Persisted sidebar width — HSplitView never honoured `idealWidth`
+    /// reliably (opened far too wide), so we drive the width ourselves.
+    @AppStorage("pgbrain.sidebarWidth") private var sidebarWidth: Double = 230
+    @State private var sidebarDragBase: Double?
     @State private var showActivityPanel = false
     @State private var showQueryHistory = false
     @State private var showSaveWorkspaceDialog = false
@@ -357,23 +361,43 @@ struct ConnectionWindowContent: View {
 
     @ViewBuilder
     private var connectedWorkspace: some View {
-        HSplitView {
+        HStack(spacing: 0) {
             if sidebarVisible {
                 sidebarPane
-                    // HSplitView remembers per-session manual resizes,
-                    // but its first-open width was being computed from
-                    // `idealWidth = 260` plus column content padding,
-                    // ending up much wider than ⌘B-toggled re-show
-                    // (which honours the minWidth). Tightened the
-                    // ideal so the default matches the toggled width.
-                    .frame(minWidth: 200, idealWidth: 220, maxWidth: 420)
+                    .frame(width: CGFloat(sidebarWidth))
                     .transition(.move(edge: .leading).combined(with: .opacity))
+                sidebarResizeHandle
             }
             workspacePane
-                .frame(minWidth: 400, maxWidth: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(keyboardShortcuts)
         .animation(.easeInOut(duration: 0.18), value: sidebarVisible)
+    }
+
+    /// 1pt divider with an 8pt grab strip; drag to resize the sidebar
+    /// (clamped 180–460) and the width persists across windows/launches.
+    private var sidebarResizeHandle: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor))
+            .frame(width: 1)
+            .overlay(
+                Color.clear
+                    .frame(width: 9)
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                    }
+                    .gesture(
+                        DragGesture(minimumDistance: 1)
+                            .onChanged { value in
+                                if sidebarDragBase == nil { sidebarDragBase = sidebarWidth }
+                                let base = sidebarDragBase ?? sidebarWidth
+                                sidebarWidth = min(460, max(180, base + Double(value.translation.width)))
+                            }
+                            .onEnded { _ in sidebarDragBase = nil }
+                    )
+            )
     }
 
     /// Hidden buttons that own the per-window keyboard shortcuts.
