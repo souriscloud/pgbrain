@@ -144,10 +144,18 @@ struct SpatialMapView: View {
 /// the WKT keyword prefixes.
 enum SpatialDetect {
     static func looksLikeGeometry(_ s: String) -> Bool {
-        let u = s.uppercased()
-        return ["SRID=", "POINT", "LINESTRING", "POLYGON",
-                "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION"]
-            .contains { u.hasPrefix($0) }
+        let u = s.uppercased().trimmingCharacters(in: .whitespaces)
+        if u.hasPrefix("SRID=") { return true }
+        // A real WKT geometry has "(" after the type keyword. Requiring it
+        // means a *label* column holding the words "point"/"polygon" (e.g. a
+        // `kind` column) is NOT mistaken for geometry — which would otherwise
+        // send `ST_AsGeoJSON('point')` to the server and blow up.
+        for kw in ["POINT", "LINESTRING", "POLYGON", "MULTIPOINT",
+                   "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION"] where u.hasPrefix(kw) {
+            let rest = u.dropFirst(kw.count).drop(while: { $0 == " " })
+            if rest.first == "(" { return true }
+        }
+        return false
     }
 
     /// Returns the geometry column name + a label column (the first other

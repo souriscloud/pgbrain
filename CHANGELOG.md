@@ -9,6 +9,14 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 ## Unreleased
 
 ### Fixed
+- **Autocomplete could overwrite what you typed** — the popup preselected the
+  top suggestion, which the native completer then committed on space/return (so
+  typing `FROM ` could become a function name). It no longer preselects: a
+  suggestion is only inserted when you explicitly pick it. It can never silently
+  replace your text.
+- **Scratchpad "Map" on a table with a text column like `kind`** ("point"/"polygon"
+  values) mis-detected that as the geometry column and errored. Detection now
+  requires real WKT (`POINT(`…), not the bare words.
 - **Scratchpad showed control-char garbage for binary columns** (PostGIS
   geometry, `bytea`). Geometry now decodes to WKT; `bytea`/other binary shows hex.
 - **Scratchpad showed empty cells for numbers/dates** (e.g. `SELECT count(*)` was

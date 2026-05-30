@@ -426,8 +426,13 @@ private struct SqlCellEditor: NSViewRepresentable {
             // the provider can derive context from what's to the left of
             // the caret (FROM / WHERE / ORDER BY / qualifier-dot etc.).
             let ours = completions(partial, ns as String, charRange.location)
-            // Show the first match preselected so Enter / Tab inserts it.
-            index?.pointee = ours.isEmpty ? -1 : 0
+            // CRITICAL: never preselect. With a selected item, the native
+            // popup auto-commits it when you type a space/return — so typing
+            // "FROM " could replace "FROM" with whatever ranked first. Leaving
+            // nothing selected means completion only inserts when the user
+            // explicitly arrows to an item and accepts it. It must never
+            // silently overwrite what was typed.
+            index?.pointee = -1
             return ours.isEmpty ? words : ours
         }
     }
