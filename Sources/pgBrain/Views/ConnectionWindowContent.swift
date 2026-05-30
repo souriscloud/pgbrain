@@ -1099,10 +1099,27 @@ struct StatusFooter: View {
                 Text("connected at \(since.formatted(date: .omitted, time: .shortened))")
                     .font(.caption).foregroundStyle(.tertiary)
             }
+            kofiLink
         }
         .padding(.horizontal, Tokens.Spacing.md)
         .padding(.vertical, 6)
         .background(Color(nsColor: .underPageBackgroundColor))
+    }
+
+    /// Quiet "buy me a coffee" link — pgBrain is free + one-human-made, so a
+    /// small tinted cup in the footer, not a banner.
+    private var kofiLink: some View {
+        Link(destination: URL(string: "https://ko-fi.com/souriscloud")!) {
+            HStack(spacing: 3) {
+                Image(systemName: "cup.and.saucer.fill")
+                    .foregroundStyle(Color(red: 1.0, green: 0.37, blue: 0.36))
+                Text("Support")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .buttonStyle(.plain)
+        .help("pgBrain is free and made by one person — buy me a coffee on Ko-fi ☕")
     }
 
     private var opsIndicator: some View {
