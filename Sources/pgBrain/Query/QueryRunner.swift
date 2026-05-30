@@ -28,6 +28,73 @@ struct QueryResult: Sendable {
 enum QueryRunner {
     static let defaultRowLimit = 1000
 
+    /// Stringify a cell for the grid. Text-like types decode straight to
+    /// `String`; numeric/bool/uuid/date types come back in binary wire format
+    /// (so a bare `String` decode fails — this is why `SELECT count(*)` showed
+    /// an empty cell), so we decode them to their Swift type and render. Exotic
+    /// types we don't special-case fall through to nil rather than crashing.
+    static func stringify(_ cell: PostgresCell) -> String? {
+        guard cell.bytes != nil else { return nil }
+        if let s = try? cell.decode(String.self, context: .default) { return s }
+        switch cell.dataType {
+        case .int2:
+            return (try? cell.decode(Int16.self, context: .default)).map { String($0) }
+        case .int4, .oid:
+            return (try? cell.decode(Int32.self, context: .default)).map { String($0) }
+        case .int8:
+            return (try? cell.decode(Int64.self, context: .default)).map { String($0) }
+        case .float4:
+            return (try? cell.decode(Float.self, context: .default)).map { String($0) }
+        case .float8:
+            return (try? cell.decode(Double.self, context: .default)).map { String($0) }
+        case .numeric:
+            return (try? cell.decode(Decimal.self, context: .default)).map { "\($0)" }
+        case .bool:
+            return (try? cell.decode(Bool.self, context: .default)).map { $0 ? "true" : "false" }
+        case .uuid:
+            return (try? cell.decode(UUID.self, context: .default))?.uuidString.lowercased()
+        case .date:
+            return (try? cell.decode(Date.self, context: .default)).map { dateOnlyFormatter.string(from: $0) }
+        case .timestamp, .timestamptz:
+            return (try? cell.decode(Date.self, context: .default)).map { timestampFormatter.string(from: $0) }
+        default:
+            return nil
+        }
+    }
+
+    private static let dateOnlyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
+    private static let timestampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSSZ"
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
+    /// Append a `LIMIT` to a bare top-level SELECT/WITH/VALUES that doesn't
+    /// already have one, so the *server* stops producing rows instead of
+    /// scanning the whole table while we only keep the first page. Fetches
+    /// `cap + 1` so the caller can still detect "there's more". No-op for
+    /// anything that isn't a plain read, or that already limits itself.
+    static func applyAutoLimit(_ sql: String, cap: Int) -> String {
+        var core = sql.trimmingCharacters(in: .whitespacesAndNewlines)
+        while core.hasSuffix(";") {
+            core = String(core.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let toks = SQLSafety.tokens(in: core).map { $0.lowercased() }
+        guard let first = toks.first, ["select", "with", "values"].contains(first) else { return sql }
+        // Already self-limiting (top-level or in a subquery) — leave it alone.
+        if toks.contains("limit") || toks.contains("fetch") { return sql }
+        return core + "\nLIMIT \(cap + 1)"
+    }
+
     static func run(
         _ sql: String,
         on client: PostgresClient,
@@ -117,7 +184,10 @@ enum QueryRunner {
             return QueryResult(page: page, commandTag: tag)
         }
 
-        let stream = try await connection.query(PostgresQuery(unsafeSQL: sql), logger: pgbrainQuietLogger)
+        // Bound the server's work: append LIMIT to a bare SELECT so it doesn't
+        // scan an entire huge table while we only page the first `limit` rows.
+        let boundedSQL = applyAutoLimit(sql, cap: limit)
+        let stream = try await connection.query(PostgresQuery(unsafeSQL: boundedSQL), logger: pgbrainQuietLogger)
         var columns: [ColumnNode] = []
         var rows: [[String?]] = []
         var truncated = false
@@ -142,12 +212,7 @@ enum QueryRunner {
             var values: [String?] = []
             values.reserveCapacity(columns.count)
             for i in 0..<columns.count {
-                let cell = random[i]
-                if cell.bytes == nil {
-                    values.append(nil)
-                } else {
-                    values.append(try? cell.decode(String.self, context: .default))
-                }
+                values.append(stringify(random[i]))
             }
             rows.append(values)
             rowIndex += 1
@@ -186,8 +251,7 @@ enum QueryRunner {
             var line: [String?] = []
             line.reserveCapacity(columns.count)
             for c in 0..<columns.count {
-                let cell = random[c]
-                line.append(cell.bytes == nil ? nil : try? cell.decode(String.self, context: .default))
+                line.append(stringify(random[c]))
             }
             values.append(line)
         }

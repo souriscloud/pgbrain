@@ -8,6 +8,15 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
 ## Unreleased
 
+### Fixed
+- **Scratchpad showed empty cells for numbers/dates** (e.g. `SELECT count(*)` was
+  blank). Ad-hoc query results are now decoded per type (int, numeric, bool, uuid,
+  date, timestamp) instead of only as text.
+- **Unbounded `SELECT` on a huge table could hang or crash.** Bare top-level
+  SELECT/WITH/VALUES queries without a `LIMIT` now get one appended automatically
+  (first 1,000 rows + a "more" indicator), so the server stops early instead of
+  scanning the whole table. Add your own `LIMIT` to override.
+
 ### Added
 - **JSON tree view.** The cell editor's JSON/JSONB view gains a Text / Tree
   toggle — Tree renders a collapsible, type-coloured tree of the value.
