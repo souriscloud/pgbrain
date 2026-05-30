@@ -6,6 +6,14 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
+## Unreleased
+
+### Added
+- **Send Feedback.** A built-in feedback / bug-report form (menu bar → Send
+  Feedback…, and the connection ⋯ menu) that opens a pre-filled GitHub issue —
+  bug / feature / question, with optional app + system info. No account? "Copy
+  report" puts the whole thing on the clipboard. Free, no token, your GitHub login.
+
 ## v0.8.0 — 2026-05-30
 
 ### Fixed

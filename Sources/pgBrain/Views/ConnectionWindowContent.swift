@@ -891,6 +891,8 @@ struct ConnectionWindowContent: View {
                         }
                     }
                 }
+                Divider()
+                Button("Send Feedback…") { AppDelegate.shared?.showFeedback() }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.system(size: 14))
