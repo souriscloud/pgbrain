@@ -508,6 +508,15 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Next (offered)**: a map view for geometry results (GeoJSON → SwiftUI Map), and a spatial-catalog browser (`geometry_columns`, `spatial_ref_sys`).
 
+### Iter 32 — PostGIS map view + Ko-fi footer link (2026-05-30, unreleased)
+**Goal**: the standout PostGIS feature (plot geometry on a map), plus gentle support-the-project visibility.
+
+- **`SpatialMapView.swift`** — a third view mode (Grid · Form · **Map**) that appears on the table toolbar only when the table has a geometry/geography column (and PostGIS is present). Fetches features as GeoJSON (`ST_AsGeoJSON`, up to 2000), parses them client-side (`GeoJSON`/`SimpleGeom`, flattening multi-geometries), and renders on a SwiftUI `Map`: points → `Marker`, linestrings → `MapPolyline`, polygons → `MapPolygon`, auto-fitting the camera to the bounding box. Labels come from the first text column. Footer notes feature count + the WGS84/lon-lat assumption (projected SRIDs would land off-map — a future `ST_Transform` pass).
+- **Ko-fi link** — a quiet tinted `cup.and.saucer.fill` + "Support" `Link` in the status footer (ko-fi.com/souriscloud). Tasteful, not a banner.
+- Demo DB gained `app.places` (typed Point geometry + geography) and `app.shapes` (mixed point/line/polygon) for exercising the map.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches. GeoJSON queries + parsing verified against `pgbrain_demo` (PostGIS 3.6.3) for Point/LineString/Polygon. **Not yet released** — sits with iters 26–31 on top of v0.7.0.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

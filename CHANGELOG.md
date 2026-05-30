@@ -18,6 +18,9 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
   scanning the whole table. Add your own `LIMIT` to override.
 
 ### Added
+- **PostGIS map view.** Any table with a geometry/geography column gets a **Map**
+  toggle next to Grid/Form — it plots features on a real map (points as markers,
+  linestrings as polylines, polygons as filled shapes), auto-fitting to the data.
 - **PostGIS awareness.** Spatial databases are auto-detected (no setting needed) —
   a "PostGIS x.y" badge shows in the window header, and geometry/geography columns
   render as readable WKT (`ST_AsEWKT`) in the grid instead of opaque WKB hex.

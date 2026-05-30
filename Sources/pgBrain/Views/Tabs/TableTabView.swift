@@ -36,7 +36,23 @@ struct TableTabView: View {
     @State private var rowViewMode: RowViewMode = .grid
     @State private var formRowIndex = 0
 
-    enum RowViewMode { case grid, form }
+    enum RowViewMode { case grid, form, map }
+
+    /// PostGIS geometry/geography columns on this table (empty without PostGIS).
+    private var spatialColumns: [ColumnNode] {
+        guard service.hasPostGIS else { return [] }
+        return table.columns.filter { RowsFetcher.isSpatialType($0.typeName) }
+    }
+
+    /// A text-ish column to label map markers with (first non-spatial
+    /// text/char/name column, else nil).
+    private var mapLabelColumn: String? {
+        table.columns.first { col in
+            let t = col.typeName.lowercased()
+            return !RowsFetcher.isSpatialType(col.typeName)
+                && ["text", "varchar", "char", "name", "bpchar"].contains { t.hasPrefix($0) }
+        }?.name
+    }
     @FocusState private var findFocused: Bool
 
     init(table: TableNode, tab: WorkspaceState.Tab, service: ConnectionService) {
@@ -522,15 +538,18 @@ struct TableTabView: View {
 
             Spacer()
 
-            // Grid / Form view toggle.
+            // Grid / Form (/ Map when the table has geometry) view toggle.
             Picker("", selection: $rowViewMode) {
                 Image(systemName: "tablecells").tag(RowViewMode.grid)
                 Image(systemName: "list.bullet.rectangle.portrait").tag(RowViewMode.form)
+                if !spatialColumns.isEmpty {
+                    Image(systemName: "map").tag(RowViewMode.map)
+                }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
-            .help("Switch between grid and single-row form")
+            .help(spatialColumns.isEmpty ? "Switch between grid and single-row form" : "Grid · form · map (this table has geometry)")
 
             Button {
                 Task { await loader.loadFirstPage() }
@@ -933,6 +952,13 @@ struct TableTabView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if rowViewMode == .map, let geom = spatialColumns.first {
+                        SpatialMapView(
+                            service: service,
+                            table: table,
+                            geometryColumn: geom.name,
+                            labelColumn: mapLabelColumn
+                        )
                     } else if rowViewMode == .form {
                         RowFormView(
                             page: visible,
