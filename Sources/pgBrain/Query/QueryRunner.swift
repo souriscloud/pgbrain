@@ -63,8 +63,24 @@ enum QueryRunner {
         default:
             // Text-format / textual types (text, varchar, json, jsonb, enums,
             // inet, …) — PostgresNIO's String decoder reads these correctly.
-            return try? cell.decode(String.self, context: .default)
+            // But its eager fallback also reads *binary* types (PostGIS
+            // geometry WKB, bytea, …) as raw bytes → control-char garbage.
+            // Detect that and show hex (matching `::text`) instead.
+            if let s = try? cell.decode(String.self, context: .default) {
+                if s.utf8.contains(where: { $0 == 0x00 || $0 < 0x09 || ($0 > 0x0D && $0 < 0x20) }) {
+                    return hexEncode(cell.bytes)
+                }
+                return s
+            }
+            return hexEncode(cell.bytes)
         }
+    }
+
+    /// Uppercase hex of a cell's raw bytes — the readable stand-in for binary
+    /// values (PostGIS EWKB, bytea) that have no sensible text decode.
+    private static func hexEncode(_ buffer: ByteBuffer?) -> String? {
+        guard let buffer else { return nil }
+        return buffer.readableBytesView.map { String(format: "%02X", $0) }.joined()
     }
 
     private static let dateOnlyFormatter: DateFormatter = {

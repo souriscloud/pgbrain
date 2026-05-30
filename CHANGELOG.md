@@ -9,6 +9,9 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 ## Unreleased
 
 ### Fixed
+- **Scratchpad showed control-char garbage for binary columns** (PostGIS
+  geometry, `bytea`). These now show hex (matching `::text`); use `ST_AsEWKT(geom)`
+  for WKT, or open the table (the grid renders geometry as WKT).
 - **Scratchpad showed empty cells for numbers/dates** (e.g. `SELECT count(*)` was
   blank). Ad-hoc query results are now decoded per type (int, numeric, bool, uuid,
   date, timestamp) instead of only as text.
