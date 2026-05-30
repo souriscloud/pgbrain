@@ -9,6 +9,9 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 ## Unreleased
 
 ### Added
+- **New index builder.** Right-click a table → "New index…": tick columns (in
+  index order), choose UNIQUE + access method (btree/hash/gin/gist/brin/spgist),
+  add an optional partial `WHERE`, with a live SQL preview and auto-suggested name.
 - **New table builder.** Visual `CREATE TABLE`: pick a schema, name it, add column
   rows (name · type · NOT NULL · PK · default) with a type-preset menu and a live
   SQL preview. Reachable from the connection menu, or right-clicking a database or

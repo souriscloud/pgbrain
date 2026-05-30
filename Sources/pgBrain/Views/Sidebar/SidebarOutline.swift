@@ -144,6 +144,7 @@ struct SidebarOutlineView: NSViewRepresentable {
     var onTruncate: ((TableNode) -> Void)? = nil
     /// Generate test data into a table.
     var onGenerateData: ((TableNode) -> Void)? = nil
+    var onNewIndex: ((TableNode) -> Void)? = nil
     /// Edit a view / matview body.
     var onEditView: ((TableNode) -> Void)? = nil
     /// Open the ERD for a schema.
@@ -171,6 +172,7 @@ struct SidebarOutlineView: NSViewRepresentable {
         var onOpenFunction: ((FunctionNode) -> Void)?
         var onTruncate: ((TableNode) -> Void)?
         var onGenerateData: ((TableNode) -> Void)?
+        var onNewIndex: ((TableNode) -> Void)?
         var onEditView: ((TableNode) -> Void)?
         var onShowERD: ((String) -> Void)?
 
@@ -342,6 +344,12 @@ struct SidebarOutlineView: NSViewRepresentable {
             }
             // Data tools — real tables only.
             if table.kind == .table {
+                if onNewIndex != nil {
+                    let idx = NSMenuItem(title: "New index…", action: #selector(handleNewIndex(_:)), keyEquivalent: "")
+                    idx.target = self
+                    idx.representedObject = table
+                    menu.addItem(idx)
+                }
                 if onGenerateData != nil {
                     let gen = NSMenuItem(title: "Generate data…", action: #selector(handleGenerateData(_:)), keyEquivalent: "")
                     gen.target = self
@@ -452,6 +460,10 @@ struct SidebarOutlineView: NSViewRepresentable {
         @objc private func handleGenerateData(_ sender: NSMenuItem) {
             guard let table = sender.representedObject as? TableNode else { return }
             onGenerateData?(table)
+        }
+        @objc private func handleNewIndex(_ sender: NSMenuItem) {
+            guard let table = sender.representedObject as? TableNode else { return }
+            onNewIndex?(table)
         }
         @objc private func handleEditView(_ sender: NSMenuItem) {
             guard let table = sender.representedObject as? TableNode else { return }
@@ -582,6 +594,7 @@ struct SidebarOutlineView: NSViewRepresentable {
         coord.onOpenFunction = onOpenFunction
         coord.onTruncate = onTruncate
         coord.onGenerateData = onGenerateData
+        coord.onNewIndex = onNewIndex
         coord.onEditView = onEditView
         coord.onShowERD = onShowERD
     }

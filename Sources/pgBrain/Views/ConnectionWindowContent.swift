@@ -81,6 +81,7 @@ struct ConnectionWindowContent: View {
     @State private var editFunction: FunctionNode?
     @State private var truncateTarget: CommentsTarget?
     @State private var generateDataTarget: TableNode?
+    @State private var newIndexTarget: TableNode?
     @State private var editViewTarget: TableNode?
     @State private var erdSchema: IdentifiedString?
 
@@ -200,6 +201,9 @@ struct ConnectionWindowContent: View {
                 onClose: { generateDataTarget = nil },
                 onDone: { reloadActiveTab() }
             )
+        }
+        .sheet(item: $newIndexTarget) { node in
+            CreateIndexSheet(service: service, table: node) { newIndexTarget = nil }
         }
         .sheet(item: $editViewTarget) { node in
             ViewEditorView(
@@ -650,6 +654,9 @@ struct ConnectionWindowContent: View {
                     },
                     onGenerateData: { table in
                         generateDataTarget = table
+                    },
+                    onNewIndex: { table in
+                        newIndexTarget = table
                     },
                     onEditView: { table in
                         editViewTarget = table
