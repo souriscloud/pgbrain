@@ -16,31 +16,27 @@ enum ConnectionWindowFactory {
         window.title = connection.name
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         window.titlebarAppearsTransparent = true
-        window.titleVisibility = .visible
+        // The custom chrome bar (in ConnectionWindowContent) IS the title bar —
+        // it draws under the transparent titlebar with the traffic lights on
+        // top. Hide the native title text so there's no doubling.
+        window.titleVisibility = .hidden
         window.setContentSize(CGSize(width: 1100, height: 720))
         window.minSize = CGSize(width: 720, height: 480)
         window.isReleasedWhenClosed = false
+        // The app runs its own session restoration; Cocoa's automatic
+        // per-window restoration would otherwise re-apply a stale
+        // titleVisibility (.visible) over our hidden title, double-drawing
+        // the native title on top of the custom chrome bar.
+        window.isRestorable = false
         window.identifier = NSUserInterfaceItemIdentifier("pgBrain.Connection.\(connection.id.uuidString)")
 
         if connection.isProduction {
             window.appearance = NSAppearance(named: .darkAqua) ?? window.appearance
-            window.backgroundColor = NSColor(Tokens.Brand.danger).withAlphaComponent(0.06)
         }
 
-        // Colored band across the title bar so the window header itself
-        // carries the connection's identity — red for production, the tag
-        // colour otherwise. This is what makes a background window instantly
-        // identifiable (and a prod window impossible to mistake).
-        let bandColor: NSColor? = connection.isProduction
-            ? NSColor(Tokens.Brand.danger)
-            : (connection.colorTag == .none ? nil : NSColor(connection.colorTag.swiftUIColor))
-        if let bandColor {
-            window.addTitlebarAccessoryViewController(TitlebarBandAccessory(color: bandColor))
-        }
-
-        // Live title + subtitle that track connection state and the active
-        // tab. The subtitle renders right in the title bar, so the window
-        // header updates as you connect and move between tabs.
+        // Keep `window.title` synced (name — active tab) for the Window menu,
+        // Mission Control, and the ⌘` switcher, even though the titlebar text
+        // itself is hidden in favour of the custom chrome bar.
         let titleSync = WindowTitleSync(window: window, service: service)
         objc_setAssociatedObject(window, &WindowTitleSync.assocKey, titleSync, .OBJC_ASSOCIATION_RETAIN)
 
@@ -100,50 +96,16 @@ final class WindowTitleSync {
 
     private func apply() {
         guard let window else { return }
-        window.title = service.connection.name
-        window.subtitle = subtitleText()
-    }
-
-    private func subtitleText() -> String {
-        switch service.state {
-        case .idle, .connecting:
-            return "Connecting…"
-        case .error:
-            return "Connection failed"
-        case .closed:
-            return "Disconnected"
-        case .connected:
-            let conn = service.connection
-            let db = conn.database.isEmpty ? conn.host : conn.database
-            let prefix = conn.isProduction ? "PRODUCTION · " : ""
-            if let tab = service.workspace.selectedTab {
-                return "\(prefix)\(db) · \(tab.title)"
-            }
-            return "\(prefix)\(db)"
+        // Title text is hidden in the titlebar, but still used by the Window
+        // menu / Mission Control / window switcher — keep it descriptive.
+        if case .connected = service.state, let tab = service.workspace.selectedTab {
+            window.title = "\(service.connection.name) — \(tab.title)"
+        } else {
+            window.title = service.connection.name
         }
+        // Assigning `title` flips `titleVisibility` back to `.visible`, which
+        // would draw the native title over the custom chrome bar. Re-hide it
+        // every time — this is the actual cause of the double-title.
+        window.titleVisibility = .hidden
     }
-}
-
-/// A thin full-width colour band pinned to the bottom of the title bar.
-/// The accessory's height is the view's height, so it MUST be pinned with an
-/// explicit constraint — a frame-only height gets stretched to fill the
-/// titlebar's accessory band (which is what made it a fat red block).
-final class TitlebarBandAccessory: NSTitlebarAccessoryViewController {
-    private static let bandHeight: CGFloat = 3
-
-    init(color: NSColor) {
-        super.init(nibName: nil, bundle: nil)
-        let band = NSView()
-        band.wantsLayer = true
-        band.layer?.backgroundColor = color.cgColor
-        band.translatesAutoresizingMaskIntoConstraints = false
-        view = band
-        NSLayoutConstraint.activate([
-            band.heightAnchor.constraint(equalToConstant: Self.bandHeight),
-        ])
-        layoutAttribute = .bottom
-        fullScreenMinHeight = Self.bandHeight
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

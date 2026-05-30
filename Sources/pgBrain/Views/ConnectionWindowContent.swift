@@ -94,15 +94,19 @@ struct ConnectionWindowContent: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // The connection-colour / production stripe now lives in the
-            // window title bar itself (see TitlebarBandAccessory) so the
-            // whole window header carries the connection's identity.
+            // Custom chrome bar IS the title bar: it draws under the
+            // transparent titlebar, traffic lights float on top of it, and it
+            // carries the connection's identity (red for production).
+            windowChromeBar
             mainArea
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay { ToastOverlay(center: service.toasts) }
             Divider()
             StatusFooter(service: service)
         }
+        // Let the chrome bar draw up into the titlebar region (under the
+        // traffic lights) instead of being pushed below it.
+        .ignoresSafeArea(.container, edges: .top)
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(item: $copySource) { source in
             CrossDBCopyView(source: source, sourceService: service)
@@ -591,8 +595,6 @@ struct ConnectionWindowContent: View {
     @ViewBuilder
     private var sidebarPane: some View {
         VStack(spacing: 0) {
-            sidebarHeader
-            Divider().opacity(0.6)
             switch service.schemaState {
             case .loaded:
                 sidebarSearchField
@@ -699,57 +701,78 @@ struct ConnectionWindowContent: View {
         .overlay(Divider().opacity(0.4), alignment: .bottom)
     }
 
-    private var sidebarHeader: some View {
+    // MARK: - Window chrome bar (the custom title bar)
+
+    /// Foreground colours that adapt to the tinted bar — white on the red
+    /// production bar, normal label colours otherwise.
+    private var onChrome: Color { appearance.connection.isProduction ? .white : .primary }
+    private var onChromeSecondary: Color {
+        appearance.connection.isProduction ? .white.opacity(0.82) : .secondary
+    }
+
+    /// Background fill for the chrome bar: a red gradient for production, a
+    /// soft wash of the tag colour when tagged, else a quiet toolbar material.
+    private var chromeBackground: AnyShapeStyle {
+        if appearance.connection.isProduction {
+            return AnyShapeStyle(LinearGradient(
+                colors: [Tokens.Brand.danger, Tokens.Brand.danger.opacity(0.80)],
+                startPoint: .leading, endPoint: .trailing
+            ))
+        } else if appearance.connection.colorTag != .none {
+            return AnyShapeStyle(appearance.connection.colorTag.swiftUIColor.opacity(0.16))
+        } else {
+            return AnyShapeStyle(Material.bar)
+        }
+    }
+
+    private var windowChromeBar: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(appearance.connection.colorTag == .none
-                      ? Color.secondary.opacity(0.25)
-                      : appearance.connection.colorTag.swiftUIColor)
-                .frame(width: 10, height: 10)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    Text(appearance.connection.name)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
-                    if let info = service.serverInfo {
-                        Text(info.versionShort)
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 0.5)
-                            .background(Color.secondary.opacity(0.12), in: Capsule())
-                            .transition(.opacity)
-                    }
-                }
-                // Live vitals: database · size · table count. Size tracks
-                // inserts/imports because it refreshes on every schema reload.
-                HStack(spacing: 4) {
-                    Text(appearance.connection.database.isEmpty ? appearance.connection.host : appearance.connection.database)
-                        .lineLimit(1)
-                    if let info = service.serverInfo {
-                        Text("·").foregroundStyle(.tertiary)
-                        Text(info.databaseSize)
-                            .contentTransition(.numericText())
-                    }
-                    if service.schemaState == .loaded, service.tableCount > 0 {
-                        Text("·").foregroundStyle(.tertiary)
-                        Text("\(service.tableCount) table\(service.tableCount == 1 ? "" : "s")")
-                    }
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            }
-            .animation(.easeInOut(duration: 0.25), value: service.serverInfo)
-            Spacer()
+                .fill(appearance.connection.isProduction
+                      ? Color.white
+                      : (appearance.connection.colorTag == .none
+                         ? Color.secondary.opacity(0.35)
+                         : appearance.connection.colorTag.swiftUIColor))
+                .frame(width: 9, height: 9)
+            Text(appearance.connection.name)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(onChrome)
+                .fixedSize()
             if appearance.connection.isProduction {
-                Text("PROD")
-                    .font(.system(size: 9, weight: .bold))
-                    .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background(Tokens.Brand.danger)
+                Text("PRODUCTION")
+                    .font(.system(size: 9, weight: .heavy))
                     .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.75), lineWidth: 1))
+                    .fixedSize()
             }
+            if let info = service.serverInfo {
+                Text(info.versionShort)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(onChromeSecondary)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(onChrome.opacity(0.14), in: Capsule())
+                    .fixedSize()
+            }
+            // Live vitals: database · size · table count, on the same line.
+            HStack(spacing: 4) {
+                Text(appearance.connection.database.isEmpty ? appearance.connection.host : appearance.connection.database)
+                if let info = service.serverInfo {
+                    Text("·").opacity(0.5)
+                    Text(info.databaseSize).contentTransition(.numericText())
+                }
+                if service.schemaState == .loaded, service.tableCount > 0 {
+                    Text("·").opacity(0.5)
+                    Text("\(service.tableCount) table\(service.tableCount == 1 ? "" : "s")")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(onChromeSecondary)
+            .lineLimit(1)
+            .layoutPriority(-1)
+            .animation(.easeInOut(duration: 0.25), value: service.serverInfo)
+            Spacer(minLength: 12)
+            chromeStatusPill
             Menu {
                 Section("pg_dump") {
                     ForEach(PgDumpCLI.Format.allCases) { fmt in
@@ -819,16 +842,59 @@ struct ConnectionWindowContent: View {
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
-                    .font(.caption)
+                    .font(.system(size: 14))
+                    .foregroundStyle(onChrome)
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
             .help("Connection actions")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(appearance.emphasized.opacity(0.08))
+        // Leading inset clears the traffic-light cluster; the bar draws under
+        // the transparent titlebar, so this whole strip IS the title bar.
+        .padding(.leading, 84)
+        .padding(.trailing, 12)
+        .frame(height: 42)
+        .background(chromeBackground)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.black.opacity(appearance.connection.isProduction ? 0.22 : 0.12))
+                .frame(height: 1)
+        }
+    }
+
+    /// Small live state pill on the right of the chrome bar — the bit that
+    /// visibly reacts as the connection comes up or drops.
+    private var chromeStatusPill: some View {
+        HStack(spacing: 5) {
+            Circle().fill(chromeStateColor).frame(width: 7, height: 7)
+            Text(chromeStateText)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(onChromeSecondary)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(onChrome.opacity(0.14), in: Capsule())
+        .animation(.easeInOut(duration: 0.25), value: chromeStateText)
+    }
+
+    private var chromeStateColor: Color {
+        switch service.state {
+        case .idle, .connecting: return .yellow
+        case .connected: return .green
+        case .error: return .red
+        case .closed: return Color.white.opacity(0.5)
+        }
+    }
+
+    private var chromeStateText: String {
+        switch service.state {
+        case .idle: return "Idle"
+        case .connecting: return "Connecting…"
+        case .connected: return "Connected"
+        case .error: return "Error"
+        case .closed: return "Disconnected"
+        }
     }
 
     private func runPgDump(format: PgDumpCLI.Format) {

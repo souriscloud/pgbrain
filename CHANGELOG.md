@@ -16,10 +16,11 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 - **Live header vitals.** The sidebar header shows the server version and live
   database size + table count; the table toolbar shows the open table's on-disk
   size. Sizes refresh on load and animate as they change.
-- **Live window title bar.** The window subtitle tracks connection state and the
-  active tab (e.g. "PRODUCTION · valuo_api · public.reports"), and a coloured band
-  across the title bar carries the connection's identity — red for production,
-  the tag colour otherwise.
+- **Custom window chrome bar.** The macOS title bar is now a single full-width
+  bar that carries the connection's identity — red for production, the tag colour
+  otherwise — with the traffic lights riding on it: name, PROD badge, server
+  version, live db size + table count, and a connection-state pill. No more stock
+  title bar with a name; the Window menu still shows "name — active tab".
 
 ## v0.7.0 — 2026-05-29
 
