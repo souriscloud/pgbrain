@@ -6,7 +6,7 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
-## Unreleased
+## v0.8.0 — 2026-05-30
 
 ### Fixed
 - **Keychain re-prompted for the password on every window / launch.** Connection
