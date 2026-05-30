@@ -35,7 +35,10 @@ enum QueryRunner {
     /// types we don't special-case fall through to nil rather than crashing.
     static func stringify(_ cell: PostgresCell) -> String? {
         guard cell.bytes != nil else { return nil }
-        if let s = try? cell.decode(String.self, context: .default) { return s }
+        // Switch on type FIRST. PostgresNIO's `String` decoder has an
+        // "eagerly convert anything" fallback that reads a binary int8/numeric/
+        // etc. as raw bytes (→ NUL/garbage that renders blank), so we must NOT
+        // try String decode before handling the binary scalar types.
         switch cell.dataType {
         case .int2:
             return (try? cell.decode(Int16.self, context: .default)).map { String($0) }
@@ -58,7 +61,9 @@ enum QueryRunner {
         case .timestamp, .timestamptz:
             return (try? cell.decode(Date.self, context: .default)).map { timestampFormatter.string(from: $0) }
         default:
-            return nil
+            // Text-format / textual types (text, varchar, json, jsonb, enums,
+            // inet, …) — PostgresNIO's String decoder reads these correctly.
+            return try? cell.decode(String.self, context: .default)
         }
     }
 
