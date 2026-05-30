@@ -9,6 +9,8 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 ## Unreleased
 
 ### Added
+- **JSON tree view.** The cell editor's JSON/JSONB view gains a Text / Tree
+  toggle — Tree renders a collapsible, type-coloured tree of the value.
 - **New index builder.** Right-click a table → "New index…": tick columns (in
   index order), choose UNIQUE + access method (btree/hash/gin/gist/brin/spgist),
   add an optional partial `WHERE`, with a live SQL preview and auto-suggested name.

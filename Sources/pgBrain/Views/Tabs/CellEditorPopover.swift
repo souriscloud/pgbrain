@@ -57,6 +57,8 @@ enum CellEditorPopover {
     }
 }
 
+enum JSONViewMode: Hashable { case text, tree }
+
 private struct TypedEditor: View {
     let column: ColumnNode
     let kind: ColumnTypeKind
@@ -68,6 +70,7 @@ private struct TypedEditor: View {
     @State private var text: String
     @State private var date: Date
     @State private var bool: Bool
+    @State private var jsonViewMode: JSONViewMode = .text
 
     init(column: ColumnNode, kind: ColumnTypeKind, initialValue: String?,
          onSave: @escaping (String) -> Void,
@@ -153,37 +156,48 @@ private struct TypedEditor: View {
         case .json:
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text("JSON")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                    Picker("", selection: $jsonViewMode) {
+                        Text("Text").tag(JSONViewMode.text)
+                        Text("Tree").tag(JSONViewMode.tree)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
                     jsonValidityChip
                     Spacer()
-                    Button("Prettify") {
-                        if let pretty = JSONFormatter.pretty(text) { text = pretty }
+                    if jsonViewMode == .text {
+                        Button("Prettify") {
+                            if let pretty = JSONFormatter.pretty(text) { text = pretty }
+                        }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                        .disabled(JSONFormatter.isValid(text) == false)
+                        Button("Minify") {
+                            if let compact = JSONFormatter.compact(text) { text = compact }
+                        }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                        .disabled(JSONFormatter.isValid(text) == false)
                     }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .disabled(JSONFormatter.isValid(text) == false)
-                    Button("Minify") {
-                        if let compact = JSONFormatter.compact(text) { text = compact }
-                    }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .disabled(JSONFormatter.isValid(text) == false)
                 }
-                TextEditor(text: $text)
-                    .font(.system(.body, design: .monospaced))
-                    .scrollContentBackground(.hidden)
-                    .padding(6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color(nsColor: .textBackgroundColor))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
-                    )
-                    .frame(minHeight: 220)
+                if jsonViewMode == .tree {
+                    JSONTreeView(jsonText: text)
+                        .frame(minHeight: 220)
+                } else {
+                    TextEditor(text: $text)
+                        .font(.system(.body, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .padding(6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color(nsColor: .textBackgroundColor))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
+                        )
+                        .frame(minHeight: 220)
+                }
             }
         case .integer, .number:
             TextField("", text: $text)

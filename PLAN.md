@@ -490,6 +490,14 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches. DDL exercised against `pgbrain_demo` — identity PK, NOT NULL, defaults (`now()`, `0`), `text[]`, and `jsonb` all create + insert correctly (rolled back). **Not yet released** — sits with iters 26–28 on top of v0.7.0.
 
+### Iter 30 — Features: CREATE INDEX + JSON tree view (2026-05-30, unreleased)
+**Goal**: keep extending structure management and data viewing.
+
+- **CREATE INDEX builder (`CreateIndexSheet.swift`)** — right-click a table → "New index…": tick columns (selection order = index order), UNIQUE toggle, access-method picker (btree/hash/gin/gist/brin/spgist), optional partial `WHERE`, live SQL preview, auto-suggested name. Runs via `AdminActions.execute`, reloads schema. New `onNewIndex` sidebar callback; columns via `ensureColumns`. Verified btree/unique/GIN/partial against `pgbrain_demo`.
+- **JSON tree view (`JSONTreeView.swift`)** — the cell editor's JSON/JSONB section gains a Text / Tree segmented toggle. Tree mode renders a read-only collapsible tree (objects/arrays as disclosure groups, type-coloured leaves: string green, number blue, bool purple, null grey). Parsed with `JSONSerialization` (keys sorted for a stable view); top two levels expanded by default. Text mode keeps the editable prettify/minify editor.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches. CREATE INDEX SQL exercised against the demo DB. **Not yet released** — sits with iters 26–29 on top of v0.7.0.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 
