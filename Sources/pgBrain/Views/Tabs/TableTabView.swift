@@ -38,16 +38,23 @@ struct TableTabView: View {
 
     enum RowViewMode { case grid, form, map }
 
+    /// Columns with real types — the view's `table` is captured at tab-open and
+    /// may predate column enrichment, but the loader re-fetches them, so prefer
+    /// its copy (this is also what the grid renders from).
+    private var resolvedColumns: [ColumnNode] {
+        loader.table.columns.isEmpty ? table.columns : loader.table.columns
+    }
+
     /// PostGIS geometry/geography columns on this table (empty without PostGIS).
     private var spatialColumns: [ColumnNode] {
         guard service.hasPostGIS else { return [] }
-        return table.columns.filter { RowsFetcher.isSpatialType($0.typeName) }
+        return resolvedColumns.filter { RowsFetcher.isSpatialType($0.typeName) }
     }
 
     /// A text-ish column to label map markers with (first non-spatial
     /// text/char/name column, else nil).
     private var mapLabelColumn: String? {
-        table.columns.first { col in
+        resolvedColumns.first { col in
             let t = col.typeName.lowercased()
             return !RowsFetcher.isSpatialType(col.typeName)
                 && ["text", "varchar", "char", "name", "bpchar"].contains { t.hasPrefix($0) }
