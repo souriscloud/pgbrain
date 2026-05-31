@@ -6,6 +6,10 @@
 
 > If JetBrains DataGrip and macOS had a kid that actually feels like a Mac app, you'd get pgBrain.
 
+<p align="center">
+  <img src="docs/pgbrain-demo.gif" alt="pgBrain — SQL notebook, PostGIS map, data grid, ERD, column profiler, and charts" width="820">
+</p>
+
 ## Why
 
 JetBrains tools are powerful but feel like a Java app glued to your menu bar. The Postgres GUIs that *do* feel Mac-native are either toy projects or stuck circa 2017. pgBrain is the missing middle — DataGrip-density workflows in a SwiftUI/AppKit shell that respects your trackpad, your dark mode, and your battery.
@@ -26,7 +30,7 @@ JetBrains tools are powerful but feel like a Java app glued to your menu bar. Th
 - 📊 **Pivot & chart.** Pivot any result (row/col/value + agg) or chart it (bar/line/point) without leaving the result block.
 - 🪄 **Generate test data.** Per-column strategies → one `INSERT … SELECT generate_series` with a live SQL preview.
 - 🧮 **Column profiler.** Right-click any column → rows / nulls (with a populated bar) / distinct / min·max·avg, scoped to your active filter.
-- 🗑️ **Delete rows.** Right-click one or a multi-selection → a primary-key-keyed `DELETE` behind a confirmation. Refuses tables without a PK.
+- 🗑️ **Delete rows — staged, not instant.** Right-click one or a multi-selection → rows get a red wash and commit on **Apply**, in the *same transaction* as your edits and inserts (or Revert to undo). Refuses tables without a PK.
 - 📑 **Copy as…** Markdown, JSON, TSV (paste into spreadsheets), or CSV — from any result block or the table grid.
 
 ### The notebook scratchpad
@@ -38,6 +42,7 @@ JetBrains tools are powerful but feel like a Java app glued to your menu bar. Th
 
 ### DBA & schema management
 - 🏗️ **Structure pane.** Columns, constraints, indexes, triggers (enable/disable/drop), partitions, comments editor — plus a Copy-ready `CREATE` script.
+- 🎛️ **Table Designer.** One visual editor for **creating and restructuring** tables — add/rename/retype/drop columns, NOT NULL, primary key, defaults, comments — with a live `ALTER TABLE` diff that applies **atomically in one transaction**. ("Edit structure…" on a table, or ⌘K.)
 - ✏️ **Edit objects.** Function/procedure editor (`pg_get_functiondef` round-trip), view/matview editor, column ALTER (rename/type/drop/add), schema + database CRUD, sequence inspector (setval/nextval/restart).
 - 🧹 **Maintenance.** VACUUM / ANALYZE / REINDEX / TRUNCATE / REFRESH MATERIALIZED VIEW from the sidebar, tracked in the ops popover.
 - 🗺️ **ERD diagram.** Draggable table boxes, FK lines, double-click to open.
