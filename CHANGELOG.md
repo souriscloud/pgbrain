@@ -6,7 +6,7 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
-## Unreleased
+## v0.9.2 — 2026-06-01
 
 ### Added
 - **Duplicate a whole schema.** Right-click a schema → Duplicate schema… (or ⌘K)
