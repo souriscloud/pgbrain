@@ -24,6 +24,12 @@ extension Notification.Name {
     /// Asks the matching window to open a function in the editor.
     /// `userInfo["schema"]` + `userInfo["name"]` + `userInfo["args"]` identify it.
     static let pgbrainEditFunction = Notification.Name("cloud.souris.pgbrain.editFunction")
+    /// Asks the matching window to open the function designer in *create*
+    /// mode. `userInfo["schema"]` (optional) seeds the schema picker.
+    static let pgbrainNewFunction = Notification.Name("cloud.souris.pgbrain.newFunction")
+    /// Asks the matching window to open the run/call sheet for a function.
+    /// `userInfo["schema"]` + `userInfo["name"]` identify it.
+    static let pgbrainRunFunction = Notification.Name("cloud.souris.pgbrain.runFunction")
     /// Asks the matching window to open the ERD for `userInfo["schema"]`.
     static let pgbrainShowERD = Notification.Name("cloud.souris.pgbrain.showERD")
     /// Asks the matching window to prompt the user for a name and
@@ -89,7 +95,8 @@ struct ConnectionWindowContent: View {
     @State private var showCreateDatabase = false
     @State private var dropDatabaseTarget: IdentifiedString?
     @State private var findUsagesTarget: CommentsTarget?
-    @State private var editFunction: FunctionNode?
+    @State private var functionDesigner: FunctionDesignerRequest?
+    @State private var functionRunner: FunctionRunnerRequest?
     @State private var truncateTarget: CommentsTarget?
     @State private var generateDataTarget: TableNode?
     @State private var newIndexTarget: TableNode?
@@ -184,19 +191,12 @@ struct ConnectionWindowContent: View {
                 onClose: { findUsagesTarget = nil },
                 onOpenFunction: { fn in
                     findUsagesTarget = nil
-                    editFunction = fn
+                    functionDesigner = FunctionDesignerRequest(mode: .edit(fn))
                 },
                 onOpenTable: { node in
                     findUsagesTarget = nil
                     service.workspace.openTable(node)
                 }
-            )
-        }
-        .sheet(item: $editFunction) { fn in
-            FunctionEditorView(
-                service: service,
-                function: fn,
-                onClose: { editFunction = nil }
             )
         }
         .sheet(item: $truncateTarget) { target in
@@ -277,16 +277,11 @@ struct ConnectionWindowContent: View {
                 showCreateDatabase = true
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .pgbrainEditFunction)) { notif in
-            guard let id = notif.object as? UUID, id == service.connection.id,
-                  let schema = notif.userInfo?["schema"] as? String,
-                  let name = notif.userInfo?["name"] as? String
-            else { return }
-            if let fn = service.schema.schemas.first(where: { $0.name == schema })?
-                .functions.first(where: { $0.name == name }) {
-                editFunction = fn
-            }
-        }
+        .modifier(FunctionFlowsModifier(
+            service: service,
+            functionDesigner: $functionDesigner,
+            functionRunner: $functionRunner
+        ))
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainShowERD)) { notif in
             guard let id = notif.object as? UUID, id == service.connection.id,
                   let schema = notif.userInfo?["schema"] as? String else { return }
@@ -686,7 +681,13 @@ struct ConnectionWindowContent: View {
                         findUsagesTarget = CommentsTarget(schema: table.schema, table: table.name)
                     },
                     onOpenFunction: { fn in
-                        editFunction = fn
+                        functionDesigner = FunctionDesignerRequest(mode: .edit(fn))
+                    },
+                    onNewFunction: { schema in
+                        functionDesigner = FunctionDesignerRequest(mode: .create(schema: schema))
+                    },
+                    onRunFunction: { fn in
+                        functionRunner = FunctionRunnerRequest(function: fn)
                     },
                     onTruncate: { table in
                         truncateTarget = CommentsTarget(schema: table.schema, table: table.name)
@@ -854,6 +855,7 @@ struct ConnectionWindowContent: View {
                 Button("Snippets…") { showSnippets = true }
                 Divider()
                 Button("New table…") { tableDesigner = TableDesignerRequest(mode: .create(schema: nil)) }
+                Button("New function…") { functionDesigner = FunctionDesignerRequest(mode: .create(schema: nil)) }
                 Button("New schema…") { showCreateSchema = true }
                 Button("New database…") { showCreateDatabase = true }
                 Divider()
@@ -1200,5 +1202,49 @@ struct StatusFooter: View {
         case .error: return .red
         case .closed: return .secondary
         }
+    }
+}
+
+/// Function designer + runner sheets and their notification routing, factored
+/// out of `ConnectionWindowContent.body` to keep that view's modifier chain
+/// inside the type-checker's budget.
+private struct FunctionFlowsModifier: ViewModifier {
+    let service: ConnectionService
+    @Binding var functionDesigner: FunctionDesignerRequest?
+    @Binding var functionRunner: FunctionRunnerRequest?
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(item: $functionDesigner) { req in
+                FunctionDesignerView(request: req, service: service,
+                                     onClose: { functionDesigner = nil })
+            }
+            .sheet(item: $functionRunner) { req in
+                FunctionRunnerView(request: req, service: service,
+                                   onClose: { functionRunner = nil })
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainEditFunction)) { notif in
+                guard let id = notif.object as? UUID, id == service.connection.id,
+                      let schema = notif.userInfo?["schema"] as? String,
+                      let name = notif.userInfo?["name"] as? String,
+                      let fn = lookup(schema: schema, name: name) else { return }
+                functionDesigner = FunctionDesignerRequest(mode: .edit(fn))
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainNewFunction)) { notif in
+                guard let id = notif.object as? UUID, id == service.connection.id else { return }
+                functionDesigner = FunctionDesignerRequest(mode: .create(schema: notif.userInfo?["schema"] as? String))
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainRunFunction)) { notif in
+                guard let id = notif.object as? UUID, id == service.connection.id,
+                      let schema = notif.userInfo?["schema"] as? String,
+                      let name = notif.userInfo?["name"] as? String,
+                      let fn = lookup(schema: schema, name: name) else { return }
+                functionRunner = FunctionRunnerRequest(function: fn)
+            }
+    }
+
+    private func lookup(schema: String, name: String) -> FunctionNode? {
+        service.schema.schemas.first(where: { $0.name == schema })?
+            .functions.first(where: { $0.name == name })
     }
 }

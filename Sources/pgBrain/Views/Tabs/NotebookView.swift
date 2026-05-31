@@ -1402,6 +1402,7 @@ enum NotebookRunner {
 
         Task { @MainActor in
             defer { notebook.runningCellID = nil }
+            var schemaTouched = false
             for (sql, id) in zip(plans, ids) {
                 let op = service.operations.begin(kind: .query, summary: QueryRunner.summary(of: sql))
                 let result = notebook.startResult(id: id, statement: sql)
@@ -1416,6 +1417,7 @@ enum NotebookRunner {
                     result.status = .success(qr)
                     result.finishedAt = Date()
                     service.operations.finish(op, status: .succeeded)
+                    if Self.isSchemaChangingSQL(sql) { schemaTouched = true }
                     QueryHistoryStore.shared.record(
                         connectionID: service.connection.id,
                         sql: sql, startedAt: started,
@@ -1448,7 +1450,30 @@ enum NotebookRunner {
                     )
                 }
             }
+            // A successful CREATE / DROP / ALTER / COMMENT can add or remove
+            // sidebar objects (tables, functions, schemas) — refresh so the
+            // tree reflects it without a reconnect.
+            if schemaTouched { await service.loadSchema() }
         }
+    }
+
+    /// Returns true when `sql`'s leading keyword is DDL that can change what
+    /// the sidebar shows. Comment-only / whitespace prefixes are skipped.
+    static func isSchemaChangingSQL(_ sql: String) -> Bool {
+        var s = sql.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Strip leading line/block comments so "-- note\nCREATE …" still counts.
+        while true {
+            if s.hasPrefix("--") {
+                if let nl = s.firstIndex(of: "\n") { s = String(s[s.index(after: nl)...]).trimmingCharacters(in: .whitespacesAndNewlines); continue }
+                return false
+            }
+            if s.hasPrefix("/*"), let close = s.range(of: "*/") {
+                s = String(s[close.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines); continue
+            }
+            break
+        }
+        let head = s.prefix(while: { $0.isLetter }).lowercased()
+        return ["create", "drop", "alter", "comment"].contains(head)
     }
 
     /// Single-connection BEGIN/COMMIT batch. Walks `plans` sequentially
@@ -1525,6 +1550,9 @@ enum NotebookRunner {
                 service.operations.finish(op, status: .failed("rolled back — \(msg)"))
             } else {
                 service.operations.finish(op, status: .succeeded)
+                if plans.contains(where: { isSchemaChangingSQL($0) }) {
+                    await service.loadSchema()
+                }
             }
             _ = started
         } catch {

@@ -6,7 +6,35 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
-## Unreleased
+## v0.8.2 — 2026-05-31
+
+### Added
+- **Function Designer — create *and* edit functions/procedures.** A unified
+  editor: structured essentials (schema · name · arguments · returns · language ·
+  volatility · strict · security definer) over a body editor, with a live
+  `CREATE OR REPLACE` preview on the right. Editing loads the routine from the
+  catalog; change the body and Save runs a plain `CREATE OR REPLACE`, change the
+  signature (name, argument types, or return type) and it DROPs + recreates in
+  **one transaction**. Functions that carry attributes the form doesn't model
+  (`SET`, `LEAKPROOF`, custom `COST`/`ROWS`, parallel-safety, SQL-standard
+  bodies) drop to a full-statement editor so nothing is ever silently lost.
+  Reachable from a function's right-click menu, a schema/Functions group, the
+  connection ⋯ menu, or ⌘K → "New function…".
+- **Run a function from the UI.** Right-click a function → **Run** (or a
+  procedure → **Call**), or ⌘K → "Run …": a form lists the input parameters, you
+  fill values (blanks fall back to the function's own defaults via `name =>`
+  notation), and it builds + runs the exact `SELECT * FROM fn(…)` / `CALL proc(…)`
+  — shown live — rendering the result inline. No more hand-writing the call in a
+  scratchpad.
+
+### Fixed
+- **The sidebar didn't refresh after creating an object in the scratchpad.**
+  Running a `CREATE` / `DROP` / `ALTER` / `COMMENT` in a notebook (single-run or
+  run-as-transaction) now reloads the schema on success, so a new function (or
+  table, schema, …) shows up in the tree immediately instead of after a
+  reconnect. Saving from the Function Designer refreshes it too.
+
+## v0.8.1 — 2026-05-31
 
 ### Changed
 - **Deleting rows is now staged, not instant.** Right-click a row (or selection)

@@ -43,7 +43,15 @@ JetBrains tools are powerful but feel like a Java app glued to your menu bar. Th
 ### DBA & schema management
 - 🏗️ **Structure pane.** Columns, constraints, indexes, triggers (enable/disable/drop), partitions, comments editor — plus a Copy-ready `CREATE` script.
 - 🎛️ **Table Designer.** One visual editor for **creating and restructuring** tables — add/rename/retype/drop columns, NOT NULL, primary key, defaults, comments — with a live `ALTER TABLE` diff that applies **atomically in one transaction**. ("Edit structure…" on a table, or ⌘K.)
-- ✏️ **Edit objects.** Function/procedure editor (`pg_get_functiondef` round-trip), view/matview editor, column ALTER (rename/type/drop/add), schema + database CRUD, sequence inspector (setval/nextval/restart).
+- 🧩 **Function Designer + runner.** One editor to **create and restructure**
+  functions/procedures — schema · name · args · returns · language · volatility ·
+  strict · security, over a body editor with a live `CREATE OR REPLACE` preview;
+  signature changes DROP + recreate in one transaction, and functions with
+  attributes the form can't model fall back to full-DDL editing so nothing is
+  lost. Right-click → **Run** (or **Call**) any routine to fill its parameters
+  and execute it inline.
+- ✏️ **Edit objects.** View/matview editor, column ALTER (rename/type/drop/add),
+  schema + database CRUD, sequence inspector (setval/nextval/restart).
 - 🧹 **Maintenance.** VACUUM / ANALYZE / REINDEX / TRUNCATE / REFRESH MATERIALIZED VIEW from the sidebar, tracked in the ops popover.
 - 🗺️ **ERD diagram.** Draggable table boxes, FK lines, double-click to open.
 - 🔗 **Find usages.** Locate a table across every function body, view definition, and trigger.

@@ -140,6 +140,8 @@ struct SidebarOutlineView: NSViewRepresentable {
     var onFindUsages: ((TableNode) -> Void)? = nil
     /// Open a function in the editor sheet.
     var onOpenFunction: ((FunctionNode) -> Void)? = nil
+    var onNewFunction: ((String?) -> Void)? = nil
+    var onRunFunction: ((FunctionNode) -> Void)? = nil
     /// TRUNCATE a table (pops the confirm sheet).
     var onTruncate: ((TableNode) -> Void)? = nil
     /// Generate test data into a table.
@@ -170,6 +172,8 @@ struct SidebarOutlineView: NSViewRepresentable {
         var onNewTable: ((String?) -> Void)?
         var onFindUsages: ((TableNode) -> Void)?
         var onOpenFunction: ((FunctionNode) -> Void)?
+        var onNewFunction: ((String?) -> Void)?
+        var onRunFunction: ((FunctionNode) -> Void)?
         var onTruncate: ((TableNode) -> Void)?
         var onGenerateData: ((TableNode) -> Void)?
         var onNewIndex: ((TableNode) -> Void)?
@@ -236,18 +240,48 @@ struct SidebarOutlineView: NSViewRepresentable {
                 return tableMenu(for: table)
             case .function(let fn):
                 return functionMenu(for: fn)
-            case .columns, .column, .functionsGroup:
+            case .functionsGroup(let schema):
+                return functionsGroupMenu(schema: schema)
+            case .columns, .column:
                 return nil
             }
         }
 
         private func functionMenu(for fn: FunctionNode) -> NSMenu? {
-            guard onOpenFunction != nil else { return nil }
+            guard onOpenFunction != nil || onRunFunction != nil else { return nil }
             let menu = NSMenu()
-            let edit = NSMenuItem(title: "Edit function…", action: #selector(handleOpenFunction(_:)), keyEquivalent: "")
-            edit.target = self
-            edit.representedObject = FunctionBox(fn)
-            menu.addItem(edit)
+            let verb = fn.kind == .procedure ? "Call" : "Run"
+            if onRunFunction != nil {
+                let run = NSMenuItem(title: "\(verb) \(fn.kind == .procedure ? "procedure" : "function")…",
+                                     action: #selector(handleRunFunction(_:)), keyEquivalent: "")
+                run.target = self
+                run.representedObject = FunctionBox(fn)
+                menu.addItem(run)
+            }
+            if onOpenFunction != nil {
+                let edit = NSMenuItem(title: "Edit \(fn.kind == .procedure ? "procedure" : "function")…",
+                                      action: #selector(handleOpenFunction(_:)), keyEquivalent: "")
+                edit.target = self
+                edit.representedObject = FunctionBox(fn)
+                menu.addItem(edit)
+            }
+            if onNewFunction != nil {
+                menu.addItem(.separator())
+                let new = NSMenuItem(title: "New function…", action: #selector(handleNewFunction(_:)), keyEquivalent: "")
+                new.target = self
+                new.representedObject = fn.schema
+                menu.addItem(new)
+            }
+            return menu
+        }
+
+        private func functionsGroupMenu(schema: String) -> NSMenu? {
+            guard onNewFunction != nil else { return nil }
+            let menu = NSMenu()
+            let new = NSMenuItem(title: "New function in “\(schema)”…", action: #selector(handleNewFunction(_:)), keyEquivalent: "")
+            new.target = self
+            new.representedObject = schema
+            menu.addItem(new)
             return menu
         }
 
@@ -275,6 +309,14 @@ struct SidebarOutlineView: NSViewRepresentable {
                 newTable.target = self
                 newTable.representedObject = name
                 menu.addItem(newTable)
+            }
+            if onNewFunction != nil {
+                let newFn = NSMenuItem(title: "New function in “\(name)”…", action: #selector(handleNewFunction(_:)), keyEquivalent: "")
+                newFn.target = self
+                newFn.representedObject = name
+                menu.addItem(newFn)
+            }
+            if onNewTable != nil || onNewFunction != nil {
                 menu.addItem(.separator())
             }
             if onShowERD != nil {
@@ -453,6 +495,13 @@ struct SidebarOutlineView: NSViewRepresentable {
             guard let box = sender.representedObject as? FunctionBox else { return }
             onOpenFunction?(box.fn)
         }
+        @objc private func handleRunFunction(_ sender: NSMenuItem) {
+            guard let box = sender.representedObject as? FunctionBox else { return }
+            onRunFunction?(box.fn)
+        }
+        @objc private func handleNewFunction(_ sender: NSMenuItem) {
+            onNewFunction?(sender.representedObject as? String)
+        }
         @objc private func handleTruncate(_ sender: NSMenuItem) {
             guard let table = sender.representedObject as? TableNode else { return }
             onTruncate?(table)
@@ -592,6 +641,8 @@ struct SidebarOutlineView: NSViewRepresentable {
         coord.onNewTable = onNewTable
         coord.onFindUsages = onFindUsages
         coord.onOpenFunction = onOpenFunction
+        coord.onNewFunction = onNewFunction
+        coord.onRunFunction = onRunFunction
         coord.onTruncate = onTruncate
         coord.onGenerateData = onGenerateData
         coord.onNewIndex = onNewIndex

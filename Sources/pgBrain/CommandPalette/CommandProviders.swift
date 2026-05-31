@@ -189,6 +189,18 @@ enum CommandProviders {
                 }
             ),
             CommandItem(
+                id: "action.createFunction",
+                icon: "plus.app",
+                title: "New Function…",
+                subtitle: "CREATE FUNCTION / PROCEDURE",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    AppDelegate.shared?.openConnection(service.connection)
+                    NotificationCenter.default.post(name: .pgbrainNewFunction, object: service.connection.id)
+                }
+            ),
+            CommandItem(
                 id: "action.createDatabase",
                 icon: "cylinder.split.1x2",
                 title: "New Database…",
@@ -434,17 +446,34 @@ enum CommandProviders {
                 let schemaName = schema.name
                 let fnName = fn.name
                 let args = fn.arguments
+                let verb = fn.kind == .procedure ? "Call" : "Run"
                 out.append(CommandItem(
                     id: "function.\(schema.name).\(fn.name)\(fn.arguments)",
                     icon: "function",
                     title: fn.signature,
-                    subtitle: "\(schema.name) · \(fn.kind.rawValue)",
+                    subtitle: "Edit · \(schema.name) · \(fn.kind.rawValue)",
                     category: .function,
                     shortcut: nil,
                     action: {
                         AppDelegate.shared?.openConnection(service.connection)
                         NotificationCenter.default.post(
                             name: .pgbrainEditFunction,
+                            object: service.connection.id,
+                            userInfo: ["schema": schemaName, "name": fnName, "args": args]
+                        )
+                    }
+                ))
+                out.append(CommandItem(
+                    id: "function.run.\(schema.name).\(fn.name)\(fn.arguments)",
+                    icon: fn.kind == .procedure ? "gearshape.2" : "play.circle",
+                    title: "\(verb) \(fn.signature)",
+                    subtitle: "\(schema.name) · \(fn.kind.rawValue)",
+                    category: .function,
+                    shortcut: nil,
+                    action: {
+                        AppDelegate.shared?.openConnection(service.connection)
+                        NotificationCenter.default.post(
+                            name: .pgbrainRunFunction,
                             object: service.connection.id,
                             userInfo: ["schema": schemaName, "name": fnName, "args": args]
                         )

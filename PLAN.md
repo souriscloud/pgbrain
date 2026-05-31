@@ -549,6 +549,17 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `./scripts/bundle.sh release` ✓. Edit-mode load + diff preview confirmed in-app on `app.tasks`; live ALTER apply pending user check. **Not yet released.**
 
+### Iter 36 — Function Designer, run-a-function, sidebar DDL refresh (2026-05-31, unreleased)
+**Goal**: functions were second-class — only a bare "Edit function" source sheet, no create/run UI, and scratchpad DDL didn't refresh the tree. User: "Edit function does not work (syntax error)… interface to run existing functions… function creator/editor (editor should show sql)".
+
+- **`FunctionInspector.swift`** (new) — catalog loader for one routine: `fetch` returns the editable definition (language, return, args, identity-args, `prosrc` body, volatility, strict, security-definer, kind) plus an `isStructurallySimple` flag (false when `proconfig`/`LEAKPROOF`/custom `COST`·`ROWS`/parallel mode/empty `prosrc` mean the structured form would drop something). `parameters` returns IN/INOUT/VARIADIC params (via `information_schema.parameters`) for the runner. Overloads resolved by matching `pg_get_function_arguments` against `FunctionNode.arguments`.
+- **`FunctionDesignerView.swift`** (new) — unified create/edit. Structured essentials + body editor on the left, live `CREATE OR REPLACE FUNCTION|PROCEDURE` preview on the right; picks a non-colliding dollar tag. Edit diffs the signature: body-only → plain `CREATE OR REPLACE`; name/arg-type/return change → `DROP … IF EXISTS` + recreate, atomic via `AdminActions.executeBatch`. Non-simple functions load the full `pg_get_functiondef` into a raw-statement editor (no data loss). Apply → `service.loadSchema()` + toast. **Replaces `FunctionEditorView.swift` (deleted)**; `pgbrainEditFunction` + sidebar "Edit function…" route here.
+- **`FunctionRunnerView.swift`** (new) — run/call console. Loads input params, one value field each, builds `SELECT * FROM fn(name => v, …)` (or `CALL proc(…)`) with named notation so blanks use defaults; runs via `QueryRunner.run`, renders the result inline (+ Copy SQL).
+- **Scratchpad DDL → tree refresh**: `NotebookView` calls `service.loadSchema()` after a successful run (single + run-as-transaction) when any statement's leading keyword is `CREATE`/`DROP`/`ALTER`/`COMMENT` (`isSchemaChangingSQL`, comment-prefix aware). Fixes "had to close and reopen connection to see the new function".
+- **Entry points**: sidebar function menu (Run/Call · Edit · New function), Functions-group + schema menus (New function…), connection ⋯ menu, command palette (New Function… + per-function Edit & Run/Call). New notifications `.pgbrainNewFunction` / `.pgbrainRunFunction`; designer+runner sheets and receivers live in `FunctionFlowsModifier` (extracted to keep `ConnectionWindowContent.body` under the type-checker budget).
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓ + launch smoke ✓. Generated create/run/edit/sig-change SQL executed against live PG18 (`pgbrain_demo`). In-app click-through pending user check. **Not yet released.**
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 
