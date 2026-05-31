@@ -573,5 +573,7 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 ## Open questions for later
 - **SQL syntax highlighting**: shipped iter-4 with a plain `NSTextView` (no highlighting). Held until the scratchpad redo so we don't double-build.
-- **`COPY ... TO STDOUT` (binary)**: PostgresNIO doesn't expose `COPY TO STDOUT` through the high-level API yet, so iter-8/iter-9 use `SELECT … ::text`. Drop to the raw channel when first user hits row-stream throughput limits.
-- **Scratchpad redo (next major area of work)**: per user — current `ScratchpadView` isn't the right model. Hold polish like `:var` substitution and per-keystroke autosave until the redo lands.
+- **`COPY ... TO STDOUT` (binary)**: still blocked upstream. postgres-nio **1.33.0** exposes `copyFrom` (COPY FROM STDIN, import direction) but **no** public `copyTo`/STDOUT, so exports stay on `SELECT … ::text`. Revisit when postgres-nio ships a public copy-out; until then a raw-channel CopyData reader is the only path and isn't worth the fragility. (Note: the new `copyFrom` could later speed the importer / cross-DB copy.)
+- **Release pipeline — `generate_appcast`**: deliberately staying on the manual `<item>` append in `release.sh` (it produced correct appcasts through v0.8.2). Switching to Sparkle's `generate_appcast` needs every historical DMG backfilled into `releases/` first or it wipes appcast history — a lateral move with real risk and no user benefit.
+- **Scratchpad redo (next major area of work)**: per user — current cell-stack `Notebook`/`NotebookView` model isn't the right one. Needs a target-model decision (DataGrip single-editor + results panel vs. refined cells) before any rewrite. Hold polish like `:var` substitution and per-keystroke autosave until the redo lands.
+  - *Done meanwhile*: the splitter no longer mis-cuts `BEGIN ATOMIC` function bodies (Unreleased).
