@@ -517,6 +517,38 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓, app launches. GeoJSON queries + parsing verified against `pgbrain_demo` (PostGIS 3.6.3) for Point/LineString/Polygon. **Not yet released** — sits with iters 26–31 on top of v0.7.0.
 
+### Iter 33 — In-app Help, palette view-switch, profiler/map fixes, release hardening (2026-05-31, unreleased)
+**Goal**: a real Help guide, more ways to reach feedback, palette-driven view switching, and fixing two grid papercuts — plus adopting the safe release-pipeline improvements.
+
+- **`HelpView.swift` + `HelpWindow.swift`** — in-app Help: a `NavigationSplitView` with a topic sidebar (Welcome / Connecting / Data Grid / SQL Notebook / PostGIS & Maps / DBA Toolkit / Keyboard Shortcuts / Support) and formatted content (brand-tinted feature rows, keyboard-shortcut chips, feedback/GitHub/Ko-fi links). Wired into the **Help** app menu (`pgBrain Help`, ⌘?), the menu-bar dropdown, and `AppDelegate.showHelp()`. List selection is `Optional` (the must-be-optional gotcha) defaulting to Welcome.
+- **Command-palette view switch** — `.pgbrainSetTableViewMode` notification + `CommandProviders.viewModes`: "View as Grid / Form / Map" for the front table tab. "Map" only when the table has a geometry column (checked against enriched columns). `TableTabView` consumes it (front-tab-gated, forces the Data pane).
+- **Send Feedback** now also lives in the top-level Help menu and the menu-bar dropdown.
+- **Fix — column profiler**: was a SwiftUI `.popover` bound to the whole grid, so it floated to the bottom; now an AppKit `NSPopover` anchored to the column's header rect (`Coordinator.showProfiler`). Also added a **header right-click** menu (`TypedHeaderView.menu(for:)` → `columnHeaderMenu`) so profiling works from the header, not just a cell. `onProfileColumn` → `makeProfilerController` (returns an `NSHostingController`).
+- **Fix — map mode hid the Grid/Form/Map toggle**: the `.map` branch never rendered `pagerStrip`, so there was no way back; it now does.
+- **Release hardening (`RELIMPR.md`)** — adopted into `release.sh`: rollback trap reverts the version bump on premature exit; conditional `swift test` gate (skips cleanly with no test target); `chmod 600 scripts/.env`. Deferred with documented gaps: `generate_appcast` (needs full DMG history backfilled in `releases/` or it wipes appcast history) and the notary-profile rename (needs a matching `store-credentials` keychain entry).
+- **Screenshots** — refreshed the apps.souris.cloud listing (app id 5) with 6 fresh v0.8.0 dark-mode shots (hero scratchpad, PostGIS map, grid+chrome, ERD, profiler, chart), replacing the v0.6.0 set.
+
+**Verified**: `./scripts/bundle.sh release` ✓, `bash -n scripts/release.sh` ✓. Help window + profiler-header-fix + palette view-switch confirmed in-app. **Not yet released.**
+
+### Iter 34 — Staged (committable) row deletes (2026-05-31, unreleased)
+**Goal**: deleting rows should behave like edits/inserts — staged and committed on Apply, not fired instantly.
+
+- **`RowsLoader.pendingDeleteRows`** (source-row indices) + `toggleDelete(sourceRows:)` (mark all / unmark all; ignores draft inserts). Folded into `hasPendingChanges`, `revert()`, `load()`-clear, and the pending-summary label ("N to delete").
+- **`UpdateApplier`** gained a `Delete` struct + `deletes:` parameter — PK-keyed `DELETE`s emitted inside the *same* `withTransaction` as UPDATEs/INSERTs, so an Apply that mixes edits, inserts, and deletes is atomic. `apply()` excludes delete-staged rows from UPDATEs and refetches afterward (row set changed).
+- **Grid** paints staged rows with a soft red wash (`HoverableRowView.isDeleteRow`, `DataGridView.deleteRowIndices`), mirroring the green insert wash. The row context menu toggles "Delete row(s)" ↔ "Keep row(s)" based on current staging — no more instant-delete confirmation dialog.
+- Removed the old immediate-delete path (`requestDelete` / `buildDeleteSQL` / `runDelete` / `PendingRowDelete` + its `.confirmationDialog`).
+
+**Verified**: `./scripts/bundle.sh release` ✓. In-app delete staging/commit pending user check. **Not yet released.**
+
+### Iter 35 — Table Designer: structure editor for existing tables (2026-05-31, unreleased)
+**Goal**: a great-UX editor for an existing table's structure (was missing — only a cramped CREATE sheet existed).
+
+- **`TableDesignerView.swift`** — one unified designer for **create** *and* **edit**. Side-by-side layout: a column editor (name · type w/ preset menu · NOT NULL · PK · default · inline comment, add/remove) on the left; a live SQL pane on the right. Create mode assembles `CREATE TABLE`; edit mode loads `TableInspector.fetch`, diffs against the loaded snapshot, and emits the exact ordered `ALTER TABLE` batch (renames → drops → adds → type/null/default → PK drop+add → comments → table rename). New/modified columns get green/orange badges; Apply is disabled until there's a diff.
+- **`AdminActions.executeBatch`** — runs the statement list atomically in one `withTransaction`.
+- **Entry points**: a table tab's "Edit structure…" toolbar button (real tables only) and a ⌘K "Edit structure…" command, both posting `.pgbrainEditTableStructure` (schema+table), observed in `ConnectionWindowContent` → resolves the `TableNode` → presents the designer sheet. Create paths ("New table…" menu + sidebar) repointed to the designer; **`CreateTableSheet.swift` deleted**.
+
+**Verified**: `./scripts/bundle.sh release` ✓. Edit-mode load + diff preview confirmed in-app on `app.tasks`; live ALTER apply pending user check. **Not yet released.**
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

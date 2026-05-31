@@ -410,6 +410,30 @@ enum AdminActions {
         await runDDL(sql, summary: summary, service: service)
     }
 
+    /// Run several statements atomically in one transaction — used by the
+    /// table designer so a batch of ALTERs either all land or none do. Empty
+    /// input is a no-op success.
+    static func executeBatch(_ statements: [String], summary: String, service: ConnectionService) async -> Result<Void, Error> {
+        let stmts = statements.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !stmts.isEmpty else { return .success(()) }
+        guard let client = service.client else { return .failure(AdminError.notConnected) }
+        let op = service.operations.begin(kind: .update, summary: summary)
+        do {
+            try await client.withTransaction(logger: pgbrainQuietLogger) { connection in
+                for sql in stmts {
+                    _ = try await connection.query(PostgresQuery(unsafeSQL: sql), logger: pgbrainQuietLogger)
+                }
+            }
+            service.operations.finish(op, status: .succeeded)
+            return .success(())
+        } catch {
+            let msg = PostgresErrorMessage.describe(error)
+            service.operations.finish(op, status: .failed(msg))
+            return .failure(AdminError.serverSaid(msg))
+        }
+    }
+
     // MARK: - Internals
 
     private static func runDDL(_ sql: String, summary: String, service: ConnectionService) async -> Result<Void, Error> {

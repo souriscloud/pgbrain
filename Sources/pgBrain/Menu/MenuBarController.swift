@@ -6,6 +6,7 @@ protocol MenuBarDelegate: AnyObject {
     func showWelcome(focus: Bool)
     func showAbout()
     func showFeedback()
+    func showHelp()
     var windowManager: WindowManager { get }
 }
 
@@ -71,6 +72,10 @@ final class MenuBarController: NSObject {
         let feedback = NSMenuItem(title: "Send Feedback…", action: #selector(onFeedback), keyEquivalent: "")
         feedback.target = self
         menu.addItem(feedback)
+
+        let help = NSMenuItem(title: "pgBrain Help", action: #selector(onHelp), keyEquivalent: "")
+        help.target = self
+        menu.addItem(help)
 
         let checkUpdates = NSMenuItem(title: "Check for Updates…", action: #selector(onCheckUpdates), keyEquivalent: "")
         checkUpdates.target = self
@@ -149,6 +154,10 @@ final class MenuBarController: NSObject {
 
     @objc private func onFeedback() {
         delegate?.showFeedback()
+    }
+
+    @objc private func onHelp() {
+        delegate?.showHelp()
     }
 
     @objc private func onCheckUpdates() {

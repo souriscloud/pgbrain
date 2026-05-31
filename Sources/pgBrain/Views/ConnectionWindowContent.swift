@@ -34,6 +34,13 @@ extension Notification.Name {
     static let pgbrainSwitchWorkspace = Notification.Name("cloud.souris.pgbrain.switchWorkspace")
     /// Asks the matching window to show the query-history sheet.
     static let pgbrainOpenQueryHistory = Notification.Name("cloud.souris.pgbrain.openQueryHistory")
+    /// Asks the front *table* tab of the matching window to switch its row
+    /// view between grid / form / map. `userInfo["mode"]` is "grid" | "form" |
+    /// "map"; the receiving tab ignores "map" when it has no geometry column.
+    static let pgbrainSetTableViewMode = Notification.Name("cloud.souris.pgbrain.setTableViewMode")
+    /// Asks the matching window to open the Table Designer in *edit* mode for
+    /// `userInfo["schema"]` + `userInfo["table"]`.
+    static let pgbrainEditTableStructure = Notification.Name("cloud.souris.pgbrain.editTableStructure")
 }
 
 /// Drives the confirmation dialog for destructive maintenance actions
@@ -71,7 +78,7 @@ struct ConnectionWindowContent: View {
     @State private var showSaveWorkspaceDialog = false
     @State private var workspaceNameDraft = ""
     @State private var showCreateSchema = false
-    @State private var createTableSchema: IdentifiedString?
+    @State private var tableDesigner: TableDesignerRequest?
     @State private var renameSchemaTarget: IdentifiedString?
     @State private var dropSchemaTarget: IdentifiedString?
     @State private var commentsTarget: CommentsTarget?
@@ -126,11 +133,11 @@ struct ConnectionWindowContent: View {
         .sheet(isPresented: $showCreateSchema) {
             CreateSchemaSheet(service: service) { showCreateSchema = false }
         }
-        .sheet(item: $createTableSchema) { target in
-            CreateTableSheet(
+        .sheet(item: $tableDesigner) { req in
+            TableDesignerView(
+                request: req,
                 service: service,
-                initialSchema: target.value.isEmpty ? nil : target.value,
-                onClose: { createTableSchema = nil }
+                onClose: { tableDesigner = nil }
             )
         }
         .sheet(item: $renameSchemaTarget) { target in
@@ -284,6 +291,14 @@ struct ConnectionWindowContent: View {
             guard let id = notif.object as? UUID, id == service.connection.id,
                   let schema = notif.userInfo?["schema"] as? String else { return }
             erdSchema = IdentifiedString(id: schema)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainEditTableStructure)) { notif in
+            guard let id = notif.object as? UUID, id == service.connection.id,
+                  let schemaName = notif.userInfo?["schema"] as? String,
+                  let tableName = notif.userInfo?["table"] as? String,
+                  let node = service.schema.schemas.first(where: { $0.name == schemaName })?
+                    .tables.first(where: { $0.name == tableName }) else { return }
+            tableDesigner = TableDesignerRequest(mode: .edit(node))
         }
         .sheet(isPresented: $showQueryHistory) {
             QueryHistoryView(
@@ -666,7 +681,7 @@ struct ConnectionWindowContent: View {
                         dropSchemaTarget = IdentifiedString(id: name)
                     },
                     onCreateSchema: { showCreateSchema = true },
-                    onNewTable: { schema in createTableSchema = IdentifiedString(id: schema ?? "") },
+                    onNewTable: { schema in tableDesigner = TableDesignerRequest(mode: .create(schema: schema)) },
                     onFindUsages: { table in
                         findUsagesTarget = CommentsTarget(schema: table.schema, table: table.name)
                     },
@@ -838,7 +853,7 @@ struct ConnectionWindowContent: View {
                 Button("LISTEN / NOTIFY…") { showNotifyPanel = true }
                 Button("Snippets…") { showSnippets = true }
                 Divider()
-                Button("New table…") { createTableSchema = IdentifiedString(id: "") }
+                Button("New table…") { tableDesigner = TableDesignerRequest(mode: .create(schema: nil)) }
                 Button("New schema…") { showCreateSchema = true }
                 Button("New database…") { showCreateDatabase = true }
                 Divider()

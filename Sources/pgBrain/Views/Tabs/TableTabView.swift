@@ -31,8 +31,6 @@ struct TableTabView: View {
     @State private var pane: WorkspaceState.TablePane = .data
     @State private var showFindBar = false
     @State private var distinctValuesColumn: ColumnNameID?
-    @State private var profileColumn: ColumnNameID?
-    @State private var pendingDelete: PendingRowDelete?
     @State private var rowViewMode: RowViewMode = .grid
     @State private var formRowIndex = 0
 
@@ -146,6 +144,23 @@ struct TableTabView: View {
         .onChange(of: loader.editBuffer.isDirty) { _, isDirty in
             tab.hasPendingChanges = isDirty
         }
+        // Command-palette "View as Grid / Form / Map" — only the front table
+        // tab of the matching connection acts; "map" is ignored when the table
+        // has no geometry column. Switching also forces the Data pane.
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainSetTableViewMode)) { notif in
+            guard notif.object as? UUID == service.connection.id,
+                  service.workspace.selectedID == tab.id,
+                  let mode = notif.userInfo?["mode"] as? String else { return }
+            switch mode {
+            case "form":
+                pane = .data; rowViewMode = .form
+            case "map":
+                guard !spatialColumns.isEmpty else { return }
+                pane = .data; rowViewMode = .map
+            default:
+                pane = .data; rowViewMode = .grid
+            }
+        }
         .onDisappear {
             // Reading isDirty inside onDisappear isn't safe (loader may
             // already be torn down); clear unconditionally — the next
@@ -177,6 +192,22 @@ struct TableTabView: View {
             .padding(.leading, Tokens.Spacing.md)
             .padding(.vertical, 4)
             Spacer()
+            if table.kind == .table {
+                Button {
+                    NotificationCenter.default.post(
+                        name: .pgbrainEditTableStructure,
+                        object: service.connection.id,
+                        userInfo: ["schema": table.schema, "table": table.name]
+                    )
+                } label: {
+                    Label("Edit structure…", systemImage: "slider.horizontal.3")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .padding(.trailing, Tokens.Spacing.md)
+                .help("Open the table designer — add, rename, retype, or drop columns")
+            }
         }
         .background(Color(nsColor: .underPageBackgroundColor))
     }
@@ -411,6 +442,8 @@ struct TableTabView: View {
         if dirty > 0 { parts.append("\(dirty) pending") }
         let inserts = loader.pendingInsertRows.count
         if inserts > 0 { parts.append("\(inserts) new row\(inserts == 1 ? "" : "s")") }
+        let deletes = loader.pendingDeleteRows.count
+        if deletes > 0 { parts.append("\(deletes) to delete") }
         return parts.isEmpty ? "\(loader.editBuffer.dirtyCount) pending" : parts.joined(separator: " · ")
     }
 
@@ -766,62 +799,6 @@ struct TableTabView: View {
     /// Build SQL for a single source row and put it on the clipboard.
     /// The source row index is into `loader.state`'s underlying page,
     /// independent of any active filter.
-    /// A delete the user has asked for but not yet confirmed.
-    private struct PendingRowDelete: Identifiable {
-        let id = UUID()
-        let count: Int
-        let sql: String
-    }
-
-    /// Build the combined DELETE for the chosen source rows and stage a
-    /// confirmation. Requires a primary key — without one we can't target
-    /// the exact rows, so we refuse rather than risk a broad match.
-    private func requestDelete(sourceRows: [Int]) {
-        guard case .loaded(let page) = loader.state else { return }
-        guard !table.primaryKey.isEmpty else {
-            service.toasts.show(.error, "Can't delete — \(table.qualifiedName) has no primary key.")
-            return
-        }
-        guard let sql = buildDeleteSQL(sourceRows: sourceRows, page: page) else {
-            service.toasts.show(.error, "Couldn't build a delete for the selected rows.")
-            return
-        }
-        pendingDelete = PendingRowDelete(count: sourceRows.count, sql: sql)
-    }
-
-    /// `DELETE FROM t WHERE (pk… ) OR (pk…) …` — one OR-group per row,
-    /// keyed on the table's primary key. Returns nil if any selected row
-    /// is missing a PK value (shouldn't happen for a real PK, but we bail
-    /// safely rather than emit a partial predicate).
-    private func buildDeleteSQL(sourceRows: [Int], page: RowsFetcher.Page) -> String? {
-        let qualified = SQLIdent.qualified(schema: table.schema, name: table.name)
-        let cols = page.columns
-        var clauses: [String] = []
-        for r in sourceRows {
-            guard r >= 0, r < page.rows.count else { continue }
-            let row = page.rows[r]
-            let parts = table.primaryKey.compactMap { name -> String? in
-                guard let idx = cols.firstIndex(where: { $0.name == name }) else { return nil }
-                if row[idx] == nil { return "\(SQLIdent.quote(name)) IS NULL" }
-                return "\(SQLIdent.quote(name)) = \(sqlLiteral(row[idx], typeName: cols[idx].typeName))"
-            }
-            guard parts.count == table.primaryKey.count else { return nil }
-            clauses.append("(" + parts.joined(separator: " AND ") + ")")
-        }
-        guard !clauses.isEmpty else { return nil }
-        return "DELETE FROM \(qualified) WHERE \(clauses.joined(separator: " OR "))"
-    }
-
-    private func runDelete(_ req: PendingRowDelete) {
-        let summary = "DELETE \(table.qualifiedName) (\(req.count) row\(req.count == 1 ? "" : "s"))"
-        Task {
-            let result = await AdminActions.execute(req.sql, summary: summary, service: service)
-            if case .success = result {
-                await loader.load()
-            }
-        }
-    }
-
     private func copySQL(_ kind: RowSQLKind, for sourceRow: Int) {
         guard case .loaded(let page) = loader.state,
               sourceRow >= 0, sourceRow < page.rows.count
@@ -966,6 +943,10 @@ struct TableTabView: View {
                             geometryColumn: geom.name,
                             labelColumn: mapLabelColumn
                         )
+                        // Keep the footer (and its Grid/Form/Map toggle) visible
+                        // in map mode — otherwise the map fills the pane and
+                        // there's no way to switch back.
+                        pagerStrip(visible: visible)
                     } else if rowViewMode == .form {
                         RowFormView(
                             page: visible,
@@ -980,6 +961,7 @@ struct TableTabView: View {
                             editBuffer: table.isEditable ? loader.editBuffer : nil,
                             appliedHighlights: loader.appliedHighlights,
                             insertRowIndices: loader.pendingInsertRows,
+                            deleteRowIndices: loader.pendingDeleteRows,
                             sourceRowIndices: sourceIndices,
                             sortDirectionFor: { col in
                                 switch loader.headerSortDirection(for: col) {
@@ -1016,11 +998,23 @@ struct TableTabView: View {
                             onShowColumnDistinct: { col in
                                 distinctValuesColumn = ColumnNameID(id: col)
                             },
-                            onProfileColumn: { col in
-                                profileColumn = ColumnNameID(id: col)
+                            makeProfilerController: { name in
+                                guard let node = resolvedColumns.first(where: { $0.name == name })
+                                else { return nil }
+                                return NSHostingController(rootView: ColumnProfilePopover(
+                                    service: service,
+                                    schema: table.schema,
+                                    table: table.name,
+                                    column: node,
+                                    extraWhere: loader.filter.whereClause
+                                ))
                             },
                             onDeleteRows: { sourceRows in
-                                requestDelete(sourceRows: sourceRows)
+                                guard !table.primaryKey.isEmpty else {
+                                    service.toasts.show(.error, "Can't delete — \(table.qualifiedName) has no primary key.")
+                                    return
+                                }
+                                loader.toggleDelete(sourceRows: sourceRows)
                             },
                             columnLayoutKey: (service.connection.id, table.schema, table.name)
                         )
@@ -1035,34 +1029,6 @@ struct TableTabView: View {
                                 applyDistinctFilter(column: colName.id, value: value)
                                 distinctValuesColumn = nil
                             }
-                        }
-                        .popover(item: $profileColumn, arrowEdge: .top) { colName in
-                            if let node = table.columns.first(where: { $0.name == colName.id }) {
-                                ColumnProfilePopover(
-                                    service: service,
-                                    schema: table.schema,
-                                    table: table.name,
-                                    column: node,
-                                    extraWhere: loader.filter.whereClause
-                                )
-                            }
-                        }
-                        .confirmationDialog(
-                            pendingDelete.map { "Delete \($0.count) row\($0.count == 1 ? "" : "s")?" } ?? "",
-                            isPresented: Binding(
-                                get: { pendingDelete != nil },
-                                set: { if !$0 { pendingDelete = nil } }
-                            ),
-                            titleVisibility: .visible,
-                            presenting: pendingDelete
-                        ) { req in
-                            Button("Delete", role: .destructive) {
-                                runDelete(req)
-                                pendingDelete = nil
-                            }
-                            Button("Cancel", role: .cancel) { pendingDelete = nil }
-                        } message: { req in
-                            Text("Permanently deletes \(req.count) row\(req.count == 1 ? "" : "s") from \(table.qualifiedName) by primary key. This can't be undone.")
                         }
                         pagerStrip(visible: visible)
                     }
@@ -1170,8 +1136,32 @@ final class RowsLoader {
     /// flags which rows become INSERTs instead of UPDATEs.
     private(set) var pendingInsertRows: Set<Int> = []
 
-    /// Apply is meaningful when there are dirty cells OR pending new rows.
-    var hasPendingChanges: Bool { editBuffer.isDirty || !pendingInsertRows.isEmpty }
+    /// Source-row indices of existing rows the user has staged for DELETE.
+    /// They render with a red wash and commit (inside the same transaction as
+    /// edits/inserts) on the next Apply; Revert clears them.
+    private(set) var pendingDeleteRows: Set<Int> = []
+
+    /// Apply is meaningful when there are dirty cells, pending new rows, or
+    /// rows staged for deletion.
+    var hasPendingChanges: Bool {
+        editBuffer.isDirty || !pendingInsertRows.isEmpty || !pendingDeleteRows.isEmpty
+    }
+
+    /// Stage / unstage existing rows for deletion. Draft (uncommitted insert)
+    /// rows aren't in the database, so toggling delete on one is ignored here —
+    /// drafts are discarded via Revert. Re-invoking on a staged row un-stages it.
+    func toggleDelete(sourceRows: [Int]) {
+        guard case .loaded = state else { return }
+        let targets = sourceRows.filter { !pendingInsertRows.contains($0) }
+        guard !targets.isEmpty else { return }
+        // If the whole selection is already staged, unmark it; otherwise mark
+        // it all. (Avoids a confusing per-row flip on a mixed selection.)
+        if targets.allSatisfy({ pendingDeleteRows.contains($0) }) {
+            for r in targets { pendingDeleteRows.remove(r) }
+        } else {
+            for r in targets { pendingDeleteRows.insert(r) }
+        }
+    }
 
     /// Append a blank draft row to the loaded page and flag it as a pending
     /// insert. Cells are filled through the normal cell editor afterwards.
@@ -1286,6 +1276,7 @@ final class RowsLoader {
         }
         editBuffer.clear()
         pendingInsertRows.removeAll()
+        pendingDeleteRows.removeAll()
         applyError = nil
         // Clear the exact-count cache on any reload — it's tied to a
         // specific filter + page set.
@@ -1419,6 +1410,7 @@ final class RowsLoader {
 
     func revert() {
         editBuffer.clear()
+        pendingDeleteRows.removeAll()
         // Drop the trailing draft rows (always appended at the end).
         if !pendingInsertRows.isEmpty, case .loaded(var page) = state {
             let n = pendingInsertRows.count
@@ -1438,9 +1430,10 @@ final class RowsLoader {
         let pending = editBuffer.editsByRow()
 
         // Split pending edits: rows flagged as drafts become INSERTs, the
-        // rest are UPDATEs against existing rows.
+        // rest are UPDATEs against existing rows. Rows staged for deletion are
+        // excluded from UPDATEs (no point updating a row we're about to drop).
         let edits: [UpdateApplier.Edit] = pending
-            .filter { !pendingInsertRows.contains($0.row) }
+            .filter { !pendingInsertRows.contains($0.row) && !pendingDeleteRows.contains($0.row) }
             .map { rowEdits in
                 let cells = rowEdits.cells.map {
                     UpdateApplier.CellChange(column: page.columns[$0.column], newValue: $0.value)
@@ -1453,7 +1446,9 @@ final class RowsLoader {
             }
             return UpdateApplier.Insert(cells: cells)
         }
-        guard !edits.isEmpty || !inserts.isEmpty else { return }
+        let deletes: [UpdateApplier.Delete] = pendingDeleteRows.sorted()
+            .map { UpdateApplier.Delete(rowIndex: $0) }
+        guard !edits.isEmpty || !inserts.isEmpty || !deletes.isEmpty else { return }
 
         isApplying = true
         applyError = nil
@@ -1462,6 +1457,7 @@ final class RowsLoader {
         let summaryParts = [
             edits.isEmpty ? nil : "\(edits.count) update\(edits.count == 1 ? "" : "s")",
             inserts.isEmpty ? nil : "\(inserts.count) insert\(inserts.count == 1 ? "" : "s")",
+            deletes.isEmpty ? nil : "\(deletes.count) delete\(deletes.count == 1 ? "" : "s")",
         ].compactMap { $0 }
         let op = service.operations.begin(
             kind: .update,
@@ -1472,6 +1468,7 @@ final class RowsLoader {
             try await UpdateApplier.apply(
                 edits: edits,
                 inserts: inserts,
+                deletes: deletes,
                 table: table,
                 originalRows: page.rows,
                 client: client,
@@ -1481,12 +1478,14 @@ final class RowsLoader {
             service.operations.finish(op, status: .succeeded)
             let elapsed = Date().timeIntervalSince(started)
 
-            if !inserts.isEmpty {
-                // New rows get server-assigned identity/defaults — refetch so
-                // the grid shows their real values instead of the blank draft.
+            if !inserts.isEmpty || !deletes.isEmpty {
+                // Inserts get server-assigned identity/defaults and deletes
+                // remove rows — either way the row set changed, so refetch
+                // rather than try to splice in place.
                 applySuccess = "Applied \(summaryParts.joined(separator: ", ")) · \(String(format: "%.0f ms", elapsed * 1000))"
                 editBuffer.clear()
                 pendingInsertRows.removeAll()
+                pendingDeleteRows.removeAll()
                 await load()
             } else {
                 // Update-only: splice the applied values into the in-memory

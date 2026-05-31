@@ -8,11 +8,48 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
 ## Unreleased
 
+### Changed
+- **Deleting rows is now staged, not instant.** Right-click a row (or selection)
+  → "Delete row(s)" marks it with a red wash and a "N to delete" count instead of
+  firing a `DELETE` immediately. It commits on **Apply** — in the *same
+  transaction* as your pending edits and inserts — or vanishes on **Revert**.
+  Right-click a staged row again to keep it. (Tables still need a primary key.)
+
 ### Added
-- **Send Feedback.** A built-in feedback / bug-report form (menu bar → Send
-  Feedback…, and the connection ⋯ menu) that opens a pre-filled GitHub issue —
-  bug / feature / question, with optional app + system info. No account? "Copy
-  report" puts the whole thing on the clipboard. Free, no token, your GitHub login.
+- **Table Designer — edit an existing table's structure.** A roomy visual editor
+  (column list on the left, live SQL on the right) for **both** creating tables
+  and *restructuring existing ones*. Add / rename / retype / reorder-intent
+  columns, toggle NOT NULL & primary key, set defaults and comments — the right
+  pane shows the exact `ALTER TABLE` batch it'll run, and Apply commits it
+  **atomically in one transaction**. New columns show a green "new" badge,
+  changed ones an orange "modified" badge. Open it from a table's **Edit
+  structure…** button (Data/Structure toolbar), or ⌘K → "Edit structure…". The
+  old cramped New-table sheet is replaced by this designer.
+- **In-app Help.** A real Help guide (Help → pgBrain Help, ⌘?, or the menu-bar
+  dropdown): a topic sidebar — Welcome, Connecting, the Data Grid, SQL Notebook,
+  PostGIS & Maps, DBA Toolkit, Keyboard Shortcuts, Support — with formatted
+  content, shortcut chips, and quick links to feedback / GitHub / Ko-fi.
+- **Switch table view from the Command Palette.** ⌘K now offers "View as Grid /
+  Form / Map" for the front table tab ("Map" only when it has geometry), so you
+  can flip the grid into the map (and back) without reaching for the toggle.
+- **Send Feedback in more places.** The feedback form is now reachable from the
+  top-level **Help** menu and the menu-bar dropdown, not just the connection ⋯
+  menu.
+- **Send Feedback.** A built-in feedback / bug-report form that opens a pre-filled
+  GitHub issue — bug / feature / question, with optional app + system info. No
+  account? "Copy report" puts the whole thing on the clipboard. Free, no token,
+  your GitHub login.
+
+### Fixed
+- **Column profiler popover was parked at the bottom of the window**, nowhere
+  near the column. It now presents as a popover anchored directly under the
+  column's header, pointing at the column it profiles.
+- **"Profile column" only worked from a cell right-click, not the column
+  header.** Right-clicking a column header now opens a column menu (profile,
+  distinct values, copy name, filter NULL / NOT NULL).
+- **Map view hid the Grid/Form/Map toggle**, so once you switched a table to the
+  map you couldn't switch back. The footer with the toggle now stays visible in
+  map mode.
 
 ## v0.8.0 — 2026-05-30
 

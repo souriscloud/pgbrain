@@ -29,6 +29,12 @@ enum UpdateApplier {
         let cells: [CellChange]
     }
 
+    /// An existing row to DELETE, addressed by its primary key. `rowIndex`
+    /// points into `originalRows` so PK values can be read out of the snapshot.
+    struct Delete: Sendable {
+        let rowIndex: Int
+    }
+
     enum Failure: Error, LocalizedError {
         case noPrimaryKey
         case unknownPrimaryKeyColumn(String)
@@ -51,6 +57,7 @@ enum UpdateApplier {
     static func apply(
         edits: [Edit],
         inserts: [Insert] = [],
+        deletes: [Delete] = [],
         table: TableNode,
         originalRows: [[String?]],
         client: PostgresClient,
@@ -155,6 +162,30 @@ enum UpdateApplier {
                     }
                 }
                 let sql = "INSERT INTO \(qualifiedTable) (\(cols.joined(separator: ", "))) VALUES (\(placeholders.joined(separator: ", ")))"
+                _ = try await connection.query(PostgresQuery(unsafeSQL: sql, binds: binds), logger: logger)
+            }
+
+            // DELETEs run last, still inside the one transaction. Each row is
+            // addressed by its full primary key, read from the snapshot.
+            for del in deletes {
+                guard del.rowIndex < originalRows.count else { continue }
+                let originalRow = originalRows[del.rowIndex]
+                var binds = PostgresBindings()
+                var wherePieces: [String] = []
+                for (offset, pkCol) in pkColumns.enumerated() {
+                    guard let colIndex = columnIndexByName[pkCol.name] else {
+                        throw Failure.unknownPrimaryKeyColumn(pkCol.name)
+                    }
+                    if let v = originalRow[colIndex] {
+                        let placeholder = "$\(offset + 1)"
+                        wherePieces.append("\(SQLIdent.quote(pkCol.name)) = \(placeholder)::" + pkCol.typeName)
+                        binds.append(v)
+                    } else {
+                        // A NULL PK component can't be matched by `=`; use IS NULL.
+                        wherePieces.append("\(SQLIdent.quote(pkCol.name)) IS NULL")
+                    }
+                }
+                let sql = "DELETE FROM \(qualifiedTable) WHERE \(wherePieces.joined(separator: " AND "))"
                 _ = try await connection.query(PostgresQuery(unsafeSQL: sql, binds: binds), logger: logger)
             }
         }

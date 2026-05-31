@@ -26,6 +26,18 @@ struct pgBrainApp: App {
                 }
                 .keyboardShortcut("k", modifiers: [.command])
             }
+            // Replace the stock Help menu so "pgBrain Help" opens our in-app
+            // guide and Send Feedback is one click from the top-level menu.
+            CommandGroup(replacing: .help) {
+                Button("pgBrain Help") {
+                    AppDelegate.shared?.showHelp()
+                }
+                .keyboardShortcut("?", modifiers: [.command])
+                Divider()
+                Button("Send Feedback…") {
+                    AppDelegate.shared?.showFeedback()
+                }
+            }
         }
     }
 }

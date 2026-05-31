@@ -15,6 +15,7 @@ enum CommandProviders {
         out.append(contentsOf: savedConnections(currentID: service?.connection.id))
         guard let service else { return out }
         out.append(contentsOf: connectionActions(service: service))
+        out.append(contentsOf: viewModes(service: service))
         out.append(contentsOf: tabs(service: service))
         out.append(contentsOf: tables(service: service))
         out.append(contentsOf: functions(service: service))
@@ -297,6 +298,70 @@ enum CommandProviders {
             ))
         }
         return items
+    }
+
+    // MARK: - Table view modes
+
+    /// Grid / Form / Map switches for the front *table* tab. "Map" only
+    /// appears when the table actually has a geometry/geography column (and
+    /// the database has PostGIS). Fires `.pgbrainSetTableViewMode`, which the
+    /// front table tab consumes.
+    private static func viewModes(service: ConnectionService) -> [CommandItem] {
+        guard let selID = service.workspace.selectedID,
+              let active = service.workspace.tabs.first(where: { $0.id == selID }),
+              case .table(let node) = active.kind
+        else { return [] }
+        let cid = service.connection.id
+
+        func cmd(_ mode: String, _ title: String, _ icon: String) -> CommandItem {
+            CommandItem(
+                id: "viewmode.\(mode)",
+                icon: icon,
+                title: title,
+                subtitle: "Show \(node.name) as \(mode)",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    NotificationCenter.default.post(
+                        name: .pgbrainSetTableViewMode,
+                        object: cid,
+                        userInfo: ["mode": mode]
+                    )
+                }
+            )
+        }
+
+        var out = [
+            cmd("grid", "View as Grid", "tablecells"),
+            cmd("form", "View as Form", "list.bullet.rectangle.portrait"),
+        ]
+        // Edit-structure entry — only for real tables (not views).
+        if node.kind == .table {
+            out.append(CommandItem(
+                id: "action.editStructure",
+                icon: "slider.horizontal.3",
+                title: "Edit structure…",
+                subtitle: "Designer for \(node.name): add / rename / drop columns",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    NotificationCenter.default.post(
+                        name: .pgbrainEditTableStructure,
+                        object: cid,
+                        userInfo: ["schema": node.schema, "table": node.name]
+                    )
+                }
+            ))
+        }
+        // Prefer the live (enriched) columns; fall back to the tab's snapshot.
+        let enriched = service.visibleSchema.schemas
+            .first(where: { $0.name == node.schema })?
+            .tables.first(where: { $0.name == node.name })
+        let cols = (enriched?.columns.isEmpty == false) ? enriched!.columns : node.columns
+        if service.hasPostGIS && cols.contains(where: { RowsFetcher.isSpatialType($0.typeName) }) {
+            out.append(cmd("map", "View as Map", "map"))
+        }
+        return out
     }
 
     // MARK: - Tabs

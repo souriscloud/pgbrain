@@ -36,6 +36,8 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 # shellcheck source=scripts/.env
 source "$ENV_FILE"
+# Credentials file — keep it owner-only (it carries signing/notary config).
+chmod 600 "$ENV_FILE" 2>/dev/null || true
 
 for var in TEAM_ID CODESIGN_IDENTITY NOTARYTOOL_PROFILE GITHUB_REPO; do
     if [[ -z "${!var:-}" ]]; then
@@ -98,6 +100,18 @@ fi
 sparkle generate_keys -p >/dev/null 2>&1 \
     || error "Sparkle EdDSA private key missing from Keychain. Run: ./scripts/sparkle-tools.sh generate_keys"
 
+# Test gate (RELIMPR #3): a broken build shouldn't ship. The package is
+# executable-only today (no test target), so we skip rather than fail when
+# there are no tests — the gate activates automatically once a Tests target
+# or `.testTarget` is added.
+if [[ -d "Tests" ]] || grep -q '\.testTarget' Package.swift; then
+    info "Running test suite"
+    swift test >/dev/null || error "Tests failed — aborting release."
+    success "Tests passed"
+else
+    info "No test target present — skipping test gate (add one to enable)."
+fi
+
 if ! git diff --quiet || ! git diff --cached --quiet; then
     error "Working tree has uncommitted changes. Commit or stash first."
 fi
@@ -115,8 +129,19 @@ VERSION=$(echo "$NEW" | awk '{print $1}')
 # directly from Info.plist after bump.sh has incremented it.
 BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")
 
+# Roll back the version bump if anything fails before we commit (RELIMPR #4).
+# A failed notarize/sign/build used to leave Info.plist dirty for manual
+# `git checkout`; this trap reverts it automatically on premature exit.
+RELEASE_COMMITTED=0
+revert_bump_on_abort() {
+    [[ $RELEASE_COMMITTED -eq 1 ]] && return
+    if git checkout -- "$PLIST" 2>/dev/null; then
+        echo "Reverted version bump in $PLIST (release aborted before commit)." >&2
+    fi
+}
+trap revert_bump_on_abort EXIT
+
 if git rev-parse "v$VERSION" >/dev/null 2>&1; then
-    git checkout -- "$PLIST" || true
     error "Git tag v$VERSION already exists. Choose a different version."
 fi
 success "Now releasing pgBrain v$VERSION"
@@ -266,6 +291,9 @@ rm -f "$ITEM_FILE"
 info "Step 9/10: Committing release artefacts + pushing"
 git add "$PLIST" appcast.xml
 git commit -m "release v$VERSION"
+# Past this point the bump is committed — disarm the rollback trap so a later
+# push hiccup doesn't revert an already-recorded release commit.
+RELEASE_COMMITTED=1
 git tag "v$VERSION"
 CURRENT_BRANCH=$(git branch --show-current)
 git push origin "$CURRENT_BRANCH"

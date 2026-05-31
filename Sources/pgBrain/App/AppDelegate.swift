@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var welcomeWindow: NSWindow?
     private var aboutWindow: NSWindow?
     private var feedbackWindow: NSWindow?
+    private var helpWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -94,6 +95,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         feedbackWindow?.makeKeyAndOrderFront(nil)
         feedbackWindow?.center()
+    }
+
+    func showHelp() {
+        if helpWindow == nil {
+            helpWindow = HelpWindowFactory.make { [weak self] in
+                self?.helpWindow = nil
+            }
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        helpWindow?.makeKeyAndOrderFront(nil)
+        helpWindow?.center()
     }
 
     /// Bring the nth open connection window forward. `index` is

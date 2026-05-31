@@ -28,6 +28,9 @@ struct DataGridView: NSViewRepresentable {
     /// Source-row indices that are draft INSERTs — drawn with a green wash
     /// and a ✦ in the gutter so a not-yet-committed row reads as new.
     var insertRowIndices: Set<Int> = []
+    /// Source-row indices staged for DELETE — drawn with a red wash until
+    /// the next Apply commits (or Revert clears) them.
+    var deleteRowIndices: Set<Int> = []
     /// Maps each visible grid row index back to its index in the
     /// unfiltered loaded page — so edits + applies still target the
     /// correct underlying row when a filter is active. Identity map
@@ -61,9 +64,13 @@ struct DataGridView: NSViewRepresentable {
     /// `SELECT col, COUNT(*) GROUP BY 1 ORDER BY 2 DESC` and pops a
     /// list. Nil hides the menu entry (scratchpad result grids etc.).
     var onShowColumnDistinct: ((String) -> Void)? = nil
-    /// Profile a column (counts, nulls, distinct, min/max/avg). Nil hides
-    /// the menu entry on grids without a backing table (scratchpad results).
-    var onProfileColumn: ((String) -> Void)? = nil
+    /// Profile a column (counts, nulls, distinct, min/max/avg). Returns the
+    /// popover content controller for a given column name, which the grid
+    /// presents as an `NSPopover` anchored to that column's header (so it
+    /// points at the column instead of floating off the grid bounds). Nil
+    /// hides the menu entry on grids without a backing table (scratchpad
+    /// results).
+    var makeProfilerController: ((String) -> NSViewController?)? = nil
     /// Delete the given source-row indices. Nil hides the menu entry
     /// (read-only grids — scratchpad results, no edit buffer).
     var onDeleteRows: (([Int]) -> Void)? = nil
@@ -78,6 +85,7 @@ struct DataGridView: NSViewRepresentable {
         var editBuffer: EditBuffer?
         var appliedHighlights: Set<EditBuffer.CellKey> = []
         var insertRowIndices: Set<Int> = []
+        var deleteRowIndices: Set<Int> = []
         var sourceRowIndices: [Int] = []
         var sortDirectionFor: ((String) -> TypedHeaderCell.SortDirection)?
         var onHeaderClick: ((String, TypedHeaderCell.SortDirection) -> Void)?
@@ -90,7 +98,9 @@ struct DataGridView: NSViewRepresentable {
         var onCopyAsSlack: (() -> Void)?
         var onCommandClickCell: ((Int, Int) -> Void)?
         var onShowColumnDistinct: ((String) -> Void)?
-        var onProfileColumn: ((String) -> Void)?
+        var makeProfilerController: ((String) -> NSViewController?)?
+        /// Retains the live profiler popover so it isn't deallocated while shown.
+        var profilerPopover: NSPopover?
         var onDeleteRows: (([Int]) -> Void)?
         var columnLayoutKey: (UUID, String, String)?
 
@@ -219,14 +229,18 @@ struct DataGridView: NSViewRepresentable {
 
         func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
             let id = NSUserInterfaceItemIdentifier("HoverRow")
-            let isInsert = insertRowIndices.contains(sourceIndex(forVisibleRow: row))
+            let src = sourceIndex(forVisibleRow: row)
+            let isInsert = insertRowIndices.contains(src)
+            let isDelete = deleteRowIndices.contains(src)
             if let v = tableView.makeView(withIdentifier: id, owner: self) as? HoverableRowView {
                 v.isInsertRow = isInsert
+                v.isDeleteRow = isDelete
                 return v
             }
             let v = HoverableRowView()
             v.identifier = id
             v.isInsertRow = isInsert
+            v.isDeleteRow = isDelete
             return v
         }
 
@@ -379,7 +393,7 @@ struct DataGridView: NSViewRepresentable {
                 menu.addItem(item)
             }
 
-            if onProfileColumn != nil {
+            if makeProfilerController != nil {
                 if onShowColumnDistinct == nil { menu.addItem(.separator()) }
                 let item = NSMenuItem(
                     title: "Profile column \(column.name)…",
@@ -476,7 +490,16 @@ struct DataGridView: NSViewRepresentable {
                 let targetsVisible: [Int] = selected.contains(visibleRow) ? Array(selected) : [visibleRow]
                 let sourceRows = targetsVisible.map { sourceIndex(forVisibleRow: $0) }
                 menu.addItem(.separator())
-                let title = sourceRows.count == 1 ? "Delete row…" : "Delete \(sourceRows.count) rows…"
+                // Staged rows can be un-staged from the same menu; the actual
+                // DELETE happens on Apply, not here, so no "…" confirmation.
+                let allStaged = !sourceRows.isEmpty && sourceRows.allSatisfy { deleteRowIndices.contains($0) }
+                let n = sourceRows.count
+                let title: String
+                if allStaged {
+                    title = n == 1 ? "Keep row (don't delete)" : "Keep \(n) rows (don't delete)"
+                } else {
+                    title = n == 1 ? "Delete row" : "Delete \(n) rows"
+                }
                 let del = NSMenuItem(title: title, action: #selector(handleDeleteRows(_:)), keyEquivalent: "")
                 del.target = self
                 del.representedObject = sourceRows
@@ -553,7 +576,84 @@ struct DataGridView: NSViewRepresentable {
 
         @objc private func handleProfileColumn(_ sender: NSMenuItem) {
             guard let name = sender.representedObject as? String else { return }
-            onProfileColumn?(name)
+            showProfiler(columnName: name)
+        }
+
+        /// Presents the column profiler as an `NSPopover` anchored to the
+        /// column's header cell, so it points at the column regardless of
+        /// where the right-click happened (header or any cell in it).
+        func showProfiler(columnName: String) {
+            guard let table = tableView,
+                  let header = table.headerView,
+                  let factory = makeProfilerController,
+                  let vc = factory(columnName),
+                  let dataCol = page.columns.firstIndex(where: { $0.name == columnName })
+            else { return }
+            // Resolve the *visual* table-column index by identifier so the
+            // anchor is correct even after the user reorders columns.
+            let identifier = "\(dataCol)_\(columnName)"
+            guard let tableColIndex = table.tableColumns.firstIndex(where: {
+                $0.identifier.rawValue == identifier
+            }) else { return }
+            let rect = header.headerRect(ofColumn: tableColIndex)
+            let pop = NSPopover()
+            pop.behavior = .transient
+            pop.animates = true
+            pop.contentViewController = vc
+            profilerPopover = pop
+            pop.show(relativeTo: rect, of: header, preferredEdge: .maxY)
+        }
+
+        /// Column-level menu for a header right-click — the column-relevant
+        /// subset of the cell menu (no cell-value items). `dataCol` indexes
+        /// `page.columns`.
+        func columnHeaderMenu(forDataCol dataCol: Int) -> NSMenu? {
+            guard dataCol >= 0, dataCol < page.columns.count else { return nil }
+            let column = page.columns[dataCol]
+            let menu = NSMenu()
+
+            let copyName = NSMenuItem(title: "Copy column name", action: #selector(handleCopy(_:)), keyEquivalent: "")
+            copyName.target = self
+            copyName.representedObject = column.name
+            menu.addItem(copyName)
+
+            if onShowColumnDistinct != nil {
+                menu.addItem(.separator())
+                let item = NSMenuItem(
+                    title: "Distinct values for \(column.name)…",
+                    action: #selector(handleDistinctValues(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = column.name
+                menu.addItem(item)
+            }
+
+            if makeProfilerController != nil {
+                if onShowColumnDistinct == nil { menu.addItem(.separator()) }
+                let item = NSMenuItem(
+                    title: "Profile column \(column.name)…",
+                    action: #selector(handleProfileColumn(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = column.name
+                menu.addItem(item)
+            }
+
+            if onFilterColumn != nil {
+                menu.addItem(.separator())
+                let nullItem = NSMenuItem(title: "Filter: \(column.name) IS NULL", action: #selector(handleFilterIsNull(_:)), keyEquivalent: "")
+                nullItem.target = self
+                nullItem.representedObject = dataCol
+                menu.addItem(nullItem)
+                let notNullItem = NSMenuItem(title: "Filter: \(column.name) IS NOT NULL", action: #selector(handleFilterIsNotNull(_:)), keyEquivalent: "")
+                notNullItem.target = self
+                notNullItem.representedObject = dataCol
+                menu.addItem(notNullItem)
+            }
+
+            return menu
         }
 
         @objc private func handleDeleteRows(_ sender: NSMenuItem) {
@@ -664,7 +764,9 @@ struct DataGridView: NSViewRepresentable {
         table.rowSizeStyle = .custom
         table.style = .plain
         table.backgroundColor = .clear
-        table.headerView = TypedHeaderView()
+        let header = TypedHeaderView()
+        header.coordinator = context.coordinator
+        table.headerView = header
         table.editBufferProvider = { [weak coord = context.coordinator] in coord?.editBuffer }
         table.contextMenuProvider = { [weak coord = context.coordinator] visibleRow, tableCol in
             // tableCol is in *table-column space* (gutter = 0); we want
@@ -728,7 +830,7 @@ struct DataGridView: NSViewRepresentable {
         coordinator.onCopyAsSlack = onCopyAsSlack
         coordinator.onCommandClickCell = onCommandClickCell
         coordinator.onShowColumnDistinct = onShowColumnDistinct
-        coordinator.onProfileColumn = onProfileColumn
+        coordinator.makeProfilerController = makeProfilerController
         coordinator.onDeleteRows = onDeleteRows
         coordinator.columnLayoutKey = columnLayoutKey
     }
@@ -755,6 +857,7 @@ struct DataGridView: NSViewRepresentable {
         context.coordinator.editBuffer = editBuffer
         context.coordinator.appliedHighlights = appliedHighlights
         context.coordinator.insertRowIndices = insertRowIndices
+        context.coordinator.deleteRowIndices = deleteRowIndices
         context.coordinator.rebuildIndex()
         propagateState(to: context.coordinator)
         if identityChanged || sourceRowIndices.count != table.numberOfRows {
@@ -1017,6 +1120,10 @@ final class HoverableRowView: NSTableRowView {
     var isInsertRow = false {
         didSet { if oldValue != isInsertRow { needsDisplay = true } }
     }
+    /// Row staged for DELETE — painted with a soft red wash until committed.
+    var isDeleteRow = false {
+        didSet { if oldValue != isDeleteRow { needsDisplay = true } }
+    }
     private var trackingArea: NSTrackingArea?
 
     override func updateTrackingAreas() {
@@ -1047,12 +1154,17 @@ final class HoverableRowView: NSTableRowView {
         super.prepareForReuse()
         isHovered = false
         isInsertRow = false
+        isDeleteRow = false
     }
 
     override func drawBackground(in dirtyRect: NSRect) {
         super.drawBackground(in: dirtyRect)
         if isInsertRow {
             NSColor.systemGreen.withAlphaComponent(0.10).setFill()
+            bounds.fill()
+        }
+        if isDeleteRow {
+            NSColor.systemRed.withAlphaComponent(0.14).setFill()
             bounds.fill()
         }
         if isHovered && !isSelected {
@@ -1441,6 +1553,8 @@ final class TypedHeaderCell: NSTableHeaderCell {
 /// lives in `TableTabView` above the grid — not inside the header — so
 /// it can be a single full-width split instead of one input per column.
 final class TypedHeaderView: NSTableHeaderView {
+    weak var coordinator: DataGridView.Coordinator?
+
     override var intrinsicContentSize: NSSize {
         NSSize(width: NSView.noIntrinsicMetric, height: 36)
     }
@@ -1451,4 +1565,18 @@ final class TypedHeaderView: NSTableHeaderView {
                             size: NSSize(width: frameRect.width, height: 36))
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Right-click on a column header → column-level menu (profile, distinct,
+    /// copy name, filter null). The body's `menu(for:)` never fires over the
+    /// header, so the header has to provide its own.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let tableCol = column(at: point)
+        // Column 0 is the synthetic row-number gutter; data columns follow.
+        let dataCol = tableCol - 1
+        if dataCol >= 0, let menu = coordinator?.columnHeaderMenu(forDataCol: dataCol) {
+            return menu
+        }
+        return super.menu(for: event)
+    }
 }
