@@ -2,63 +2,109 @@ import AppKit
 import Foundation
 import Observation
 
-/// DataGrip-style SQL console. One editor buffer (`sql`) holds any number of
-/// statements; running produces an ordered set of result blocks shown in a
-/// panel below the editor. Replaces the earlier cell-stack model (each SQL
-/// cell owning its own inline result) — the console is closer to the
-/// professional flow pgBrain copies, and lets you run the statement under the
-/// caret, a selection, or the whole buffer without managing cells.
+/// Cell-based notebook scratchpad. The earlier TextKit-attachment design
+/// fell over hard because `NSTextAttachmentViewProvider` refuses to render
+/// inline widgets through our NSTextView setup — so the model is now a flat
+/// array of cells, each either SQL text the user types or a result widget
+/// produced by running a SQL cell.
+///
+/// What's lost: cross-cell text selection (which the attachment plan was
+/// supposed to give us). What's gained: the widget actually renders, the
+/// architecture maps to SwiftUI cleanly, and per-cell run/replace
+/// semantics are obvious in code.
 @MainActor
 @Observable
 final class Notebook: Identifiable {
     let id = UUID()
     var title: String
     /// Schema this notebook scopes its queries to. `nil` means "use the
-    /// connection's default `search_path`". When non-nil, the runner runs
-    /// `SET search_path TO "name"` on the checked-out connection before each
-    /// statement and `RESET search_path` afterwards so the pool stays clean.
+    /// connection's default `search_path`" (typically `"$user", public`).
+    /// When non-nil, the runner runs `SET search_path TO "name"` on the
+    /// checked-out connection before each statement and `RESET search_path`
+    /// afterwards so the connection pool stays clean.
     var searchPath: String?
-    /// The single SQL editor buffer.
-    var sql: String = ""
-    /// Results of the most recent run, in execution order. Each id keys into
-    /// `results`. A new run replaces this set.
-    private(set) var resultOrder: [UUID] = []
-    /// Result records keyed by UUID. Stored out-of-band so order changes don't
-    /// disturb status updates landing on an individual result.
+    /// Document is a flat ordered sequence of cells. Always starts and ends
+    /// with at least one SQL cell so the user has somewhere to type.
+    private(set) var cells: [NotebookCell] = []
+    /// Result records keyed by UUID. Each `NotebookCell.kind == .result`
+    /// points at one of these. Stored out-of-band so cell-list mutations
+    /// (insert/remove) don't disturb status updates landing on the result.
     private(set) var results: [UUID: NotebookResult] = [:]
-    /// True while a run is in flight — drives the editor's running rail.
-    var isRunning = false
-    /// Pulse: SQL string the user wants explained. `NotebookView` catches the
-    /// change, opens the EXPLAIN sheet, and clears it.
+    /// ID of the SQL cell currently running. Powers a green-border outline
+    /// in the editor while a run is in flight.
+    var runningCellID: UUID?
+    /// Pulse: SQL string the user wants explained. `NotebookView`
+    /// catches the change, opens the EXPLAIN sheet, and clears it.
+    /// Same consume-on-use contract as the tab `requested*` flags.
     var requestedExplainSQL: String?
-    /// Pulse: ask the host to open the result-diff sheet on the last two
-    /// successful results in this notebook.
+    /// Pulse: ask the host to open the result-diff sheet on the
+    /// last two successful results in this notebook.
     var requestedDiffLastTwo: Bool = false
-    /// When true, a multi-statement run is wrapped in a single BEGIN/COMMIT on
-    /// one pooled connection so a partial-batch failure rolls back the whole
-    /// thing. Default off — keeps the "each statement autocommits" model.
+    /// When true, every multi-statement cell run gets wrapped in a
+    /// single BEGIN/COMMIT on one pooled connection so partial-batch
+    /// failures roll back the whole thing. Default off — keeps the
+    /// existing "each statement autocommits" mental model.
     var runAsTransaction: Bool = false
 
     init(title: String) {
         self.title = title
+        // Seed with one empty SQL cell so the user can immediately type.
+        self.cells = [NotebookCell(kind: .sql)]
     }
 
-    // MARK: - Results
+    // MARK: - Cells
 
-    /// The current run's results, in order, resolved to records.
-    var orderedResults: [NotebookResult] {
-        resultOrder.compactMap { results[$0] }
+    func sqlCell(id: UUID) -> NotebookCell? {
+        cells.first(where: { $0.id == id && $0.kind == .sql })
     }
 
-    /// Begin a fresh run: install `ids` as the result order and drop any
-    /// records from the previous run that aren't being reused.
-    func beginRun(resultIDs ids: [UUID]) {
-        let keep = Set(ids)
-        for key in Array(results.keys) where !keep.contains(key) {
-            results.removeValue(forKey: key)
+    func insert(_ cell: NotebookCell, after anchorID: UUID) {
+        guard let idx = cells.firstIndex(where: { $0.id == anchorID }) else {
+            cells.append(cell); return
         }
-        resultOrder = ids
+        cells.insert(cell, at: idx + 1)
     }
+
+    func remove(cellID: UUID) {
+        guard let idx = cells.firstIndex(where: { $0.id == cellID }) else { return }
+        let cell = cells[idx]
+        if case .result(let resultID) = cell.kind {
+            results.removeValue(forKey: resultID)
+        }
+        cells.remove(at: idx)
+        // Always keep at least one SQL cell as a typing surface.
+        if !cells.contains(where: { $0.kind == .sql }) {
+            cells.append(NotebookCell(kind: .sql))
+        }
+    }
+
+    /// The result cells (and their resultIDs) immediately following
+    /// `sqlCellID`, before the next SQL cell. Used by the runner to
+    /// decide whether to reuse the existing widgets in place.
+    func adjacentResults(after sqlCellID: UUID) -> [(cellIndex: Int, resultID: UUID)] {
+        guard let idx = cells.firstIndex(where: { $0.id == sqlCellID }) else { return [] }
+        var out: [(Int, UUID)] = []
+        var i = idx + 1
+        while i < cells.count {
+            if case .result(let rid) = cells[i].kind {
+                out.append((i, rid))
+                i += 1
+            } else {
+                break
+            }
+        }
+        return out
+    }
+
+    /// Walk every SQL cell and concatenate its text. Used by the saved-
+    /// queries "Save current scratchpad" button + session restore.
+    var plainText: String {
+        cells.compactMap { cell in
+            cell.kind == .sql ? cell.text : nil
+        }.joined(separator: "\n\n")
+    }
+
+    // MARK: - Result lifecycle
 
     func startResult(id: UUID, statement: String) -> NotebookResult {
         if let existing = results[id] {
@@ -66,6 +112,10 @@ final class Notebook: Identifiable {
             existing.startedAt = Date()
             existing.finishedAt = nil
             existing.status = .running
+            // Deliberately NOT touching `isCollapsed` here — the runner
+            // owns collapse policy (e.g. multi-statement runs collapse
+            // every widget; single-statement reruns preserve whatever the
+            // user manually toggled).
             return existing
         }
         let new = NotebookResult(id: id, statement: statement)
@@ -77,14 +127,81 @@ final class Notebook: Identifiable {
         results[id]
     }
 
-    func removeResult(id: UUID) {
-        results.removeValue(forKey: id)
-        resultOrder.removeAll { $0 == id }
+    /// Replace the result cells adjacent to `sqlCellID` with `newResultIDs`.
+    /// Reuses cells in place for the prefix that overlaps; trims extras;
+    /// appends new ones if the new run produced more results than there
+    /// were widgets before. Returns nothing — caller already created the
+    /// `NotebookResult`s and inserted them in `results`.
+    func replaceAdjacentResults(after sqlCellID: UUID, with newResultIDs: [UUID]) {
+        guard let anchorIdx = cells.firstIndex(where: { $0.id == sqlCellID }) else { return }
+        let existing = adjacentResults(after: sqlCellID)
+
+        // Reuse in place for as many as overlap.
+        let overlap = min(existing.count, newResultIDs.count)
+        for i in 0..<overlap {
+            cells[existing[i].cellIndex].kind = .result(resultID: newResultIDs[i])
+            // Drop the old result record from `results` if it differs and
+            // is now orphaned.
+            if existing[i].resultID != newResultIDs[i] {
+                results.removeValue(forKey: existing[i].resultID)
+            }
+        }
+
+        if existing.count > newResultIDs.count {
+            // Trim extras.
+            let extras = existing.suffix(existing.count - newResultIDs.count)
+            for entry in extras.reversed() {
+                results.removeValue(forKey: entry.resultID)
+                cells.remove(at: entry.cellIndex)
+            }
+        } else if newResultIDs.count > existing.count {
+            // Append new result cells after the last one we reused (or
+            // after the SQL cell if there were none).
+            var insertAt = (existing.last?.cellIndex ?? anchorIdx) + 1
+            for i in overlap..<newResultIDs.count {
+                cells.insert(NotebookCell(kind: .result(resultID: newResultIDs[i])), at: insertAt)
+                insertAt += 1
+            }
+        }
+
+        // Always leave a fresh empty SQL cell after the results so the
+        // user can keep typing without manually adding one.
+        let afterResults = (existing.last?.cellIndex ?? anchorIdx) + (newResultIDs.count - existing.count) + (existing.isEmpty ? newResultIDs.count : 0)
+        let trailingSqlIdx = anchorIdx + 1 + newResultIDs.count
+        if trailingSqlIdx >= cells.count || cells[trailingSqlIdx].kind != .sql {
+            cells.insert(NotebookCell(kind: .sql), at: trailingSqlIdx)
+        }
+        _ = afterResults  // satisfy unused
     }
 }
 
-/// One materialised result block. Reference type so SwiftUI can bind to its
-/// mutating status as the async run progresses.
+/// One cell in the notebook. SwiftUI uses `id` for ForEach diffing; `kind`
+/// switches the rendering. Reference type so SwiftUI can bind to `text`
+/// without a value-type churn pattern.
+@MainActor
+@Observable
+final class NotebookCell: Identifiable, Equatable {
+    enum Kind: Equatable {
+        case sql
+        case result(resultID: UUID)
+    }
+    let id = UUID()
+    var kind: Kind
+    /// Only meaningful when `kind == .sql`.
+    var text: String
+
+    init(kind: Kind, text: String = "") {
+        self.kind = kind
+        self.text = text
+    }
+
+    nonisolated static func == (lhs: NotebookCell, rhs: NotebookCell) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
+/// One materialised result block. Mirrors what the old attachment-based
+/// design had so the existing `DataGridView` rendering carries over.
 @MainActor
 @Observable
 final class NotebookResult: Identifiable {

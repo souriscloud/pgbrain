@@ -263,8 +263,10 @@ enum CommandProviders {
         if let selID = service.workspace.selectedID,
            let active = service.workspace.tabs.first(where: { $0.id == selID }),
            case .scratchpad(let pad) = active.kind {
-            let succ = pad.orderedResults.filter {
-                if case .success = $0.status { return true }
+            let succ = pad.cells.filter {
+                if case .result(let id) = $0.kind,
+                   let r = pad.results[id],
+                   case .success = r.status { return true }
                 return false
             }.count
             if succ >= 2 {
