@@ -6,6 +6,17 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
+## Unreleased
+
+### Fixed
+- **Creating a SQL-standard function in the scratchpad split mid-body.** A
+  `CREATE FUNCTION … LANGUAGE sql BEGIN ATOMIC …; …; END` carries top-level
+  semicolons inside its body; "run statement under caret" used to cut it at the
+  first one and the server rejected the fragment. The statement splitter now
+  treats a `BEGIN ATOMIC … END` body as one unit (balancing nested `CASE … END`,
+  and still respecting strings / comments / dollar-quotes), so these functions
+  run whole. Plain `BEGIN; … COMMIT;` transactions are unaffected.
+
 ## v0.8.2 — 2026-05-31
 
 ### Added

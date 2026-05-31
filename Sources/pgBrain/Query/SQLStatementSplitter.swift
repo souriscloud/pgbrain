@@ -53,6 +53,15 @@ enum SQLStatementSplitter {
                 }
                 i = buffer.index(after: i)
                 statementStart = i
+            case "B", "b":
+                // SQL-standard function bodies (`… LANGUAGE sql BEGIN ATOMIC
+                // …; …; END`) carry top-level semicolons that must NOT split
+                // the surrounding CREATE. Skip the whole atomic body as a unit.
+                if isWordStart(buffer, at: i), let after = atomicBodyEnd(buffer, startingAtBegin: i) {
+                    i = after
+                } else {
+                    i = buffer.index(after: i)
+                }
             default:
                 i = buffer.index(after: i)
             }
@@ -175,6 +184,79 @@ enum SQLStatementSplitter {
             i = s.index(after: i)
         }
         return i
+    }
+
+    // MARK: BEGIN ATOMIC
+
+    private static func isWordChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
+
+    /// True when `i` sits at the start of a word (preceding char isn't a word
+    /// char) — so we don't treat `…tablebegin` or `abEND` as keywords.
+    private static func isWordStart(_ s: String, at i: String.Index) -> Bool {
+        i == s.startIndex || !isWordChar(s[s.index(before: i)])
+    }
+
+    /// If the (case-insensitive) keyword `kw` matches a whole word starting at
+    /// `i`, return the index just past it; otherwise `nil`. Caller guarantees
+    /// `i` is at a word start.
+    private static func matchWord(_ s: String, at i: String.Index, _ kw: String) -> String.Index? {
+        var idx = i
+        for ch in kw {
+            guard idx < s.endIndex, Character(s[idx].lowercased()) == ch else { return nil }
+            idx = s.index(after: idx)
+        }
+        if idx < s.endIndex, isWordChar(s[idx]) { return nil }   // not a whole word
+        return idx
+    }
+
+    private static func skipSpaces(_ s: String, from i: String.Index) -> String.Index {
+        var idx = i
+        while idx < s.endIndex, s[idx].isWhitespace { idx = s.index(after: idx) }
+        return idx
+    }
+
+    /// Given `start` at a `BEGIN` token, if it opens a `BEGIN ATOMIC` body,
+    /// scan to the matching `END` (balancing `CASE … END`, and respecting
+    /// quotes/comments/dollar-quotes inside) and return the index just past
+    /// that `END`. Returns `nil` when this `BEGIN` isn't `BEGIN ATOMIC` (e.g. a
+    /// bare `BEGIN;` transaction), so the caller advances normally.
+    private static func atomicBodyEnd(_ s: String, startingAtBegin start: String.Index) -> String.Index? {
+        guard let afterBegin = matchWord(s, at: start, "begin") else { return nil }
+        let afterSpaces = skipSpaces(s, from: afterBegin)
+        guard afterSpaces > afterBegin, let afterAtomic = matchWord(s, at: afterSpaces, "atomic") else { return nil }
+
+        var i = afterAtomic
+        var caseDepth = 0
+        while i < s.endIndex {
+            switch s[i] {
+            case "'": i = skipSingleQuoted(s, from: i)
+            case "\"": i = skipDoubleQuoted(s, from: i)
+            case "-":
+                if let n = s.index(i, offsetBy: 1, limitedBy: s.endIndex), n < s.endIndex, s[n] == "-" {
+                    i = skipLineComment(s, from: i)
+                } else { i = s.index(after: i) }
+            case "/":
+                if let n = s.index(i, offsetBy: 1, limitedBy: s.endIndex), n < s.endIndex, s[n] == "*" {
+                    i = skipBlockComment(s, from: i)
+                } else { i = s.index(after: i) }
+            case "$":
+                if let (tagEnd, tag) = readDollarTag(s, from: i) {
+                    i = skipDollarQuoted(s, from: tagEnd, tag: tag)
+                } else { i = s.index(after: i) }
+            case "C", "c":
+                if isWordStart(s, at: i), let after = matchWord(s, at: i, "case") {
+                    caseDepth += 1; i = after
+                } else { i = s.index(after: i) }
+            case "E", "e":
+                if isWordStart(s, at: i), let after = matchWord(s, at: i, "end") {
+                    if caseDepth > 0 { caseDepth -= 1; i = after }
+                    else { return after }   // closing END of the atomic body
+                } else { i = s.index(after: i) }
+            default:
+                i = s.index(after: i)
+            }
+        }
+        return i   // unterminated body — consume to end of buffer
     }
 
     private static func makeStatement(_ s: String, from lo: String.Index, to hi: String.Index) -> Statement? {
