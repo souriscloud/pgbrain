@@ -6,6 +6,11 @@ import Foundation
 struct SchemaSnapshot: Equatable, Sendable {
     var databaseName: String
     var schemas: [SchemaNode]
+    /// Enum types → ordered labels, keyed by BOTH bare name (`mood`) and
+    /// schema-qualified name (`public.mood`) so an editor can resolve a
+    /// column's `format_type` string regardless of how it's spelled.
+    /// Drives enum dropdowns across the typed-input family.
+    var enums: [String: [String]] = [:]
 
     static let empty = SchemaSnapshot(databaseName: "", schemas: [])
 

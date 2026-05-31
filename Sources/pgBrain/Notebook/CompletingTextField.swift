@@ -15,57 +15,61 @@ struct CompletingTextField: NSViewRepresentable {
     @Binding var text: String
     let placeholder: String
     let font: NSFont
-    let completions: (String) -> [String]
+    let completions: (String) -> [CompletionItem]
     let onCommit: () -> Void
 
     @MainActor
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var text: Binding<String>
-        var completions: (String) -> [String]
+        var completions: (String) -> [CompletionItem]
         var onCommit: () -> Void
-        /// Re-entry guard for synthetic edits (accepting a completion
-        /// mutates the field, which re-fires controlTextDidChange).
-        var isCompleting = false
         /// String length on the previous tick — distinguishes
         /// insertions from deletions so we don't open the popup
         /// while the user is backspacing.
         var previousLength = 0
-        /// Debounce so a flurry of keystrokes only fires one
-        /// `complete:` call (the last one wins).
         var completionDebounce: Task<Void, Never>?
+        /// The custom completion controller, bound to the field editor.
+        /// Re-created if the shared field editor instance changes.
+        private var controller: CompletionController?
+        private weak var boundEditor: NSTextView?
 
-        init(text: Binding<String>, completions: @escaping (String) -> [String], onCommit: @escaping () -> Void) {
+        init(text: Binding<String>, completions: @escaping (String) -> [CompletionItem], onCommit: @escaping () -> Void) {
             self.text = text
             self.completions = completions
             self.onCommit = onCommit
         }
 
+        private func ensureController(for editor: NSTextView) -> CompletionController {
+            if let controller, boundEditor === editor { return controller }
+            let c = CompletionController(textView: editor) { [weak self] partial, _, _ in
+                self?.completions(partial) ?? []
+            }
+            controller = c
+            boundEditor = editor
+            return c
+        }
+
         func controlTextDidChange(_ notification: Notification) {
-            guard let field = notification.object as? NSTextField else { return }
+            guard let field = notification.object as? NSTextField,
+                  let editor = field.currentEditor() as? NSTextView else { return }
             text.wrappedValue = field.stringValue
-            guard !isCompleting else { return }
-            // Trigger as-you-type only on forward typing of word chars,
-            // 180ms after the last keystroke. Anything else cancels.
-            let editor = field.currentEditor() as? NSTextView
-            guard let editor else { return }
+            let controller = ensureController(for: editor)
+            controller.refreshIfVisible()
+            // As-you-type: 180ms after the last forward keystroke on a
+            // ≥2-char identifier.
             let currentLength = (editor.string as NSString).length
             let grew = currentLength > previousLength
             previousLength = currentLength
             completionDebounce?.cancel()
             guard grew else { return }
-            let caret = editor.selectedRange().location
             let ns = editor.string as NSString
-            guard caret > 0, caret <= ns.length else { return }
-            let lastChar = ns.character(at: caret - 1)
-            guard isWordChar(lastChar) else { return }
+            let caret = editor.selectedRange().location
+            guard caret > 0, caret <= ns.length, isWordChar(ns.character(at: caret - 1)) else { return }
             guard identifierPrefixLength(in: editor) >= 2 else { return }
-            completionDebounce = Task { @MainActor [weak self, weak editor] in
+            completionDebounce = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 180_000_000)
                 if Task.isCancelled { return }
-                guard let self, let editor else { return }
-                self.isCompleting = true
-                editor.complete(nil)
-                self.isCompleting = false
+                self?.controller?.requestCompletion()
             }
         }
 
@@ -74,28 +78,19 @@ struct CompletingTextField: NSViewRepresentable {
             (c >= 0x30 && c <= 0x39) || c == 0x5F
         }
 
-        func control(_ control: NSControl, textView: NSTextView, completions words: [String], forPartialWordRange charRange: NSRange, indexOfSelectedItem index: UnsafeMutablePointer<Int>) -> [String] {
-            let ns = textView.string as NSString
-            guard charRange.location >= 0, charRange.location + charRange.length <= ns.length else { return words }
-            let partial = ns.substring(with: charRange)
-            let ours = completions(partial)
-            index.pointee = ours.isEmpty ? -1 : 0
-            return ours.isEmpty ? words : ours
-        }
-
         func controlTextDidEndEditing(_ notification: Notification) {
-            // Treat Enter / focus-loss as commit; the parent guards
-            // against no-op reloads so this is cheap to fire.
+            controller?.cancel()
             onCommit()
         }
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-            // ⌘Space / ⌃Space — manually trigger the completion popup.
+            let controller = ensureController(for: textView)
+            // Esc / ⌘Space toggle the popup; nav keys drive it while open.
             if commandSelector == #selector(NSStandardKeyBindingResponding.complete(_:)) {
-                textView.complete(nil)
+                if controller.isVisible { controller.cancel() } else { controller.requestCompletion() }
                 return true
             }
-            return false
+            return controller.handleCommand(commandSelector)
         }
 
         private func identifierPrefixLength(in editor: NSTextView) -> Int {
@@ -103,15 +98,7 @@ struct CompletingTextField: NSViewRepresentable {
             let caret = editor.selectedRange().location
             guard caret > 0, caret <= ns.length else { return 0 }
             var i = caret
-            while i > 0 {
-                let c = ns.character(at: i - 1)
-                let isWord =
-                    (c >= 0x41 && c <= 0x5A) ||
-                    (c >= 0x61 && c <= 0x7A) ||
-                    (c >= 0x30 && c <= 0x39) ||
-                    c == 0x5F
-                if isWord { i -= 1 } else { break }
-            }
+            while i > 0, isWordChar(ns.character(at: i - 1)) { i -= 1 }
             return caret - i
         }
     }
@@ -143,18 +130,7 @@ struct CompletingTextField: NSViewRepresentable {
     }
 }
 
-/// NSTextField subclass that wires ⌥Esc to `complete:` as a manual
-/// intellisense trigger. Plain Esc is handled by macOS's default key
-/// bindings already; ⌘Space (Spotlight) and ⌃Space (input-source
-/// switcher) are intentionally NOT bound.
-final class CompletingNSTextField: NSTextField {
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        // ⌥Esc (keyCode 53 = Esc, .option modifier).
-        if event.modifierFlags.contains(.option), event.keyCode == 53,
-           window?.firstResponder === currentEditor() {
-            currentEditor()?.complete(nil)
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
-    }
-}
+/// NSTextField host for the completing strip. Esc (the default NSTextView
+/// binding for `complete:`) is routed through the coordinator's
+/// `doCommandBy` to toggle the custom completion panel — no native popup.
+final class CompletingNSTextField: NSTextField {}

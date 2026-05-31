@@ -11,6 +11,7 @@ struct RowFormView: View {
     let sourceIndices: [Int]
     @Binding var rowIndex: Int
     let editBuffer: EditBuffer?
+    var enums: [String: [String]] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -80,21 +81,40 @@ struct RowFormView: View {
             .frame(width: 160, alignment: .trailing)
 
             if let editBuffer {
-                TextField("", text: Binding(
-                    get: { displayed ?? "" },
-                    set: { newVal in
-                        if newVal == (serverValue ?? "") {
-                            editBuffer.clearCell(row: sourceRow, column: col)
-                        } else {
-                            editBuffer.set(row: sourceRow, column: col, value: newVal)
+                TypedValueEditor(
+                    typeName: column.typeName,
+                    nullable: column.nullable,
+                    enums: enums,
+                    allowsDefault: true,
+                    allowsExpression: true,
+                    compact: true,
+                    value: Binding(
+                        get: {
+                            if let entry = editBuffer.entry(row: sourceRow, column: col) {
+                                switch entry {
+                                case .literal(nil):      return .null
+                                case .literal(let v?):   return .literal(v)
+                                case .expression(let e): return .expression(e)
+                                case .defaultKeyword:    return .defaultKeyword
+                                }
+                            }
+                            return serverValue == nil ? .null : .literal(serverValue!)
+                        },
+                        set: { typed in
+                            if typed.isNoOp(against: serverValue) {
+                                editBuffer.clearCell(row: sourceRow, column: col)
+                            } else {
+                                editBuffer.set(row: sourceRow, column: col, typed: typed)
+                            }
                         }
-                    }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .font(.system(.body, design: .monospaced))
-                .overlay(alignment: .trailing) {
+                    )
+                )
+                // Re-hydrate the editor's internal draft when the form steps
+                // to a different source row (the view instance is reused).
+                .id("\(sourceRow)-\(col)")
+                .overlay(alignment: .topTrailing) {
                     if isDirty {
-                        Circle().fill(Color.orange).frame(width: 6, height: 6).padding(.trailing, 6)
+                        Circle().fill(Color.orange).frame(width: 6, height: 6).padding(.top, 2)
                     }
                 }
             } else {

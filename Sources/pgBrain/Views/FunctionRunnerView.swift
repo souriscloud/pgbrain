@@ -17,7 +17,7 @@ struct FunctionRunnerView: View {
     let onClose: () -> Void
 
     @State private var params: [FunctionInspector.Parameter] = []
-    @State private var values: [UUID: String] = [:]
+    @State private var values: [UUID: TypedInputValue] = [:]
     @State private var loading = true
     @State private var loadError: String?
 
@@ -102,27 +102,34 @@ struct FunctionRunnerView: View {
     }
 
     private func paramRow(_ p: FunctionInspector.Parameter) -> some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .trailing, spacing: 1) {
                 Text(p.name.isEmpty ? "$\(paramIndex(p) + 1)" : p.name)
                     .font(.system(.callout, design: .monospaced).weight(.medium))
-                Text(p.type + (p.mode == "VARIADIC" ? " (variadic)" : ""))
+                Text(p.mode == "VARIADIC" ? "variadic" : "")
                     .font(.caption2).foregroundStyle(.tertiary)
             }
-            .frame(width: 160, alignment: .trailing)
+            .frame(width: 150, alignment: .trailing)
+            .padding(.top, 2)
 
-            TextField(placeholder(p), text: Binding(
-                get: { values[p.id] ?? "" },
-                set: { values[p.id] = $0 }
-            ))
-            .textFieldStyle(.roundedBorder)
-            .font(.system(.callout, design: .monospaced))
+            TypedValueEditor(
+                typeName: p.type,
+                nullable: true,
+                enums: service.schema.enums,
+                allowsDefault: p.hasDefault,
+                allowsExpression: true,
+                compact: true,
+                completions: { partial, _, _ in
+                    SQLCompletionProvider.items(
+                        for: partial, in: service.schema,
+                        context: .expression(columns: []))
+                },
+                value: Binding(
+                    get: { values[p.id] ?? (p.hasDefault ? .defaultKeyword : .null) },
+                    set: { values[p.id] = $0 }
+                )
+            )
         }
-    }
-
-    private func placeholder(_ p: FunctionInspector.Parameter) -> String {
-        if let def = p.defaultExpr { return "default: \(def)" }
-        return "NULL"
     }
 
     private func paramIndex(_ p: FunctionInspector.Parameter) -> Int {
@@ -261,24 +268,25 @@ struct FunctionRunnerView: View {
     private func buildArgList() -> String {
         guard !params.isEmpty else { return "" }
         if allNamed {
-            // Named notation: skip blanks that have a default; pass NULL for
-            // required blanks; pass the typed expression otherwise.
+            // Named notation: DEFAULT means "omit so the routine default
+            // applies"; everything else passes `name => fragment`.
             var pieces: [String] = []
             for p in params {
-                let v = (values[p.id] ?? "").trimmingCharacters(in: .whitespaces)
-                if v.isEmpty {
+                let v = values[p.id] ?? (p.hasDefault ? .defaultKeyword : .null)
+                if case .defaultKeyword = v {
                     if p.hasDefault { continue }
                     pieces.append("\(p.name) => NULL")
                 } else {
-                    pieces.append("\(p.name) => \(v)")
+                    pieces.append("\(p.name) => \(v.sqlFragment(typeName: p.type, cast: false))")
                 }
             }
             return pieces.joined(separator: ", ")
         }
-        // Positional: every slot must be present, so blanks become NULL.
+        // Positional: every slot must be present, so DEFAULT collapses to NULL.
         return params.map { p in
-            let v = (values[p.id] ?? "").trimmingCharacters(in: .whitespaces)
-            return v.isEmpty ? "NULL" : v
+            let v = values[p.id] ?? (p.hasDefault ? .defaultKeyword : .null)
+            if case .defaultKeyword = v { return "NULL" }
+            return v.sqlFragment(typeName: p.type, cast: false)
         }.joined(separator: ", ")
     }
 

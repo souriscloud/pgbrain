@@ -18,7 +18,36 @@ enum UpdateApplier {
 
     struct CellChange: Sendable {
         let column: ColumnNode
-        let newValue: String?
+        let value: Value
+
+        /// How the new cell value reaches SQL.
+        enum Value: Sendable, Equatable {
+            case literal(String?)     // bound param, cast `$N::type`; nil = NULL
+            case expression(String)   // inlined raw SQL, implicit assignment cast
+            case defaultKeyword       // the column DEFAULT
+        }
+
+        /// Convenience for the common literal/NULL path so existing call
+        /// sites keep reading naturally.
+        init(column: ColumnNode, newValue: String?) {
+            self.column = column
+            self.value = .literal(newValue)
+        }
+
+        init(column: ColumnNode, value: Value) {
+            self.column = column
+            self.value = value
+        }
+
+        /// Bridge from the edit buffer's staged entry.
+        init(column: ColumnNode, entry: EditBuffer.Entry) {
+            self.column = column
+            switch entry {
+            case .literal(let v):    self.value = .literal(v)
+            case .expression(let e): self.value = .expression(e)
+            case .defaultKeyword:    self.value = .defaultKeyword
+            }
+        }
     }
 
     /// A brand-new row to INSERT. `cells` holds only the columns the user
@@ -106,18 +135,29 @@ enum UpdateApplier {
                 // double quotes — quoting makes PG look up a
                 // case-sensitive user-defined type with that literal
                 // name (`type "bigint" does not exist`).
+                // Only literal cells consume a bind placeholder; expression
+                // and DEFAULT cells inline raw SQL, so we count binds as we
+                // go rather than assuming one per cell.
                 var binds = PostgresBindings()
                 var setPieces: [String] = []
-                for (index, change) in edit.cells.enumerated() {
-                    let placeholder = "$\(index + 1)"
-                    let typeCast = "::" + change.column.typeName
-                    setPieces.append("\(SQLIdent.quote(change.column.name)) = \(placeholder)\(typeCast)")
-                    if let v = change.newValue {
-                        binds.append(v)
-                    } else {
-                        binds.appendNull()
+                var bindCount = 0
+                for change in edit.cells {
+                    let name = SQLIdent.quote(change.column.name)
+                    switch change.value {
+                    case .literal(let v):
+                        bindCount += 1
+                        let placeholder = "$\(bindCount)"
+                        setPieces.append("\(name) = \(placeholder)::\(change.column.typeName)")
+                        if let v { binds.append(v) } else { binds.appendNull() }
+                    case .expression(let expr):
+                        // Assignment context casts the expression to the
+                        // column type implicitly (`col = now()`), so no `::`.
+                        setPieces.append("\(name) = \(expr)")
+                    case .defaultKeyword:
+                        setPieces.append("\(name) = DEFAULT")
                     }
                 }
+                guard !setPieces.isEmpty else { continue }
 
                 // WHERE pk1 = $N+1 AND pk2 = $N+2 ...
                 var wherePieces: [String] = []
@@ -125,7 +165,7 @@ enum UpdateApplier {
                     guard let colIndex = columnIndexByName[pkCol.name] else {
                         throw Failure.unknownPrimaryKeyColumn(pkCol.name)
                     }
-                    let placeholderIndex = edit.cells.count + offset + 1
+                    let placeholderIndex = bindCount + offset + 1
                     let placeholder = "$\(placeholderIndex)"
                     let typeCast = "::" + pkCol.typeName
                     wherePieces.append("\(SQLIdent.quote(pkCol.name)) = \(placeholder)\(typeCast)")
@@ -152,14 +192,30 @@ enum UpdateApplier {
                 var binds = PostgresBindings()
                 var cols: [String] = []
                 var placeholders: [String] = []
-                for (index, change) in insert.cells.enumerated() {
-                    cols.append(SQLIdent.quote(change.column.name))
-                    placeholders.append("$\(index + 1)::" + change.column.typeName)
-                    if let v = change.newValue {
-                        binds.append(v)
-                    } else {
-                        binds.appendNull()
+                var bindCount = 0
+                for change in insert.cells {
+                    switch change.value {
+                    case .defaultKeyword:
+                        // Omit the column entirely so the table DEFAULT
+                        // (identity sequence, now(), …) applies.
+                        continue
+                    case .literal(let v):
+                        cols.append(SQLIdent.quote(change.column.name))
+                        bindCount += 1
+                        placeholders.append("$\(bindCount)::" + change.column.typeName)
+                        if let v { binds.append(v) } else { binds.appendNull() }
+                    case .expression(let expr):
+                        cols.append(SQLIdent.quote(change.column.name))
+                        placeholders.append(expr)
                     }
+                }
+                // Every staged cell resolved to DEFAULT → fall back to the
+                // all-defaults insert.
+                if cols.isEmpty {
+                    _ = try await connection.query(
+                        PostgresQuery(unsafeSQL: "INSERT INTO \(qualifiedTable) DEFAULT VALUES"),
+                        logger: logger)
+                    continue
                 }
                 let sql = "INSERT INTO \(qualifiedTable) (\(cols.joined(separator: ", "))) VALUES (\(placeholders.joined(separator: ", ")))"
                 _ = try await connection.query(PostgresQuery(unsafeSQL: sql, binds: binds), logger: logger)

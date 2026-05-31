@@ -21,6 +21,12 @@ struct DataGridView: NSViewRepresentable {
     /// Pass nil to render the grid read-only (e.g. for SQL scratchpad
     /// result blocks). Pass an `EditBuffer` to enable cell editing.
     var editBuffer: EditBuffer? = nil
+    /// Enum type → labels catalog (from the connection's schema snapshot),
+    /// so the cell editor can offer enum-column dropdowns.
+    var enums: [String: [String]] = [:]
+    /// Schema snapshot, so the cell editor's expression mode can offer
+    /// schema-aware completion (this table's columns + functions).
+    var schema: SchemaSnapshot = .empty
     /// `(row, column)` cells that were just successfully applied. Cell
     /// rendering paints them with a fading green tint for a few seconds
     /// so the user can see exactly what landed.
@@ -138,6 +144,9 @@ struct DataGridView: NSViewRepresentable {
         /// caches 2000 entries (~MB). Cleared on page swap + on per-
         /// cell edit commits.
         @ObservationIgnored private var renderCache: [Int: CellFormat.Rendered] = [:]
+
+        var enums: [String: [String]] = [:]
+        var schema: SchemaSnapshot = .empty
 
         init(page: RowsFetcher.Page, editBuffer: EditBuffer?) {
             self.page = page
@@ -346,15 +355,37 @@ struct DataGridView: NSViewRepresentable {
             guard col < page.columns.count, row < page.rows.count else { return }
             let column = page.columns[col]
             let original = page.rows[row][col]
-            let displayed: String? = buffer.value(row: row, column: col).flatMap { $0 } ?? original
+            // Seed the editor from any staged entry, else the server value
+            // (NULL → NULL mode so the cell's null-ness is explicit).
+            let initial: TypedInputValue
+            if let entry = buffer.entry(row: row, column: col) {
+                switch entry {
+                case .literal(nil):      initial = .null
+                case .literal(let v?):   initial = .literal(v)
+                case .expression(let e): initial = .expression(e)
+                case .defaultKeyword:    initial = .defaultKeyword
+                }
+            } else {
+                initial = original == nil ? .null : .literal(original!)
+            }
             let rect = table.frameOfCell(atColumn: col, row: row)
+            // Expression-mode completion biased toward this table's columns.
+            let cols = page.columns
+            let schema = self.schema
+            let completions: (String, String, Int) -> [CompletionItem] = { partial, _, _ in
+                SQLCompletionProvider.items(
+                    for: partial, in: schema,
+                    context: .expression(columns: cols))
+            }
             CellEditorPopover.show(
                 for: column,
-                currentValue: displayed,
+                initial: initial,
+                enums: enums,
+                completions: completions,
                 relativeTo: rect,
                 of: table
-            ) { [weak self] newValue in
-                self?.commit(row: row, col: col, original: original, newValue: newValue)
+            ) { [weak self] typed in
+                self?.commit(row: row, col: col, original: original, typed: typed)
             }
         }
 
@@ -532,7 +563,7 @@ struct DataGridView: NSViewRepresentable {
             // Walk the visible rows to find the original cell value.
             let visibleRow = sourceRowIndices.firstIndex(of: loc.row) ?? loc.row
             let original = page.rows[visibleRow][loc.col]
-            commit(row: loc.row, col: loc.col, original: original, newValue: nil)
+            commit(row: loc.row, col: loc.col, original: original, typed: .null)
             tableView?.reloadData()
         }
 
@@ -677,12 +708,12 @@ struct DataGridView: NSViewRepresentable {
         /// from an empty string (which is a legitimate non-NULL value).
         /// If the new value equals the server's original, the pending
         /// edit is reverted so the dirty count stays honest.
-        func commit(row: Int, col: Int, original: String?, newValue: String?) {
+        func commit(row: Int, col: Int, original: String?, typed: TypedInputValue) {
             guard let buffer = editBuffer else { return }
             // No-op against the original: drop the pending entry so the
             // cell goes back to clean instead of carrying a fake-dirty
             // marker that points at the same value.
-            if newValue == original {
+            if typed.isNoOp(against: original) {
                 if buffer.isDirty(row: row, column: col) {
                     buffer.clearCell(row: row, column: col)
                     invalidateRenderCacheCell(sourceRow: row, dataCol: col)
@@ -690,7 +721,7 @@ struct DataGridView: NSViewRepresentable {
                 }
                 return
             }
-            buffer.set(row: row, column: col, value: newValue)
+            buffer.set(row: row, column: col, typed: typed)
             invalidateRenderCacheCell(sourceRow: row, dataCol: col)
             // SwiftUI's @Observable chain will eventually re-render the
             // table, but on same-key re-edits the observable signals can
@@ -735,7 +766,10 @@ struct DataGridView: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(page: page, editBuffer: editBuffer)
+        let c = Coordinator(page: page, editBuffer: editBuffer)
+        c.enums = enums
+        c.schema = schema
+        return c
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -855,6 +889,8 @@ struct DataGridView: NSViewRepresentable {
         }
         context.coordinator.page = page
         context.coordinator.editBuffer = editBuffer
+        context.coordinator.enums = enums
+        context.coordinator.schema = schema
         context.coordinator.appliedHighlights = appliedHighlights
         context.coordinator.insertRowIndices = insertRowIndices
         context.coordinator.deleteRowIndices = deleteRowIndices

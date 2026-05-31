@@ -29,7 +29,7 @@ struct GenerateDataSheet: View {
 
     @State private var rowCount: Int = 100
     @State private var strategies: [String: Strategy] = [:]
-    @State private var fixedValues: [String: String] = [:]
+    @State private var fixedValues: [String: TypedInputValue] = [:]
     @State private var error: String?
     @State private var running = false
     @State private var previewSQL = ""
@@ -103,13 +103,19 @@ struct GenerateDataSheet: View {
                         }
                         .labelsHidden()
                         if strategies[col.name] == .fixed {
-                            TextField("value", text: Binding(
-                                get: { fixedValues[col.name] ?? "" },
-                                set: { fixedValues[col.name] = $0; recomputePreview() }
-                            ))
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(.caption, design: .monospaced))
-                            .frame(width: 120)
+                            TypedValueEditor(
+                                typeName: col.typeName,
+                                nullable: col.nullable,
+                                enums: service.schema.enums,
+                                allowsDefault: false,
+                                allowsExpression: true,
+                                compact: true,
+                                value: Binding(
+                                    get: { fixedValues[col.name] ?? .literal("") },
+                                    set: { fixedValues[col.name] = $0; recomputePreview() }
+                                )
+                            )
+                            .frame(width: 240)
                         }
                         Spacer()
                     }
@@ -163,8 +169,7 @@ struct GenerateDataSheet: View {
         case .uuid: return "gen_random_uuid()"
         case .nullValue: return "NULL"
         case .fixed:
-            let raw = fixedValues[col.name] ?? ""
-            return "'\(raw.replacingOccurrences(of: "'", with: "''"))'"
+            return (fixedValues[col.name] ?? .literal("")).sqlFragment(typeName: col.typeName)
         }
     }
 

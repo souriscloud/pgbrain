@@ -572,6 +572,30 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓ + launch smoke ✓; marker geometry validated headlessly (distinct yTop per statement). Released in v0.8.3.
 
+### Iter 38 — Unified typed-input family (2026-05-31, unreleased)
+**Goal**: every data-value entry point speaks one consistent, modern, type-aware control — date/time pickers, enum dropdowns, syntax-highlighted JSON, numeric fields — each with a mode menu for `NULL` / `DEFAULT` / `now()` / raw SQL expression. "One family", native + sexy.
+
+- **New `Sources/pgBrain/Views/TypedInput/`**:
+  - `TypedInputValue.swift` — the value currency (`.literal` / `.expression` / `.null` / `.defaultKeyword`), the editor-facing `InputKind` (text/integer/decimal/bool/date/time/timestamp(tz)/json/uuid/bytes/enum/interval/network/array/geometry/unknown, resolved from `format_type` strings + the enum catalog, **separate from `ColumnTypeKind`** so the display path's exhaustive switches don't ripple), per-type `TypedQuickAction`s (now()/today/gen_random_uuid), and `sqlFragment(typeName:cast:)`.
+  - `JSONSyntaxEditor.swift` — `JSONHighlighter` (NSTextStorage delegate, keys/strings/numbers/literals/punct) + a SwiftUI `NSTextView` wrapper. Live colouring.
+  - `TypedValueEditor.swift` — the one control: type chip + mode menu + per-kind native editor; JSON sub-editor gets Text/Tree toggle, validity chip, Prettify/Minify. `compact` layout for dense forms. Binds a single `TypedInputValue`.
+- **Enum catalog**: `SchemaSnapshot.enums` (`name`/`schema.name` → ordered labels) from a new `SchemaFetcher.fetchEnums` (pg_enum) folded into `ConnectionService.schema`; drives enum dropdowns app-wide.
+- **Expression-aware write path**: `EditBuffer.Entry` (literal/expression/defaultKeyword) replaces the bare `String?`; `UpdateApplier.CellChange.Value` inlines expressions / emits `DEFAULT` with correct bind indexing (only literals consume `$N`). Expression/DEFAULT updates force a refetch (server-computed). `TableTabView` apply builder maps entries through.
+- **Wired surfaces**: grid cell editor (`CellEditorPopover` now hosts `TypedValueEditor`), row form (`RowFormView`, per-row `.id` re-hydration), Function Runner args (`name => fragment`, DEFAULT = omit), Generate-Data fixed values. Identifier/SQL-fragment fields (connection editor, schema/index names, WHERE/ORDER BY, column defaults) intentionally stay plain — they're not type-served values.
+- **Expression mode = real SQL editor**: `SQLExpressionEditor.swift` (NSTextView) renders the expression-mode value with the app's `SQLHighlighter` and offers **schema-aware completion** — as-you-type (180ms debounce, ≥2-char prefix) + ⌘Space, native popup, never preselected. New `SQLCompletionProvider` `.expression(columns:)` context ranks the **edited table's own columns first**, then schema functions + a curated builtin set (`now()`, `coalesce(`, `date_trunc(`, …). Wired into the cell editor (biased to `page.columns`) and Function-Runner args. (The native macOS completion popup is string-only — showing inline column types / function signatures would need a custom popup; deferred.)
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓ + launch smoke ✓. (Live click-through of each editor against a DB still pending.) **Not yet released.**
+
+### Iter 39 — IDE-grade custom completion panel (2026-05-31, unreleased)
+**Goal**: replace macOS's string-only native completion popup (no icons, no type/signature detail) with a custom, IDE-grade panel — the thing that makes intellisense feel pro.
+
+- **`CompletionItem.swift`**: rich model — `value` / `label` / `detail` / `kind` (column/table/view/schema/function/keyword/enum/snippet), each kind mapping to an SF symbol + tint + category label.
+- **`SQLCompletionProvider` rewrite**: now emits `[CompletionItem]` via `items(for:in:context:)` (string `completions(...)` kept as a thin projection for any remaining caller). Candidates carry **detail** — columns show their **type**, functions show their **signature** (`(args) → ret`), tables/schemas show a category. Added a subsequence **fuzzy** fallback below exact/prefix/substring in `rank`. All scope logic (FROM/JOIN resolution, `alias.` qualifier, clause context) preserved.
+- **`CompletionController.swift`**: a non-activating `NSPanel` hosting a SwiftUI list (icon + mono name + dimmed detail, brand-tinted selection, scroll-to-selected). Driven entirely by the host editor — `requestCompletion()` / `refreshIfVisible()` / `moveSelection` / `acceptSelected` / `cancel` / `handleCommand(selector)`. Anchors at the caret rect (flips above if it would clip), dismisses on outside-click / scroll. Panel is display-only; the text view keeps first responder so typing flows through.
+- **Routed all three SQL editors through it**: the scratchpad (`SqlCellNSTextView` — keyDown gives the panel priority over cross-cell ↑/↓ nav and ⌘↩; Esc/⌥Esc open, Esc closes), the WHERE/ORDER-BY strip (`CompletingTextField` — via `doCommandBy`, bound to the field editor), and the typed-input expression field (`SQLExpressionEditor`). Native `complete(_:)` paths removed.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓ + launch smoke ✓. **Live in-editor click-through still pending** (needs a DB session). Known caveat: in the *cell-editor popover* (a transient `NSPopover`), accepting a completion by **mouse-click** can dismiss the popover — keyboard acceptance is unaffected; the scratchpad / WHERE strip are unaffected. **Not yet released.**
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

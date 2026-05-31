@@ -6,6 +6,27 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
+## v0.9.1 — 2026-05-31
+
+A big upgrade to how you enter and edit values, plus IDE-grade SQL completion.
+
+### Added
+- **One typed-input family across the app.** Every data-value field now adapts to
+  the column's Postgres type: date/time pickers, a true/false segment, **enum
+  dropdowns** (loaded from the database), numeric fields, and a JSON editor with
+  **syntax highlighting**, prettify/minify, and a tree view. Each field has a mode
+  menu for `NULL`, the column `DEFAULT`, `now()` / `gen_random_uuid()` shortcuts,
+  or a raw **SQL expression** — so you can set a timestamp cell to `now()` and it
+  writes as real SQL, not a quoted string. Live in the grid cell editor, the row
+  form, the Run-a-Function dialog, and Generate Data.
+- **IDE-grade completion popup.** A custom panel with an icon, name, and dimmed
+  detail per row — **columns show their type, functions show their signature** —
+  with keyboard navigation, fuzzy matching, and brand-tinted selection. Replaces
+  the plain macOS list in the SQL scratchpad, the WHERE / ORDER BY strips, and the
+  new expression fields.
+- **Expression inputs are real SQL editors** — syntax highlighting plus
+  schema-aware completion biased toward the row's own columns.
+
 ## v0.9.0 — 2026-05-31
 
 Marks the scratchpad + command-palette work of the 0.8.x line as a minor

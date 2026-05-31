@@ -20,14 +20,37 @@ enum SchemaFetcher {
         async let pks = fetchPrimaryKeys(client: client)
         async let funcs = fetchFunctions(client: client)
         async let fks = fetchForeignKeys(client: client)
+        async let enumLabels = fetchEnums(client: client)
 
-        let (db, rels, primaryKeys, functions, foreignKeys) =
-            try await (dbName, relations, pks, funcs, fks)
-        return assemble(
+        let (db, rels, primaryKeys, functions, foreignKeys, enums) =
+            try await (dbName, relations, pks, funcs, fks, enumLabels)
+        var snapshot = assemble(
             databaseName: db, relations: rels, columns: [],
             primaryKeys: primaryKeys, functions: functions,
             foreignKeys: foreignKeys
         )
+        snapshot.enums = enums
+        return snapshot
+    }
+
+    /// User-defined enum types and their labels, in declared order. Keyed
+    /// by both bare and schema-qualified names. Best-effort — a failure
+    /// here just means enum columns fall back to a plain text field.
+    private static func fetchEnums(client: PostgresClient) async throws -> [String: [String]] {
+        let sql: PostgresQuery = """
+        SELECT n.nspname, t.typname, e.enumlabel
+        FROM pg_enum e
+        JOIN pg_type t ON t.oid = e.enumtypid
+        JOIN pg_namespace n ON n.oid = t.typnamespace
+        ORDER BY t.typname, e.enumsortorder
+        """
+        var out: [String: [String]] = [:]
+        let rows = try await client.query(sql, logger: pgbrainQuietLogger)
+        for try await (schema, name, label) in rows.decode((String, String, String).self) {
+            out[name, default: []].append(label)
+            out["\(schema).\(name)", default: []].append(label)
+        }
+        return out
     }
 
     /// Background enrichment — runs the bulk pg_attribute query and

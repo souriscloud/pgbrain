@@ -965,13 +965,16 @@ struct TableTabView: View {
                             page: visible,
                             sourceIndices: sourceIndices,
                             rowIndex: $formRowIndex,
-                            editBuffer: table.isEditable ? loader.editBuffer : nil
+                            editBuffer: table.isEditable ? loader.editBuffer : nil,
+                            enums: service.schema.enums
                         )
                         pagerStrip(visible: visible)
                     } else {
                         DataGridView(
                             page: visible,
                             editBuffer: table.isEditable ? loader.editBuffer : nil,
+                            enums: service.schema.enums,
+                            schema: service.schema,
                             appliedHighlights: loader.appliedHighlights,
                             insertRowIndices: loader.pendingInsertRows,
                             deleteRowIndices: loader.pendingDeleteRows,
@@ -1449,13 +1452,13 @@ final class RowsLoader {
             .filter { !pendingInsertRows.contains($0.row) && !pendingDeleteRows.contains($0.row) }
             .map { rowEdits in
                 let cells = rowEdits.cells.map {
-                    UpdateApplier.CellChange(column: page.columns[$0.column], newValue: $0.value)
+                    UpdateApplier.CellChange(column: page.columns[$0.column], entry: $0.entry)
                 }
                 return UpdateApplier.Edit(rowIndex: rowEdits.row, cells: cells)
             }
         let inserts: [UpdateApplier.Insert] = pendingInsertRows.sorted().map { idx in
             let cells = (pending.first { $0.row == idx }?.cells ?? []).map {
-                UpdateApplier.CellChange(column: page.columns[$0.column], newValue: $0.value)
+                UpdateApplier.CellChange(column: page.columns[$0.column], entry: $0.entry)
             }
             return UpdateApplier.Insert(cells: cells)
         }
@@ -1491,7 +1494,12 @@ final class RowsLoader {
             service.operations.finish(op, status: .succeeded)
             let elapsed = Date().timeIntervalSince(started)
 
-            if !inserts.isEmpty || !deletes.isEmpty {
+            // Expression / DEFAULT updates produce server-computed values we
+            // can't predict client-side, so they force a refetch too.
+            let hasComputedUpdates = edits.contains { edit in
+                edit.cells.contains { if case .literal = $0.value { return false } else { return true } }
+            }
+            if !inserts.isEmpty || !deletes.isEmpty || hasComputedUpdates {
                 // Inserts get server-assigned identity/defaults and deletes
                 // remove rows — either way the row set changed, so refetch
                 // rather than try to splice in place.
@@ -1505,7 +1513,8 @@ final class RowsLoader {
                 // page so the grid updates without a round-trip refetch.
                 for edit in edits {
                     for cell in edit.cells {
-                        page.rows[edit.rowIndex][page.columns.firstIndex(where: { $0.name == cell.column.name }) ?? 0] = cell.newValue
+                        guard case .literal(let v) = cell.value else { continue }
+                        page.rows[edit.rowIndex][page.columns.firstIndex(where: { $0.name == cell.column.name }) ?? 0] = v
                     }
                 }
                 state = .loaded(page)
@@ -1641,7 +1650,7 @@ private struct QueryStripView: View {
                 placeholder: placeholder,
                 font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
                 completions: { partial in
-                    SQLCompletionProvider.completions(
+                    SQLCompletionProvider.items(
                         for: partial,
                         in: schema,
                         context: .clause(table: table, kind: clauseKind)

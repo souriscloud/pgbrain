@@ -336,7 +336,7 @@ private struct SqlCellView: View {
                     jumpToAdjacentSqlCell(direction: direction)
                 },
                 completions: { partial, fullText, caretIndex in
-                    SQLCompletionProvider.completions(
+                    SQLCompletionProvider.items(
                         for: partial,
                         in: service.visibleSchema,
                         context: .scratchpad(fullText: fullText, caretIndex: caretIndex)
@@ -428,7 +428,7 @@ private struct SqlCellEditor: NSViewRepresentable {
     /// preceding the caret. We pass through the full cell text + caret
     /// so the provider can derive context (FROM-vs-WHERE etc.) instead
     /// of always returning the union of everything.
-    let completions: (_ partial: String, _ fullText: String, _ caretIndex: Int) -> [String]
+    let completions: (_ partial: String, _ fullText: String, _ caretIndex: Int) -> [CompletionItem]
     /// Live schema snapshot — used by hover-to-identify tooltips.
     let schema: () -> SchemaSnapshot
     /// Host hook for `Explain Statement` — opens the EXPLAIN sheet
@@ -443,13 +443,15 @@ private struct SqlCellEditor: NSViewRepresentable {
         var onRun: (NSRange) -> Void
         var onFocus: () -> Void
         var onJumpToAdjacent: (Int) -> Void
-        var completions: (_ partial: String, _ fullText: String, _ caretIndex: Int) -> [String]
+        var completions: (_ partial: String, _ fullText: String, _ caretIndex: Int) -> [CompletionItem]
         /// Provider for the live schema — used by hover-to-identify to
         /// build tooltip content without keeping a strong reference to
         /// the connection service inside the AppKit subclass.
         var currentSchema: (() -> SchemaSnapshot)?
+        /// The custom completion controller for this cell's text view.
+        var controller: CompletionController?
 
-        init(text: Binding<String>, onRun: @escaping (NSRange) -> Void, onFocus: @escaping () -> Void, onJumpToAdjacent: @escaping (Int) -> Void, completions: @escaping (String, String, Int) -> [String]) {
+        init(text: Binding<String>, onRun: @escaping (NSRange) -> Void, onFocus: @escaping () -> Void, onJumpToAdjacent: @escaping (Int) -> Void, completions: @escaping (String, String, Int) -> [CompletionItem]) {
             self.text = text
             self.onRun = onRun
             self.onFocus = onFocus
@@ -460,27 +462,6 @@ private struct SqlCellEditor: NSViewRepresentable {
         func textDidChange(_ notif: Notification) {
             guard let tv = notif.object as? NSTextView else { return }
             text.wrappedValue = tv.string
-        }
-
-        /// AppKit calls this when the text view's `complete(_:)` runs —
-        /// either via Esc, our ⌃Space binding, or the system's
-        /// completion driver. We supply schema-aware completions.
-        func textView(_ textView: NSTextView, completions words: [String], forPartialWordRange charRange: NSRange, indexOfSelectedItem index: UnsafeMutablePointer<Int>?) -> [String] {
-            let ns = textView.string as NSString
-            guard charRange.location >= 0, charRange.location + charRange.length <= ns.length else { return words }
-            let partial = ns.substring(with: charRange)
-            // Pass the *full* cell text + the partial's start position so
-            // the provider can derive context from what's to the left of
-            // the caret (FROM / WHERE / ORDER BY / qualifier-dot etc.).
-            let ours = completions(partial, ns as String, charRange.location)
-            // CRITICAL: never preselect. With a selected item, the native
-            // popup auto-commits it when you type a space/return — so typing
-            // "FROM " could replace "FROM" with whatever ranked first. Leaving
-            // nothing selected means completion only inserts when the user
-            // explicitly arrows to an item and accepts it. It must never
-            // silently overwrite what was typed.
-            index?.pointee = -1
-            return ours.isEmpty ? words : ours
         }
     }
 
@@ -534,6 +515,13 @@ private struct SqlCellEditor: NSViewRepresentable {
         tv.schemaProvider = { [weak coord = context.coordinator] in coord?.currentSchema?() }
         tv.onExplainRequested = onExplain
         tv.onLayoutChanged = onMarkers
+        // IDE-grade completion: a custom panel driven by the schema-aware
+        // provider, replacing macOS's string-only native popup.
+        let controller = CompletionController(textView: tv) { [weak coord = context.coordinator] partial, full, caret in
+            coord?.completions(partial, full, caret) ?? []
+        }
+        context.coordinator.controller = controller
+        tv.completionController = controller
         tv.string = text
         // Highlight the initial contents — the delegate's edit hook only
         // fires for subsequent mutations.
@@ -579,6 +567,9 @@ final class SqlCellNSTextView: NSTextView {
     /// Used by hover-to-identify to look up tables / columns under the
     /// mouse. Returns nil when no schema is available.
     var schemaProvider: (() -> SchemaSnapshot?)?
+    /// Custom completion panel for this cell. When visible it captures
+    /// ↑/↓/⏎/⇥/Esc; otherwise Esc/⌥Esc open it.
+    var completionController: CompletionController?
 
     /// Tracks the storage length on the previous tick so `didChangeText`
     /// can tell insertions from deletions. Auto-complete only fires on
@@ -599,19 +590,26 @@ final class SqlCellNSTextView: NSTextView {
     private var lastHoverCharIndex: Int = -1
 
     override func keyDown(with event: NSEvent) {
+        // Completion panel owns navigation keys while it's open — must come
+        // before cross-cell ↑/↓ nav and ⌘↩ run handling below.
+        if let cc = completionController, cc.isVisible {
+            switch event.keyCode {
+            case 126: cc.moveSelection(-1); return      // ↑
+            case 125: cc.moveSelection(+1); return      // ↓
+            case 36, 76: if cc.acceptSelected() { return }  // ⏎ / enter
+            case 48: if cc.acceptSelected() { return }      // ⇥ tab
+            case 53: cc.cancel(); return                    // esc
+            default: break
+            }
+        }
         // ⌘↩ → run.
         if event.modifierFlags.contains(.command), event.keyCode == 36 {
             onRun?()
             return
         }
-        // Manual intellisense trigger. macOS already binds plain Esc
-        // to `complete:` on NSTextView, so we don't need to handle it
-        // here — but ⌥Esc is a common JetBrains/Xcode-on-Mac alias and
-        // worth binding explicitly. ⌘Space conflicts with Spotlight
-        // and ⌃Space conflicts with the system input-source switcher,
-        // so neither is wired here.
-        if event.modifierFlags.contains(.option), event.keyCode == 53 {
-            self.complete(nil)
+        // Esc / ⌥Esc → open completion (when the panel isn't already up).
+        if event.keyCode == 53 {
+            completionController?.requestCompletion()
             return
         }
         // ⌘⌥L (JetBrains convention) → Format SQL.
@@ -781,6 +779,8 @@ final class SqlCellNSTextView: NSTextView {
         super.didChangeText()
         invalidateIntrinsicContentSize()
         reportMarkers()
+        // Keep an open panel in sync with what's being typed.
+        completionController?.refreshIfVisible()
         // Smart as-you-type: only fire when the text grew (insertion,
         // not delete), the last char is an identifier char, the
         // identifier prefix is ≥2 chars, and we've waited 180ms since
@@ -803,7 +803,7 @@ final class SqlCellNSTextView: NSTextView {
             // Re-check the prefix on fire — the user may have deleted
             // chars in the debounce window.
             if self.currentIdentifierPrefixLength() >= 2 {
-                self.complete(nil)
+                self.completionController?.requestCompletion()
             }
         }
     }
