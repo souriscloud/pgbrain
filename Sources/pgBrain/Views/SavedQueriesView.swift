@@ -36,11 +36,11 @@ struct SavedQueriesView: View {
             TextField("Search saved queries", text: $search)
                 .textFieldStyle(.roundedBorder)
             Button("Save current notebook") {
-                let trimmed = notebook.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trimmed = notebook.sql.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { return }
                 draft = SavedQuery(name: "Query \(store.queries.count + 1)", sql: trimmed)
             }
-            .disabled(notebook.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(notebook.sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .padding(Tokens.Spacing.md)
     }
@@ -67,18 +67,11 @@ struct SavedQueriesView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 Button("Insert") {
-                    // Drop the snippet into the last (or only) SQL cell in
-                    // the notebook so the user can edit + run it
-                    // immediately. The cell editor picks up the change via
-                    // SwiftUI binding.
-                    if let target = notebook.cells.last(where: { $0.kind == .sql }) {
-                        target.text = q.sql
-                    } else {
-                        // No SQL cell present (shouldn't happen — Notebook
-                        // always seeds one — but be defensive).
-                        notebook.insert(NotebookCell(kind: .sql, text: q.sql),
-                                        after: notebook.cells.last?.id ?? UUID())
-                    }
+                    // Append the saved query to the console buffer so the user
+                    // can edit + run it immediately. The editor picks up the
+                    // change via the SwiftUI binding.
+                    let sep = notebook.sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
+                    notebook.sql += sep + q.sql
                     onClose()
                 }
                 .buttonStyle(.borderedProminent)

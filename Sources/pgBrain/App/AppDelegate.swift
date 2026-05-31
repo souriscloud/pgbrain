@@ -211,9 +211,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     case .scratchpad:
                         let pad = workspace.openScratchpad()
                         if let title = persisted.scratchpadTitle { pad.title = title }
-                        if let text = persisted.scratchpadText, !text.isEmpty,
-                           let firstSql = pad.cells.first(where: { $0.kind == .sql }) {
-                            firstSql.text = text
+                        if let text = persisted.scratchpadText, !text.isEmpty {
+                            pad.sql = text
                         }
                         pad.searchPath = persisted.scratchpadSearchPath
                         if let opened = workspace.tabs.last {

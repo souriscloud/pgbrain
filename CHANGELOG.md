@@ -8,6 +8,19 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
 ## Unreleased
 
+### Changed
+- **The SQL scratchpad is now a DataGrip-style console.** Instead of a stack of
+  cells that each own an inline result, there's one SQL editor on top and a
+  results panel below, split by a draggable divider (the split is remembered).
+  **⌘↩** runs the statement under the caret; select text and **⌘↩** runs just the
+  selection; the toolbar's **▶ Run all** runs the whole script without selecting
+  anything. Each run fills the panel with one result block per statement —
+  collapsed headers for multi-statement runs, expanded for a single one. Every
+  existing feature carries over unchanged: syntax highlighting, schema-aware
+  autocomplete + hover, format SQL (⌘⌥L), EXPLAIN (⌘E), run-as-transaction,
+  search_path scoping, psql slash commands, pivot / chart / PostGIS map,
+  copy-as, query history, result diff, and open / save `.sql`.
+
 ### Fixed
 - **Creating a SQL-standard function in the scratchpad split mid-body.** A
   `CREATE FUNCTION … LANGUAGE sql BEGIN ATOMIC …; …; END` carries top-level

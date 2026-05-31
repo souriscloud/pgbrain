@@ -132,7 +132,7 @@ final class SessionStateStore {
                     return SessionState.Tab(
                         kind: .scratchpad,
                         scratchpadTitle: pad.title,
-                        scratchpadText: pad.plainText,
+                        scratchpadText: pad.sql,
                         scratchpadSearchPath: pad.searchPath,
                         colorTag: tab.color?.rawValue,
                         tabTitle: tab.title == pad.title ? nil : tab.title

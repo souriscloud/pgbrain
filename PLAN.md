@@ -560,6 +560,17 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓ + launch smoke ✓. Generated create/run/edit/sig-change SQL executed against live PG18 (`pgbrain_demo`). In-app click-through pending user check. **Not yet released.**
 
+### Iter 37 — Scratchpad redo: DataGrip-style console (2026-05-31, unreleased)
+**Goal**: per user, the cell-stack notebook was the wrong model. Move to a single editor + results panel, with run-under-caret / run-selection / run-all (a play button, no select-all needed).
+
+- **`Notebook` model** (`State/Notebook.swift`): replaced `cells: [NotebookCell]` (+ `NotebookCell`, `runningCellID`, `plainText`, and the adjacent-result splice machinery) with `sql: String`, `resultOrder: [UUID]`, `isRunning: Bool`, and `beginRun(resultIDs:)` / `removeResult(id:)` / `orderedResults`. `NotebookResult` unchanged.
+- **`NotebookView`**: body is now `editorPane | draggable splitter | resultsPane` inside a `GeometryReader`; split fraction persists via `@AppStorage`. One `SqlCellEditor` bound to `notebook.sql`. Toolbar **Run** → **Run all** (whole buffer). Deleted `CellRow` / `SqlCellView` / `jumpToAdjacentSqlCell` / `runFocusedOrLastCell`.
+- **Run semantics** (`NotebookRunner.run(notebook:service:selection:runAll:)`): `runAll` → whole buffer; selection length>0 → that slice; else → statement **under the caret** (`statementUnderCaret` maps the UTF-16 caret to a `SQLStatementSplitter.statementAt`). Each run calls `beginRun` then fills the panel. Transaction path, production guard, history, EXPLAIN/diff pulses, `isSchemaChangingSQL` reload all preserved.
+- **Editor**: `SqlCellEditor.onRun` now passes the full `NSRange` (caret or selection); added `crossCellNav` (false for the console) so ↑/↓ and ⌥↑/↓ stay normal text nav instead of cell jumps (`SqlCellNSTextView.crossCellNavEnabled`). All editor features (highlight, autocomplete, hover, pairing, format, find) untouched. `ResultBody` + `ResultGridWithViews` (pivot/chart/map/copy-as) reused verbatim.
+- **Call sites updated**: session save/restore (`SessionState`, `AppDelegate`, `ConnectionWindowContent`), snippet + query-history insert (append to `pad.sql`), `SavedQueriesView` (save/insert), command palette diff-count (`orderedResults`).
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓ + launch smoke ✓. **Interactive run/caret/selection/split testing pending user — NOT yet released** (major UX change; eyeball before cutting a release).
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 
@@ -575,5 +586,4 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 - **SQL syntax highlighting**: shipped iter-4 with a plain `NSTextView` (no highlighting). Held until the scratchpad redo so we don't double-build.
 - **`COPY ... TO STDOUT` (binary)**: still blocked upstream. postgres-nio **1.33.0** exposes `copyFrom` (COPY FROM STDIN, import direction) but **no** public `copyTo`/STDOUT, so exports stay on `SELECT … ::text`. Revisit when postgres-nio ships a public copy-out; until then a raw-channel CopyData reader is the only path and isn't worth the fragility. (Note: the new `copyFrom` could later speed the importer / cross-DB copy.)
 - **Release pipeline — `generate_appcast`**: deliberately staying on the manual `<item>` append in `release.sh` (it produced correct appcasts through v0.8.2). Switching to Sparkle's `generate_appcast` needs every historical DMG backfilled into `releases/` first or it wipes appcast history — a lateral move with real risk and no user benefit.
-- **Scratchpad redo (next major area of work)**: per user — current cell-stack `Notebook`/`NotebookView` model isn't the right one. Needs a target-model decision (DataGrip single-editor + results panel vs. refined cells) before any rewrite. Hold polish like `:var` substitution and per-keystroke autosave until the redo lands.
-  - *Done meanwhile*: the splitter no longer mis-cuts `BEGIN ATOMIC` function bodies (Unreleased).
+- **Scratchpad redo — DONE (Unreleased, iter 37).** Rebuilt as a DataGrip-style console (see below). `:var` substitution + per-keystroke autosave remain future polish.

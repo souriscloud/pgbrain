@@ -308,10 +308,8 @@ struct ConnectionWindowContent: View {
                     } else {
                         pad = service.workspace.openScratchpad()
                     }
-                    if let firstSql = pad.cells.first(where: { $0.kind == .sql }) {
-                        let separator = firstSql.text.isEmpty ? "" : "\n\n"
-                        firstSql.text += separator + sql
-                    }
+                    let separator = pad.sql.isEmpty ? "" : "\n\n"
+                    pad.sql += separator + sql
                     showQueryHistory = false
                 },
                 onClose: { showQueryHistory = false }
@@ -493,7 +491,7 @@ struct ConnectionWindowContent: View {
     // MARK: - Saved workspaces
 
     /// Snapshot every open tab into a `SavedWorkspace` + persist it.
-    /// Scratchpad text comes from the live `Notebook.plainText` so the
+    /// Scratchpad text comes from the live `Notebook.sql` so the
     /// saved snapshot includes any unsaved query edits.
     private func saveCurrentAsWorkspace(named name: String) {
         let tabs: [SavedWorkspaceTab] = service.workspace.tabs.map { tab in
@@ -512,7 +510,7 @@ struct ConnectionWindowContent: View {
                 return SavedWorkspaceTab(
                     kind: .scratchpad,
                     scratchpadTitle: pad.title,
-                    scratchpadText: pad.plainText,
+                    scratchpadText: pad.sql,
                     scratchpadSearchPath: pad.searchPath,
                     colorTag: tab.color?.rawValue,
                     tabTitle: tab.title == pad.title ? nil : tab.title
@@ -556,9 +554,8 @@ struct ConnectionWindowContent: View {
             case .scratchpad:
                 let pad = service.workspace.openScratchpad()
                 if let title = saved.scratchpadTitle { pad.title = title }
-                if let text = saved.scratchpadText, !text.isEmpty,
-                   let firstSql = pad.cells.first(where: { $0.kind == .sql }) {
-                    firstSql.text = text
+                if let text = saved.scratchpadText, !text.isEmpty {
+                    pad.sql = text
                 }
                 pad.searchPath = saved.scratchpadSearchPath
                 if let opened = service.workspace.tabs.last {
@@ -608,10 +605,8 @@ struct ConnectionWindowContent: View {
         } else {
             pad = service.workspace.openScratchpad()
         }
-        if let firstSql = pad.cells.first(where: { $0.kind == .sql }) {
-            let separator = firstSql.text.isEmpty ? "" : "\n\n"
-            firstSql.text += separator + SnippetStore.expand(body).text
-        }
+        let separator = pad.sql.isEmpty ? "" : "\n\n"
+        pad.sql += separator + SnippetStore.expand(body).text
     }
 
     /// ⌘R hook: re-fetch whatever the active tab is showing. Table

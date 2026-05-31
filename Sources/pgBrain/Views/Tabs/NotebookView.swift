@@ -4,24 +4,23 @@ import Observation
 import PostgresNIO
 import UniformTypeIdentifiers
 
-/// Cell-based notebook scratchpad. Replaces the iter-15
-/// NSTextAttachmentViewProvider design which never managed to render an
-/// inline widget on our NSTextView setup. SwiftUI stack of alternating
-/// SQL editors and result widgets — each cell is its own small NSTextView,
-/// results are rendered through `DataGridView`.
-///
-/// `Cmd+⏎` inside an SQL cell runs that cell. With a non-empty selection
-/// in the cell, only the selected SQL is run. The runner inserts result
-/// widgets immediately after the cell and appends a fresh empty SQL cell
-/// at the bottom so the user can keep typing without manually adding one.
+/// DataGrip-style SQL console: a single editor pane on top, a results panel
+/// below, split by a draggable divider. `⌘⏎` runs the statement under the
+/// caret (or the exact selection); the toolbar's ▶ "Run all" runs the whole
+/// buffer. Each run replaces the results panel with one block per statement,
+/// rendered through `DataGridView` (+ pivot / chart / map / copy-as).
 struct NotebookView: View {
     @Bindable var notebook: Notebook
     let service: ConnectionService
 
     @State private var showLibrary = false
-    @State private var focusedCellID: UUID?
+    @State private var hasFocused = false
     @State private var explainRequest: ExplainSheetState?
     @State private var diffRequest: DiffSheetState?
+    /// Fraction of the height the editor pane takes; the results panel gets
+    /// the rest. Persisted so the split survives relaunch.
+    @AppStorage("pgbrain.scratchpadEditorFraction") private var editorFraction: Double = 0.5
+    @State private var splitDragBase: Double?
 
     struct ExplainSheetState: Identifiable {
         let id = UUID()
@@ -39,36 +38,13 @@ struct NotebookView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            ScrollViewReader { proxy in
-                ScrollView {
-                    // Eager VStack — not LazyVStack — so every cell's
-                    // NSTextView exists at all times. With LazyVStack, an
-                    // off-screen target cell isn't materialised and
-                    // `makeFirstResponder` can't transfer focus to it
-                    // (caret appears stuck in two cells, typing goes
-                    // nowhere). For huge notebooks (100+ cells) this
-                    // gets expensive; revisit with text-view pooling
-                    // then.
-                    VStack(spacing: 0) {
-                        ForEach(notebook.cells) { cell in
-                            CellRow(
-                                cell: cell,
-                                notebook: notebook,
-                                service: service,
-                                focusedCellID: $focusedCellID
-                            )
-                            .id(cell.id)
-                            Divider().opacity(0.2)
-                        }
-                    }
-                    .padding(.vertical, Tokens.Spacing.sm)
-                }
-                .background(Color(nsColor: .textBackgroundColor))
-                .onChange(of: focusedCellID) { _, newID in
-                    guard let id = newID else { return }
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        proxy.scrollTo(id, anchor: .center)
-                    }
+            GeometryReader { geo in
+                let total = geo.size.height
+                let editorH = max(120, min(max(120, total - 120), total * editorFraction))
+                VStack(spacing: 0) {
+                    editorPane.frame(height: editorH)
+                    splitter(total: total)
+                    resultsPane.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }
@@ -134,15 +110,15 @@ struct NotebookView: View {
 
             Spacer()
             Button {
-                runFocusedOrLastCell()
+                NotebookRunner.run(notebook: notebook, service: service, selection: nil, runAll: true)
             } label: {
-                Label(notebook.runAsTransaction ? "Run as TX" : "Run",
+                Label(notebook.runAsTransaction ? "Run all (TX)" : "Run all",
                       systemImage: "play.fill").labelStyle(.titleAndIcon)
             }
             .buttonStyle(.borderedProminent)
             .tint(notebook.runAsTransaction ? .orange : Tokens.Brand.primary)
             .controlSize(.small)
-            .help("Run focused SQL cell (⌘↩ also works inside a cell)")
+            .help("Run the whole script. ⌘↩ in the editor runs the statement under the caret (or the selection).")
             .disabled(service.client == nil)
 
             Button { showLibrary = true } label: {
@@ -229,13 +205,8 @@ struct NotebookView: View {
             service.toasts.show(.error, "Couldn't open \(url.lastPathComponent) — \(error.localizedDescription)")
             return
         }
-        // Reuse the first empty SQL cell if there is one, else append.
-        if let empty = notebook.cells.first(where: { $0.kind == .sql && $0.text.isEmpty }) {
-            empty.text = text
-        } else if let lastSQL = notebook.cells.last(where: { $0.kind == .sql }) {
-            let sep = lastSQL.text.isEmpty ? "" : "\n\n"
-            lastSQL.text += sep + text
-        }
+        let sep = notebook.sql.isEmpty ? "" : "\n\n"
+        notebook.sql += sep + text
         notebook.title = url.deletingPathExtension().lastPathComponent
     }
 
@@ -247,7 +218,7 @@ struct NotebookView: View {
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try notebook.plainText.write(to: url, atomically: true, encoding: .utf8)
+            try notebook.sql.write(to: url, atomically: true, encoding: .utf8)
             service.toasts.show(.success, "Saved \(url.lastPathComponent)")
         } catch {
             service.toasts.show(.error, "Couldn't save \(url.lastPathComponent) — \(error.localizedDescription)")
@@ -258,11 +229,8 @@ struct NotebookView: View {
     /// and pop the diff sheet on them. No-op (no sheet) when fewer
     /// than two successful results exist.
     private func presentDiffLastTwo() {
-        let successes: [(stmt: String, page: RowsFetcher.Page)] = notebook.cells.compactMap { cell in
-            guard case .result(let resultID) = cell.kind,
-                  let result = notebook.results[resultID],
-                  case .success(let qr) = result.status
-            else { return nil }
+        let successes: [(stmt: String, page: RowsFetcher.Page)] = notebook.orderedResults.compactMap { result in
+            guard case .success(let qr) = result.status else { return nil }
             return (result.statement, qr.page)
         }
         guard successes.count >= 2 else { return }
@@ -274,95 +242,87 @@ struct NotebookView: View {
         )
     }
 
-    private func runFocusedOrLastCell() {
-        let target = focusedCellID ?? notebook.cells.last(where: { $0.kind == .sql })?.id
-        guard let id = target, let cell = notebook.sqlCell(id: id) else { return }
-        NotebookRunner.run(cell: cell, selection: nil, notebook: notebook, service: service)
-    }
-}
+    // MARK: - Editor / results panes
 
-// MARK: - Cell row
-
-private struct CellRow: View {
-    @Bindable var cell: NotebookCell
-    let notebook: Notebook
-    let service: ConnectionService
-    @Binding var focusedCellID: UUID?
-
-    var body: some View {
-        switch cell.kind {
-        case .sql:
-            SqlCellView(cell: cell, notebook: notebook, service: service,
-                        isRunning: notebook.runningCellID == cell.id,
-                        focusedCellID: $focusedCellID)
-        case .result(let resultID):
-            ResultCellView(resultID: resultID, notebook: notebook, service: service)
+    private var editorPane: some View {
+        ScrollView {
+            SqlCellEditor(
+                text: $notebook.sql,
+                shouldFocus: !hasFocused,
+                crossCellNav: false,
+                onRun: { range in
+                    NotebookRunner.run(notebook: notebook, service: service,
+                                       selection: range, runAll: false)
+                },
+                onFocus: { hasFocused = true },
+                onJumpToAdjacent: { _ in },
+                completions: { partial, fullText, caretIndex in
+                    SQLCompletionProvider.completions(
+                        for: partial,
+                        in: service.visibleSchema,
+                        context: .scratchpad(fullText: fullText, caretIndex: caretIndex)
+                    )
+                },
+                schema: { service.visibleSchema },
+                onExplain: { sql in notebook.requestedExplainSQL = sql }
+            )
+            .frame(minHeight: 60)
+            .padding(.horizontal, Tokens.Spacing.md)
+            .padding(.vertical, 8)
         }
-    }
-}
-
-// MARK: - SQL cell
-
-private struct SqlCellView: View {
-    @Bindable var cell: NotebookCell
-    let notebook: Notebook
-    let service: ConnectionService
-    let isRunning: Bool
-    @Binding var focusedCellID: UUID?
-
-    var body: some View {
-        SqlCellEditor(
-            text: Binding(get: { cell.text }, set: { cell.text = $0 }),
-            shouldFocus: focusedCellID == cell.id,
-            onRun: { selection in
-                NotebookRunner.run(
-                    cell: cell, selection: selection,
-                    notebook: notebook, service: service
-                )
-            },
-            onFocus: { focusedCellID = cell.id },
-            onJumpToAdjacent: { direction in
-                jumpToAdjacentSqlCell(direction: direction)
-            },
-            completions: { partial, fullText, caretIndex in
-                SQLCompletionProvider.completions(
-                    for: partial,
-                    in: service.visibleSchema,
-                    context: .scratchpad(fullText: fullText, caretIndex: caretIndex)
-                )
-            },
-            schema: { service.visibleSchema },
-            onExplain: { sql in
-                notebook.requestedExplainSQL = sql
-            }
-        )
-        .frame(minHeight: 30)
-        .padding(.horizontal, Tokens.Spacing.md)
-        .padding(.vertical, 6)
+        .background(Color(nsColor: .textBackgroundColor))
         .overlay(alignment: .leading) {
-            // Left rail indicates focus/running state at a glance.
             Rectangle()
-                .fill(isRunning
-                      ? Color.green
-                      : (focusedCellID == cell.id ? Tokens.Brand.primary.opacity(0.7) : Color.clear))
+                .fill(notebook.isRunning ? Color.green : Color.clear)
                 .frame(width: 3)
         }
-        .background(isRunning ? Color.green.opacity(0.04) : Color.clear)
     }
 
-    private func jumpToAdjacentSqlCell(direction: Int) {
-        guard let myIdx = notebook.cells.firstIndex(where: { $0.id == cell.id }) else { return }
-        let range: AnyIterator<Int>
-        if direction > 0 {
-            var i = myIdx + 1
-            range = AnyIterator { defer { i += 1 }; return i < notebook.cells.count ? i : nil }
-        } else {
-            var i = myIdx - 1
-            range = AnyIterator { defer { i -= 1 }; return i >= 0 ? i : nil }
+    private func splitter(total: CGFloat) -> some View {
+        ZStack {
+            Rectangle().fill(Color(nsColor: .separatorColor))
+            Image(systemName: "ellipsis").font(.system(size: 9)).foregroundStyle(.tertiary)
         }
-        for i in range where notebook.cells[i].kind == .sql {
-            focusedCellID = notebook.cells[i].id
-            return
+        .frame(height: 6)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside { NSCursor.resizeUpDown.set() } else { NSCursor.arrow.set() }
+        }
+        .gesture(
+            DragGesture()
+                .onChanged { v in
+                    if splitDragBase == nil { splitDragBase = editorFraction }
+                    let base = splitDragBase ?? editorFraction
+                    let delta = v.translation.height / max(total, 1)
+                    editorFraction = min(0.85, max(0.15, base + delta))
+                }
+                .onEnded { _ in splitDragBase = nil }
+        )
+    }
+
+    @ViewBuilder
+    private var resultsPane: some View {
+        if notebook.orderedResults.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "play.circle").font(.largeTitle).foregroundStyle(.quaternary)
+                Text("Run the statement under the caret with ⌘↩, a selection, or the whole script with ▶.")
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 320)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .underPageBackgroundColor))
+        } else {
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(notebook.resultOrder, id: \.self) { rid in
+                        ResultCellView(resultID: rid, notebook: notebook, service: service)
+                        Divider().opacity(0.2)
+                    }
+                }
+                .padding(.vertical, Tokens.Spacing.sm)
+            }
+            .background(Color(nsColor: .underPageBackgroundColor))
         }
     }
 }
@@ -374,7 +334,12 @@ private struct SqlCellView: View {
 private struct SqlCellEditor: NSViewRepresentable {
     @Binding var text: String
     var shouldFocus: Bool
-    let onRun: (NSRange?) -> Void
+    /// When false, ↑/↓ and ⌥↑/↓ behave as normal text navigation instead of
+    /// jumping to an adjacent cell (the console has a single editor).
+    var crossCellNav: Bool = true
+    /// Fires on ⌘↩ with the editor's current selection. A zero-length range is
+    /// the caret position → the host runs the statement under the caret.
+    let onRun: (NSRange) -> Void
     let onFocus: () -> Void
     /// Called when the caret tries to move past the cell's first/last line:
     /// +1 for down (jump to next SQL cell), -1 for up.
@@ -393,7 +358,7 @@ private struct SqlCellEditor: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
-        var onRun: (NSRange?) -> Void
+        var onRun: (NSRange) -> Void
         var onFocus: () -> Void
         var onJumpToAdjacent: (Int) -> Void
         var completions: (_ partial: String, _ fullText: String, _ caretIndex: Int) -> [String]
@@ -402,7 +367,7 @@ private struct SqlCellEditor: NSViewRepresentable {
         /// the connection service inside the AppKit subclass.
         var currentSchema: (() -> SchemaSnapshot)?
 
-        init(text: Binding<String>, onRun: @escaping (NSRange?) -> Void, onFocus: @escaping () -> Void, onJumpToAdjacent: @escaping (Int) -> Void, completions: @escaping (String, String, Int) -> [String]) {
+        init(text: Binding<String>, onRun: @escaping (NSRange) -> Void, onFocus: @escaping () -> Void, onJumpToAdjacent: @escaping (Int) -> Void, completions: @escaping (String, String, Int) -> [String]) {
             self.text = text
             self.onRun = onRun
             self.onFocus = onFocus
@@ -473,10 +438,10 @@ private struct SqlCellEditor: NSViewRepresentable {
         // through the text-storage delegate. The shared singleton
         // re-uses the keyword/function sets across cells.
         tv.textStorage?.delegate = SQLHighlighter.shared
+        tv.crossCellNavEnabled = crossCellNav
         tv.onRun = { [weak tv] in
             guard let tv else { return }
-            let sel = tv.selectedRange()
-            context.coordinator.onRun(sel.length > 0 ? sel : nil)
+            context.coordinator.onRun(tv.selectedRange())
         }
         tv.onJumpToAdjacent = { [weak tv] direction in
             _ = tv
@@ -522,6 +487,9 @@ final class SqlCellNSTextView: NSTextView {
     var onRun: (() -> Void)?
     var onJumpToAdjacent: ((Int) -> Void)?
     var onBecomeFirstResponder: (() -> Void)?
+    /// When false, ↑/↓ and ⌥↑/↓ keep their normal text-navigation behaviour
+    /// instead of being captured for cross-cell jumps (console = one editor).
+    var crossCellNavEnabled: Bool = true
     /// Used by hover-to-identify to look up tables / columns under the
     /// mouse. Returns nil when no schema is available.
     var schemaProvider: (() -> SchemaSnapshot?)?
@@ -573,26 +541,28 @@ final class SqlCellNSTextView: NSTextView {
             explainStatement(nil)
             return
         }
-        // ⌥↓ / ⌥↑ → unconditional jump to next/previous SQL cell,
-        // regardless of caret position. Overrides AppKit's default
-        // "move to end/start of paragraph" which is rarely useful here.
-        if event.modifierFlags.contains(.option), event.keyCode == 125 {
-            onJumpToAdjacent?(+1)
-            return
-        }
-        if event.modifierFlags.contains(.option), event.keyCode == 126 {
-            onJumpToAdjacent?(-1)
-            return
-        }
-        // Plain ↓ on the visually-last line → jump to next SQL cell.
-        if event.keyCode == 125, isCaretOnLastLine() {
-            onJumpToAdjacent?(+1)
-            return
-        }
-        // Plain ↑ on the visually-first line → jump to previous SQL cell.
-        if event.keyCode == 126, isCaretOnFirstLine() {
-            onJumpToAdjacent?(-1)
-            return
+        if crossCellNavEnabled {
+            // ⌥↓ / ⌥↑ → unconditional jump to next/previous SQL cell,
+            // regardless of caret position. Overrides AppKit's default
+            // "move to end/start of paragraph" which is rarely useful here.
+            if event.modifierFlags.contains(.option), event.keyCode == 125 {
+                onJumpToAdjacent?(+1)
+                return
+            }
+            if event.modifierFlags.contains(.option), event.keyCode == 126 {
+                onJumpToAdjacent?(-1)
+                return
+            }
+            // Plain ↓ on the visually-last line → jump to next SQL cell.
+            if event.keyCode == 125, isCaretOnLastLine() {
+                onJumpToAdjacent?(+1)
+                return
+            }
+            // Plain ↑ on the visually-first line → jump to previous SQL cell.
+            if event.keyCode == 126, isCaretOnFirstLine() {
+                onJumpToAdjacent?(-1)
+                return
+            }
         }
         super.keyDown(with: event)
     }
@@ -1229,11 +1199,7 @@ private struct ResultBody: View {
                 .font(.caption)
                 .foregroundStyle(.tertiary)
             Button {
-                if let cellIdx = notebook.cells.firstIndex(where: {
-                    if case .result(let r) = $0.kind { return r == result.id } else { return false }
-                }) {
-                    notebook.remove(cellID: notebook.cells[cellIdx].id)
-                }
+                notebook.removeResult(id: result.id)
             } label: {
                 Image(systemName: "xmark")
                     .font(.caption2)
@@ -1330,31 +1296,33 @@ private struct ResultBody: View {
 /// previous TextKit-attachment-based dispatcher.
 @MainActor
 enum NotebookRunner {
-    static func run(cell: NotebookCell, selection: NSRange?, notebook: Notebook, service: ConnectionService) {
-        guard cell.kind == .sql, let client = service.client else { return }
+    /// Run statements from `notebook.sql`:
+    /// - `runAll` → every statement in the buffer.
+    /// - `selection.length > 0` → the statements inside the selection.
+    /// - otherwise → the single statement under the caret (`selection.location`).
+    ///
+    /// Slash-command lines (`\dt`, `\df`, …) are expanded before splitting so
+    /// they can be mixed with ordinary SQL.
+    static func run(notebook: Notebook, service: ConnectionService, selection: NSRange?, runAll: Bool) {
+        guard let client = service.client else { return }
 
-        // Resolve target statements within this cell. Slash-command
-        // lines (`\dt`, `\df`, …) get expanded into real SQL before
-        // statement splitting so the user can mix `\dt` with normal
-        // queries in the same cell.
-        let buffer = SlashCommands.translateCell(cell.text)
-        let plans: [String]
-        if let sel = selection {
-            // User selected a range → translate-and-split just that.
-            let ns = cell.text as NSString
+        let source: String
+        if runAll {
+            source = notebook.sql
+        } else if let sel = selection, sel.length > 0 {
+            let ns = notebook.sql as NSString
             guard sel.location + sel.length <= ns.length else { return }
-            let slice = SlashCommands.translateCell(ns.substring(with: sel))
-            plans = SQLStatementSplitter.split(slice).map { $0.trimmed }
+            source = ns.substring(with: sel)
         } else {
-            // No selection → run *every* statement in the cell, Jupyter-
-            // style. Multi-statement cells get one result widget each.
-            let split = SQLStatementSplitter.split(buffer).map { $0.trimmed }
-            if !split.isEmpty {
-                plans = split
-            } else {
-                let trimmed = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
-                plans = trimmed.isEmpty ? [] : [trimmed]
-            }
+            let loc = selection?.location ?? (notebook.sql as NSString).length
+            source = statementUnderCaret(in: notebook.sql, utf16Caret: loc)
+        }
+
+        let translated = SlashCommands.translateCell(source)
+        var plans = SQLStatementSplitter.split(translated).map { $0.trimmed }.filter { !$0.isEmpty }
+        if plans.isEmpty {
+            let trimmed = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { plans = [trimmed] }
         }
         guard !plans.isEmpty else { return }
 
@@ -1367,22 +1335,14 @@ enum NotebookRunner {
             if destructive, !confirmProductionRun(plans: plans, service: service) { return }
         }
 
-        notebook.runningCellID = cell.id
+        notebook.isRunning = true
 
-        // Generate fresh IDs OR reuse the IDs of the result cells already
-        // adjacent to this SQL cell (replace-in-place semantics).
-        let existing = notebook.adjacentResults(after: cell.id)
-        var ids: [UUID] = []
-        for i in 0..<plans.count {
-            ids.append(i < existing.count ? existing[i].resultID : UUID())
-        }
-        notebook.replaceAdjacentResults(after: cell.id, with: ids)
+        // Each run gets a fresh ordered result set in the panel below.
+        let ids = plans.map { _ in UUID() }
+        notebook.beginRun(resultIDs: ids)
 
-        // Mark each result as running before kicking off the async pipeline
-        // so the SwiftUI cells flip to the "Running…" state immediately.
-        // Multi-statement runs default each widget to collapsed so the
-        // user sees a scannable stack of headers instead of N expanded
-        // grids — click any header to drill in.
+        // Multi-statement runs default each block to collapsed so the user
+        // sees a scannable stack of headers; click any header to drill in.
         let collapseAll = plans.count > 1
         for (sql, id) in zip(plans, ids) {
             let r = notebook.startResult(id: id, statement: sql)
@@ -1394,14 +1354,14 @@ enum NotebookRunner {
         // the whole batch; remaining widgets get marked `.cancelled`.
         if notebook.runAsTransaction && plans.count > 1 {
             Task { @MainActor in
-                defer { notebook.runningCellID = nil }
+                defer { notebook.isRunning = false }
                 await runTransactional(plans: plans, ids: ids, notebook: notebook, service: service, client: client)
             }
             return
         }
 
         Task { @MainActor in
-            defer { notebook.runningCellID = nil }
+            defer { notebook.isRunning = false }
             var schemaTouched = false
             for (sql, id) in zip(plans, ids) {
                 let op = service.operations.begin(kind: .query, summary: QueryRunner.summary(of: sql))
@@ -1481,6 +1441,17 @@ enum NotebookRunner {
     /// loop and issues ROLLBACK; statements that never ran get marked
     /// `.cancelled` so the user can see exactly where the failure was.
     @MainActor
+    /// Text of the statement containing the caret (a UTF-16 offset into
+    /// `text`). Falls back to the whole buffer when the caret can't be mapped.
+    private static func statementUnderCaret(in text: String, utf16Caret: Int) -> String {
+        let clamped = max(0, min(utf16Caret, (text as NSString).length))
+        guard let caretIdx = Range(NSRange(location: clamped, length: 0), in: text)?.lowerBound,
+              let stmt = SQLStatementSplitter.statementAt(caret: caretIdx, in: text) else {
+            return text
+        }
+        return stmt.trimmed
+    }
+
     private static func runTransactional(
         plans: [String], ids: [UUID],
         notebook: Notebook, service: ConnectionService,
