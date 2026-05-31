@@ -6,6 +6,16 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
+## v0.9.0 — 2026-05-31
+
+Marks the scratchpad + command-palette work of the 0.8.x line as a minor
+milestone.
+
+### Changed
+- **The scratchpad's "TX" toggle is now labelled "Atomic"** with a plainer
+  tooltip — it wraps a multi-statement run in one transaction so any error rolls
+  the whole batch back.
+
 ## v0.8.3 — 2026-05-31
 
 ### Added

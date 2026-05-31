@@ -131,12 +131,12 @@ struct NotebookView: View {
             Toggle(isOn: $notebook.runAsTransaction) {
                 HStack(spacing: 3) {
                     Image(systemName: "arrow.triangle.2.circlepath").font(.caption)
-                    Text("TX").font(.caption.weight(.semibold))
+                    Text("Atomic").font(.caption.weight(.semibold))
                 }
             }
             .toggleStyle(.button)
             .controlSize(.small)
-            .help("Wrap each multi-statement run in BEGIN/COMMIT (rolls back on any error)")
+            .help("Run multi-statement runs as one transaction (BEGIN/COMMIT) — any error rolls the whole batch back")
 
             Spacer()
             Button { showLibrary = true } label: {
