@@ -15,12 +15,177 @@ enum CommandProviders {
         out.append(contentsOf: savedConnections(currentID: service?.connection.id))
         guard let service else { return out }
         out.append(contentsOf: connectionActions(service: service))
+        out.append(contentsOf: databaseTools(service: service))
+        out.append(contentsOf: schemaAdmin(service: service))
         out.append(contentsOf: viewModes(service: service))
+        out.append(contentsOf: frontTableActions(service: service))
         out.append(contentsOf: tabs(service: service))
         out.append(contentsOf: tables(service: service))
         out.append(contentsOf: functions(service: service))
+        out.append(contentsOf: scratchpads(service: service))
         out.append(contentsOf: schemas(service: service))
         out.append(contentsOf: erds(service: service))
+        return out
+    }
+
+    // MARK: - Front table-tab actions
+
+    /// Contextual actions for the table currently open in the front tab —
+    /// mirrors the sidebar's table context menu so you can drive it from ⌘K.
+    private static func frontTableActions(service: ConnectionService) -> [CommandItem] {
+        guard let selID = service.workspace.selectedID,
+              let active = service.workspace.tabs.first(where: { $0.id == selID }),
+              case .table(let node) = active.kind else { return [] }
+        let schema = node.schema, name = node.name
+        let qn = "\(schema).\(name)"
+
+        func post(_ id: String, _ title: String, _ icon: String, _ note: Notification.Name) -> CommandItem {
+            CommandItem(id: id, icon: icon, title: title, subtitle: qn, category: .table, shortcut: nil, action: {
+                NotificationCenter.default.post(name: note, object: service.connection.id,
+                                                userInfo: ["schema": schema, "table": name])
+            })
+        }
+
+        var out: [CommandItem] = [
+            CommandItem(id: "fronttable.structure", icon: "list.bullet.rectangle", title: "Show Structure",
+                        subtitle: qn, category: .table, shortcut: nil,
+                        action: { service.workspace.openTable(node, focusPane: .structure) }),
+            CommandItem(id: "fronttable.ddl", icon: "doc.plaintext", title: "Show CREATE SQL",
+                        subtitle: qn, category: .table, shortcut: nil,
+                        action: { service.workspace.openTable(node, focusPane: .ddl) }),
+            post("fronttable.findUsages", "Find Usages…", "magnifyingglass", .pgbrainFindUsages),
+            post("fronttable.comments", "Edit Comments…", "text.bubble", .pgbrainEditComments),
+        ]
+        // Export works for any relation; geometry/views included.
+        for fmt in Exporter.Format.allCases {
+            out.append(CommandItem(id: "fronttable.export.\(fmt.rawValue)", icon: "square.and.arrow.up",
+                                   title: "Export Table as \(fmt.rawValue.uppercased())…", subtitle: qn,
+                                   category: .table, shortcut: nil, action: {
+                NotificationCenter.default.post(name: .pgbrainExportTable, object: service.connection.id,
+                                                userInfo: ["format": fmt.rawValue])
+            }))
+        }
+        if node.kind == .table {
+            out.append(post("fronttable.newIndex", "New Index…", "key", .pgbrainNewIndex))
+            out.append(post("fronttable.generateData", "Generate Data…", "wand.and.stars", .pgbrainGenerateData))
+            out.append(post("fronttable.truncate", "Truncate…", "trash", .pgbrainTruncateTable))
+            for kind in ["csv", "json"] {
+                out.append(CommandItem(id: "fronttable.import.\(kind)", icon: "square.and.arrow.down",
+                                       title: "Import \(kind.uppercased()) into Table…", subtitle: qn,
+                                       category: .table, shortcut: nil, action: {
+                    NotificationCenter.default.post(name: .pgbrainImportTable, object: service.connection.id,
+                                                    userInfo: ["kind": kind])
+                }))
+            }
+            for m in AdminActions.Maintenance.allCases {
+                out.append(CommandItem(id: "fronttable.maint.\(m.rawValue)", icon: "wrench.and.screwdriver",
+                                       title: "\(m.label) Table", subtitle: qn,
+                                       category: .table, shortcut: nil, action: {
+                    NotificationCenter.default.post(name: .pgbrainMaintenance, object: service.connection.id,
+                                                    userInfo: ["schema": schema, "table": name, "action": m.rawValue])
+                }))
+            }
+        }
+        return out
+    }
+
+    // MARK: - Database tools (pg_dump)
+
+    private static func databaseTools(service: ConnectionService) -> [CommandItem] {
+        PgDumpCLI.Format.allCases.map { fmt in
+            CommandItem(
+                id: "pgdump.\(fmt.rawValue)",
+                icon: "arrow.down.doc",
+                title: "pg_dump Database (\(fmt.rawValue))…",
+                subtitle: service.connection.database.isEmpty ? "Streaming dump" : "Dump \(service.connection.database)",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    AppDelegate.shared?.openConnection(service.connection)
+                    NotificationCenter.default.post(name: .pgbrainPgDump, object: service.connection.id,
+                                                    userInfo: ["format": fmt.rawValue])
+                }
+            )
+        }
+    }
+
+    // MARK: - Schema admin (rename / drop / visibility)
+
+    private static func schemaAdmin(service: ConnectionService) -> [CommandItem] {
+        let connID = service.connection.id
+        let hidden = SchemaVisibility.shared.hidden(for: connID)
+        var out: [CommandItem] = []
+        for schema in service.schema.schemas {
+            let name = schema.name
+            out.append(CommandItem(id: "schemaadmin.rename.\(name)", icon: "pencil",
+                                   title: "Rename Schema: \(name)…", subtitle: nil, category: .schema, shortcut: nil, action: {
+                AppDelegate.shared?.openConnection(service.connection)
+                NotificationCenter.default.post(name: .pgbrainRenameSchema, object: connID, userInfo: ["schema": name])
+            }))
+            out.append(CommandItem(id: "schemaadmin.drop.\(name)", icon: "trash",
+                                   title: "Drop Schema: \(name)…", subtitle: nil, category: .schema, shortcut: nil, action: {
+                AppDelegate.shared?.openConnection(service.connection)
+                NotificationCenter.default.post(name: .pgbrainDropSchema, object: connID, userInfo: ["schema": name])
+            }))
+            let isHidden = hidden.contains(name)
+            out.append(CommandItem(id: "schemaadmin.vis.\(name)", icon: isHidden ? "eye" : "eye.slash",
+                                   title: "\(isHidden ? "Show" : "Hide") Schema: \(name)", subtitle: nil, category: .schema, shortcut: nil, action: {
+                SchemaVisibility.shared.toggle(schema: name, connectionID: connID)
+            }))
+        }
+        if !hidden.isEmpty {
+            out.append(CommandItem(id: "schemaadmin.showall", icon: "eye",
+                                   title: "Show All Schemas", subtitle: "\(hidden.count) hidden", category: .schema, shortcut: nil, action: {
+                SchemaVisibility.shared.clear(connectionID: connID)
+            }))
+        }
+        return out
+    }
+
+    // MARK: - Scratchpads (save current / reopen saved)
+
+    private static func scratchpads(service: ConnectionService) -> [CommandItem] {
+        var out: [CommandItem] = []
+
+        // Save the front scratchpad to the library (when it has text).
+        if let selID = service.workspace.selectedID,
+           let active = service.workspace.tabs.first(where: { $0.id == selID }),
+           case .scratchpad(let pad) = active.kind {
+            let text = pad.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                let count = SavedQueryStore.shared.queries.count
+                out.append(CommandItem(
+                    id: "scratchpad.saveCurrent",
+                    icon: "square.and.arrow.down",
+                    title: "Save Scratchpad…",
+                    subtitle: "Add “\(pad.title)” to the saved library",
+                    category: .query,
+                    shortcut: nil,
+                    action: {
+                        SavedQueryStore.shared.upsert(SavedQuery(name: pad.title.isEmpty ? "Query \(count + 1)" : pad.title, sql: text))
+                        service.toasts.show(.success, "Saved scratchpad — rename it in the Saved library")
+                    }
+                ))
+            }
+        }
+
+        // Reopen any saved scratchpad as a new tab.
+        for q in SavedQueryStore.shared.queries {
+            let sql = q.sql
+            out.append(CommandItem(
+                id: "scratchpad.open.\(q.id.uuidString)",
+                icon: "doc.text.magnifyingglass",
+                title: "Open Scratchpad: \(q.name)",
+                subtitle: q.notes.isEmpty ? "Reopen as a new tab" : q.notes,
+                category: .query,
+                shortcut: nil,
+                action: {
+                    AppDelegate.shared?.openConnection(service.connection)
+                    let pad = service.workspace.openScratchpad()
+                    if let first = pad.cells.first(where: { $0.kind == .sql }) { first.text = sql }
+                }
+            ))
+        }
         return out
     }
 
@@ -92,6 +257,24 @@ enum CommandProviders {
                 category: .action,
                 shortcut: nil,
                 action: { UpdateController.shared.checkForUpdates(nil) }
+            ),
+            CommandItem(
+                id: "action.help",
+                icon: "questionmark.circle",
+                title: "pgBrain Help",
+                subtitle: "Guide, shortcuts, support",
+                category: .action,
+                shortcut: "⌘?",
+                action: { AppDelegate.shared?.showHelp() }
+            ),
+            CommandItem(
+                id: "action.feedback",
+                icon: "exclamationmark.bubble",
+                title: "Send Feedback…",
+                subtitle: "Report a bug or request a feature",
+                category: .action,
+                shortcut: nil,
+                action: { AppDelegate.shared?.showFeedback() }
             ),
         ]
     }
@@ -186,6 +369,30 @@ enum CommandProviders {
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
                     NotificationCenter.default.post(name: .pgbrainCreateSchema, object: service.connection.id)
+                }
+            ),
+            CommandItem(
+                id: "action.createTable",
+                icon: "tablecells.badge.ellipsis",
+                title: "New Table…",
+                subtitle: "Visual CREATE TABLE designer",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    AppDelegate.shared?.openConnection(service.connection)
+                    NotificationCenter.default.post(name: .pgbrainNewTable, object: service.connection.id)
+                }
+            ),
+            CommandItem(
+                id: "action.schemaDiff",
+                icon: "rectangle.split.2x1",
+                title: "Diff Schemas…",
+                subtitle: "Compare this database against another",
+                category: .action,
+                shortcut: nil,
+                action: {
+                    AppDelegate.shared?.openConnection(service.connection)
+                    NotificationCenter.default.post(name: .pgbrainShowSchemaDiff, object: service.connection.id)
                 }
             ),
             CommandItem(

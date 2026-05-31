@@ -161,6 +161,19 @@ struct TableTabView: View {
                 pane = .data; rowViewMode = .grid
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainExportTable)) { notif in
+            guard notif.object as? UUID == service.connection.id,
+                  service.workspace.selectedID == tab.id,
+                  let raw = notif.userInfo?["format"] as? String,
+                  let format = Exporter.Format(rawValue: raw) else { return }
+            exportFullTable(as: format)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainImportTable)) { notif in
+            guard notif.object as? UUID == service.connection.id,
+                  service.workspace.selectedID == tab.id,
+                  let kind = notif.userInfo?["kind"] as? String else { return }
+            if kind == "json" { importJSON() } else { importCSV() }
+        }
         .onDisappear {
             // Reading isDirty inside onDisappear isn't safe (loader may
             // already be torn down); clear unconditionally — the next

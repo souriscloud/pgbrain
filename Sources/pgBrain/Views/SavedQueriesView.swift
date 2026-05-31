@@ -5,6 +5,8 @@ import SwiftUI
 /// scratchpad" button captures whatever's in the editor as a new entry.
 struct SavedQueriesView: View {
     @Bindable var notebook: Notebook
+    /// Reopen a saved entry as a brand-new scratchpad tab.
+    var onOpenInNewTab: ((String) -> Void)? = nil
     let onClose: () -> Void
 
     @State private var store = SavedQueryStore.shared
@@ -66,6 +68,15 @@ struct SavedQueriesView: View {
                 Button("Edit") { draft = q }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                if let onOpenInNewTab {
+                    Button("Open") {
+                        onOpenInNewTab(q.sql)
+                        onClose()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Reopen as a new scratchpad tab")
+                }
                 Button("Insert") {
                     // Drop the snippet into the last (or only) SQL cell in
                     // the notebook so the user can edit + run it

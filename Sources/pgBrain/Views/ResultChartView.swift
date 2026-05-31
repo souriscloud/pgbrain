@@ -7,7 +7,9 @@ import Charts
 /// banner — beyond that the chart pixels merge anyway.
 struct ResultChartView: View {
     let page: RowsFetcher.Page
-    let onClose: () -> Void
+    var onClose: () -> Void = {}
+    /// Inline (scratchpad result block) mode — no sheet header / fixed frame.
+    var embedded: Bool = false
 
     enum Kind: String, CaseIterable, Identifiable {
         case bar, line, point
@@ -22,13 +24,16 @@ struct ResultChartView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
+            if !embedded {
+                header
+                Divider()
+            }
             controls
             Divider()
             content
         }
-        .frame(width: 760, height: 540)
+        .frame(width: embedded ? nil : 760, height: embedded ? nil : 540)
+        .frame(maxWidth: embedded ? .infinity : nil, minHeight: embedded ? 200 : nil, maxHeight: embedded ? 360 : nil)
         .onAppear { autoPick() }
     }
 

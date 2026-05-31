@@ -9,7 +9,10 @@ import SwiftUI
 /// concatenation for non-numeric values (count still works).
 struct PivotResultView: View {
     let page: RowsFetcher.Page
-    let onClose: () -> Void
+    var onClose: () -> Void = {}
+    /// When true, renders without the sheet header/Close and fixed frame so it
+    /// can live inline inside a scratchpad result block.
+    var embedded: Bool = false
 
     enum Agg: String, CaseIterable, Identifiable {
         case sum, avg, min, max, count
@@ -25,13 +28,16 @@ struct PivotResultView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
+            if !embedded {
+                header
+                Divider()
+            }
             controls
             Divider()
             content
         }
-        .frame(width: 760, height: 540)
+        .frame(width: embedded ? nil : 760, height: embedded ? nil : 540)
+        .frame(maxWidth: embedded ? .infinity : nil, minHeight: embedded ? 200 : nil, maxHeight: embedded ? 360 : nil)
         .onAppear {
             if let r = columnNames.first { rowCol = r }
             if columnNames.count > 1 { colCol = columnNames[1] }

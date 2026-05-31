@@ -17,6 +17,9 @@ struct SpatialMapView: View {
     let fromSQL: String
     let geometryColumn: String
     let labelColumn: String?
+    /// search_path to apply before the fetch — needed when a scratchpad scopes
+    /// itself to a specific schema and `fromSQL` uses unqualified table names.
+    var searchPath: String? = nil
 
     @State private var features: [SpatialFeature] = []
     @State private var camera: MapCameraPosition = .automatic
@@ -102,10 +105,29 @@ struct SpatialMapView: View {
         LIMIT \(Self.fetchLimit + 1)
         """
         do {
-            let stream = try await client.query(PostgresQuery(unsafeSQL: sql))
+            // Decode to plain Sendable strings inside the connection scope (so
+            // we can apply + reset search_path on that same connection), then
+            // parse GeoJSON back on the main actor.
+            let sp = searchPath
+            let rows: [(String?, String?)] = try await client.withConnection { conn in
+                if let sp { _ = try await conn.query(PostgresQuery(unsafeSQL: "SET search_path TO \(SQLIdent.quote(sp))"), logger: pgbrainQuietLogger) }
+                do {
+                    var collected: [(String?, String?)] = []
+                    let stream = try await conn.query(PostgresQuery(unsafeSQL: sql), logger: pgbrainQuietLogger)
+                    for try await row in stream.decode((String?, String?).self) {
+                        collected.append(row)
+                        if collected.count > Self.fetchLimit + 1 { break }
+                    }
+                    if sp != nil { _ = try? await conn.query(PostgresQuery(unsafeSQL: "RESET search_path"), logger: pgbrainQuietLogger) }
+                    return collected
+                } catch {
+                    if sp != nil { _ = try? await conn.query(PostgresQuery(unsafeSQL: "RESET search_path"), logger: pgbrainQuietLogger) }
+                    throw error
+                }
+            }
             var out: [SpatialFeature] = []
             var count = 0
-            for try await (label, gj) in stream.decode((String?, String?).self) {
+            for (label, gj) in rows {
                 count += 1
                 if count > Self.fetchLimit { truncated = true; break }
                 guard let gj else { continue }

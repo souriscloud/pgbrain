@@ -47,6 +47,27 @@ extension Notification.Name {
     /// Asks the matching window to open the Table Designer in *edit* mode for
     /// `userInfo["schema"]` + `userInfo["table"]`.
     static let pgbrainEditTableStructure = Notification.Name("cloud.souris.pgbrain.editTableStructure")
+    /// Asks the matching window to open the schema-diff sheet.
+    static let pgbrainShowSchemaDiff = Notification.Name("cloud.souris.pgbrain.showSchemaDiff")
+    /// Asks the matching window to open the Table Designer in *create* mode.
+    static let pgbrainNewTable = Notification.Name("cloud.souris.pgbrain.newTable")
+    /// Table-scoped actions — each carries `userInfo["schema"]` + `userInfo["table"]`.
+    static let pgbrainTruncateTable = Notification.Name("cloud.souris.pgbrain.truncateTable")
+    static let pgbrainGenerateData = Notification.Name("cloud.souris.pgbrain.generateData")
+    static let pgbrainNewIndex = Notification.Name("cloud.souris.pgbrain.newIndex")
+    static let pgbrainFindUsages = Notification.Name("cloud.souris.pgbrain.findUsages")
+    static let pgbrainEditComments = Notification.Name("cloud.souris.pgbrain.editComments")
+    /// Maintenance on a table — `userInfo["schema"]` + `["table"]` + `["action"]` (raw value).
+    static let pgbrainMaintenance = Notification.Name("cloud.souris.pgbrain.maintenance")
+    /// Rename / drop a schema — `userInfo["schema"]`.
+    static let pgbrainRenameSchema = Notification.Name("cloud.souris.pgbrain.renameSchema")
+    static let pgbrainDropSchema = Notification.Name("cloud.souris.pgbrain.dropSchema")
+    /// pg_dump the database — `userInfo["format"]` (PgDumpCLI.Format raw value).
+    static let pgbrainPgDump = Notification.Name("cloud.souris.pgbrain.pgDump")
+    /// Export / import the front table tab — `userInfo["format"]` (Exporter.Format)
+    /// / `userInfo["kind"]` ("csv" | "json").
+    static let pgbrainExportTable = Notification.Name("cloud.souris.pgbrain.exportTable")
+    static let pgbrainImportTable = Notification.Name("cloud.souris.pgbrain.importTable")
 }
 
 /// Drives the confirmation dialog for destructive maintenance actions
@@ -281,6 +302,26 @@ struct ConnectionWindowContent: View {
             service: service,
             functionDesigner: $functionDesigner,
             functionRunner: $functionRunner
+        ))
+        .modifier(TableActionsModifier(
+            service: service,
+            showSchemaDiff: $showSchemaDiff,
+            tableDesigner: $tableDesigner,
+            truncateTarget: $truncateTarget,
+            generateDataTarget: $generateDataTarget,
+            newIndexTarget: $newIndexTarget,
+            findUsagesTarget: $findUsagesTarget,
+            commentsTarget: $commentsTarget,
+            renameSchemaTarget: $renameSchemaTarget,
+            dropSchemaTarget: $dropSchemaTarget,
+            onPgDump: { runPgDump(format: $0) },
+            onMaintenance: { table, action in
+                if action.isDestructive {
+                    pendingMaintenance = MaintenanceRequest(table: table, action: action)
+                } else {
+                    runMaintenance(action, on: table)
+                }
+            }
         ))
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainShowERD)) { notif in
             guard let id = notif.object as? UUID, id == service.connection.id,
@@ -1206,6 +1247,84 @@ struct StatusFooter: View {
 }
 
 /// Function designer + runner sheets and their notification routing, factored
+/// Command-palette-driven table actions (Schema diff, New table, Truncate,
+/// Generate data, New index, Find usages, Edit comments). Factored out to keep
+/// `ConnectionWindowContent.body` inside the type-checker's budget.
+private struct TableActionsModifier: ViewModifier {
+    let service: ConnectionService
+    @Binding var showSchemaDiff: Bool
+    @Binding var tableDesigner: TableDesignerRequest?
+    @Binding var truncateTarget: CommentsTarget?
+    @Binding var generateDataTarget: TableNode?
+    @Binding var newIndexTarget: TableNode?
+    @Binding var findUsagesTarget: CommentsTarget?
+    @Binding var commentsTarget: CommentsTarget?
+    @Binding var renameSchemaTarget: IdentifiedString?
+    @Binding var dropSchemaTarget: IdentifiedString?
+    let onPgDump: (PgDumpCLI.Format) -> Void
+    let onMaintenance: (TableNode, AdminActions.Maintenance) -> Void
+
+    private func match(_ notif: Notification) -> (schema: String, table: String)? {
+        guard let id = notif.object as? UUID, id == service.connection.id,
+              let schema = notif.userInfo?["schema"] as? String,
+              let table = notif.userInfo?["table"] as? String else { return nil }
+        return (schema, table)
+    }
+    private func node(_ t: (schema: String, table: String)) -> TableNode? {
+        service.schema.schemas.first(where: { $0.name == t.schema })?
+            .tables.first(where: { $0.name == t.table })
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainShowSchemaDiff)) { notif in
+                if let id = notif.object as? UUID, id == service.connection.id { showSchemaDiff = true }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainNewTable)) { notif in
+                if let id = notif.object as? UUID, id == service.connection.id {
+                    tableDesigner = TableDesignerRequest(mode: .create(schema: notif.userInfo?["schema"] as? String))
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainTruncateTable)) { notif in
+                if let t = match(notif) { truncateTarget = CommentsTarget(schema: t.schema, table: t.table) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainGenerateData)) { notif in
+                if let t = match(notif), let n = node(t) { generateDataTarget = n }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainNewIndex)) { notif in
+                if let t = match(notif), let n = node(t) { newIndexTarget = n }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainFindUsages)) { notif in
+                if let t = match(notif) { findUsagesTarget = CommentsTarget(schema: t.schema, table: t.table) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainEditComments)) { notif in
+                if let t = match(notif) { commentsTarget = CommentsTarget(schema: t.schema, table: t.table) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainMaintenance)) { notif in
+                guard let t = match(notif), let n = node(t),
+                      let raw = notif.userInfo?["action"] as? String,
+                      let action = AdminActions.Maintenance(rawValue: raw) else { return }
+                onMaintenance(n, action)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainRenameSchema)) { notif in
+                guard let id = notif.object as? UUID, id == service.connection.id,
+                      let schema = notif.userInfo?["schema"] as? String else { return }
+                renameSchemaTarget = IdentifiedString(id: schema)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainDropSchema)) { notif in
+                guard let id = notif.object as? UUID, id == service.connection.id,
+                      let schema = notif.userInfo?["schema"] as? String else { return }
+                dropSchemaTarget = IdentifiedString(id: schema)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainPgDump)) { notif in
+                guard let id = notif.object as? UUID, id == service.connection.id,
+                      let raw = notif.userInfo?["format"] as? String,
+                      let format = PgDumpCLI.Format(rawValue: raw) else { return }
+                onPgDump(format)
+            }
+    }
+}
+
 /// out of `ConnectionWindowContent.body` to keep that view's modifier chain
 /// inside the type-checker's budget.
 private struct FunctionFlowsModifier: ViewModifier {

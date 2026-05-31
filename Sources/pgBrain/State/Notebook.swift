@@ -173,6 +173,30 @@ final class Notebook: Identifiable {
         }
         _ = afterResults  // satisfy unused
     }
+
+    /// Stack a new run's results *after* whatever results already sit under
+    /// `sqlCellID`, collapsing the prior ones so the latest run is what you
+    /// see. The earlier results stay (as collapsed headers) until the user
+    /// removes them — re-running the same cell accumulates a history.
+    func stackResults(after sqlCellID: UUID, newResultIDs: [UUID]) {
+        guard let anchorIdx = cells.firstIndex(where: { $0.id == sqlCellID }) else { return }
+        let existing = adjacentResults(after: sqlCellID)
+        // Collapse every prior result for this cell — "not current ones".
+        for entry in existing {
+            results[entry.resultID]?.isCollapsed = true
+        }
+        // Insert the new result cells after the last existing adjacent result
+        // (or right after the SQL cell when there were none yet).
+        var insertAt = (existing.last?.cellIndex ?? anchorIdx) + 1
+        for rid in newResultIDs {
+            cells.insert(NotebookCell(kind: .result(resultID: rid)), at: insertAt)
+            insertAt += 1
+        }
+        // Keep a fresh trailing SQL cell so the user can keep typing.
+        if insertAt >= cells.count || cells[insertAt].kind != .sql {
+            cells.insert(NotebookCell(kind: .sql), at: insertAt)
+        }
+    }
 }
 
 /// One cell in the notebook. SwiftUI uses `id` for ForEach diffing; `kind`

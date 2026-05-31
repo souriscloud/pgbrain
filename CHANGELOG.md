@@ -6,9 +6,33 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
-## Unreleased
+## v0.8.3 — 2026-05-31
+
+### Added
+- **Run gutter in the scratchpad.** Every SQL cell now has a left rail with a
+  **▶ per statement** (runs just that statement, result inline) plus a thin
+  outline of each statement's extent, and a **floating ▶** in the cell's
+  top-right that runs the whole input. `⌘↩` now runs only the statement under
+  the caret — or, with a selection, just the selected statements — never the
+  whole cell.
+- **Results stack instead of replacing.** Re-running a cell appends the new
+  result block(s) below the previous ones (the older ones auto-collapse to
+  headers), so a cell accumulates a history you can scroll. ✕ removes any block.
+- **Pivot / Chart / Map are inline.** Each result block has a Grid · Pivot ·
+  Chart · Map switcher that renders right in the block — no more modal sheets.
+- **Save & reopen scratchpads.** Save a scratchpad to the library and reopen it
+  later as a new tab (from the toolbar's **Saved** button or ⌘K).
+- **A much richer command palette (⌘K).** Added: pgBrain Help, Send Feedback,
+  New Table, Diff Schemas, pg_dump (per format); per-schema Rename / Drop /
+  Hide-Show + Show-all; contextual front-table actions (Structure, CREATE SQL,
+  Find Usages, Edit Comments, New Index, Generate Data, Truncate, Export
+  CSV/JSON/SQL, Import CSV/JSON, VACUUM / ANALYZE / REINDEX); and Save / Open
+  saved scratchpads.
 
 ### Fixed
+- **Inline map ignored a scratchpad's custom search_path** and failed with
+  "relation does not exist" when the scratchpad was scoped to a specific schema.
+  The map now applies (and resets) that search_path on its fetch connection.
 - **Creating a SQL-standard function in the scratchpad split mid-body.** A
   `CREATE FUNCTION … LANGUAGE sql BEGIN ATOMIC …; …; END` carries top-level
   semicolons inside its body; "run statement under caret" used to cut it at the

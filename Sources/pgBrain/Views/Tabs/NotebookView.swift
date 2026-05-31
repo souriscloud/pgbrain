@@ -74,7 +74,13 @@ struct NotebookView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $showLibrary) {
-            SavedQueriesView(notebook: notebook) {
+            SavedQueriesView(
+                notebook: notebook,
+                onOpenInNewTab: { sql in
+                    let pad = service.workspace.openScratchpad()
+                    if let first = pad.cells.first(where: { $0.kind == .sql }) { first.text = sql }
+                }
+            ) {
                 showLibrary = false
             }
         }
@@ -133,23 +139,12 @@ struct NotebookView: View {
             .help("Wrap each multi-statement run in BEGIN/COMMIT (rolls back on any error)")
 
             Spacer()
-            Button {
-                runFocusedOrLastCell()
-            } label: {
-                Label(notebook.runAsTransaction ? "Run as TX" : "Run",
-                      systemImage: "play.fill").labelStyle(.titleAndIcon)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(notebook.runAsTransaction ? .orange : Tokens.Brand.primary)
-            .controlSize(.small)
-            .help("Run focused SQL cell (⌘↩ also works inside a cell)")
-            .disabled(service.client == nil)
-
             Button { showLibrary = true } label: {
-                Image(systemName: "books.vertical")
+                Label("Saved", systemImage: "books.vertical").font(.caption)
             }
-            .buttonStyle(.borderless)
-            .help("Saved query library")
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Save this scratchpad for later, or reopen a saved one")
 
             Menu {
                 Button("Open .sql…") { openSQLFile() }
@@ -274,11 +269,6 @@ struct NotebookView: View {
         )
     }
 
-    private func runFocusedOrLastCell() {
-        let target = focusedCellID ?? notebook.cells.last(where: { $0.kind == .sql })?.id
-        guard let id = target, let cell = notebook.sqlCell(id: id) else { return }
-        NotebookRunner.run(cell: cell, selection: nil, notebook: notebook, service: service)
-    }
 }
 
 // MARK: - Cell row
@@ -310,35 +300,75 @@ private struct SqlCellView: View {
     let isRunning: Bool
     @Binding var focusedCellID: UUID?
 
+    @State private var markers: [StatementMarker] = []
+    @State private var hovering = false
+
     var body: some View {
-        SqlCellEditor(
-            text: Binding(get: { cell.text }, set: { cell.text = $0 }),
-            shouldFocus: focusedCellID == cell.id,
-            onRun: { selection in
-                NotebookRunner.run(
-                    cell: cell, selection: selection,
-                    notebook: notebook, service: service
-                )
-            },
-            onFocus: { focusedCellID = cell.id },
-            onJumpToAdjacent: { direction in
-                jumpToAdjacentSqlCell(direction: direction)
-            },
-            completions: { partial, fullText, caretIndex in
-                SQLCompletionProvider.completions(
-                    for: partial,
-                    in: service.visibleSchema,
-                    context: .scratchpad(fullText: fullText, caretIndex: caretIndex)
-                )
-            },
-            schema: { service.visibleSchema },
-            onExplain: { sql in
-                notebook.requestedExplainSQL = sql
-            }
-        )
-        .frame(minHeight: 30)
+        HStack(alignment: .top, spacing: 0) {
+            // Run gutter: a ▶ per statement (runs just that statement inline).
+            SqlGutter(
+                markers: markers,
+                accent: Tokens.Brand.primary,
+                onRun: { range in
+                    NotebookRunner.run(cell: cell, selection: range,
+                                       notebook: notebook, service: service)
+                }
+            )
+            .frame(width: 26)
+
+            SqlCellEditor(
+                text: Binding(get: { cell.text }, set: { cell.text = $0 }),
+                shouldFocus: focusedCellID == cell.id,
+                onRun: { range in
+                    // ⌘↩ runs the selection if there is one, else just the
+                    // statement under the caret — never the whole cell (that's
+                    // the floating ▶ / per-statement gutter).
+                    if range.length > 0 {
+                        NotebookRunner.run(cell: cell, selection: range,
+                                           notebook: notebook, service: service)
+                    } else if let stmt = statementRange(at: range.location, in: cell.text) {
+                        NotebookRunner.run(cell: cell, selection: stmt,
+                                           notebook: notebook, service: service)
+                    }
+                },
+                onFocus: { focusedCellID = cell.id },
+                onJumpToAdjacent: { direction in
+                    jumpToAdjacentSqlCell(direction: direction)
+                },
+                completions: { partial, fullText, caretIndex in
+                    SQLCompletionProvider.completions(
+                        for: partial,
+                        in: service.visibleSchema,
+                        context: .scratchpad(fullText: fullText, caretIndex: caretIndex)
+                    )
+                },
+                schema: { service.visibleSchema },
+                onExplain: { sql in
+                    notebook.requestedExplainSQL = sql
+                },
+                onMarkers: { markers = $0 }
+            )
+            .frame(minHeight: 30)
+        }
         .padding(.horizontal, Tokens.Spacing.md)
         .padding(.vertical, 6)
+        .overlay(alignment: .topTrailing) {
+            // Floating action button: run this whole input cell.
+            Button {
+                NotebookRunner.run(cell: cell, selection: nil,
+                                   notebook: notebook, service: service)
+            } label: {
+                Image(systemName: "play.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(Tokens.Brand.primary)
+                    .background(Circle().fill(Color(nsColor: .textBackgroundColor)).padding(2))
+            }
+            .buttonStyle(.plain)
+            .help("Run this cell (⌘↩)")
+            .padding(.top, 4)
+            .padding(.trailing, Tokens.Spacing.md + 4)
+            .opacity(hovering || isRunning ? 1 : 0.0)
+        }
         .overlay(alignment: .leading) {
             // Left rail indicates focus/running state at a glance.
             Rectangle()
@@ -348,6 +378,21 @@ private struct SqlCellView: View {
                 .frame(width: 3)
         }
         .background(isRunning ? Color.green.opacity(0.04) : Color.clear)
+        .onHover { hovering = $0 }
+    }
+
+    /// NSRange of the (whitespace-trimmed) statement containing the UTF-16
+    /// caret offset, or nil if none.
+    private func statementRange(at utf16Caret: Int, in text: String) -> NSRange? {
+        let clamped = max(0, min(utf16Caret, (text as NSString).length))
+        guard let caretIdx = Range(NSRange(location: clamped, length: 0), in: text)?.lowerBound,
+              let stmt = SQLStatementSplitter.statementAt(caret: caretIdx, in: text) else { return nil }
+        var lo = stmt.range.lowerBound
+        var hi = stmt.range.upperBound
+        while lo < hi, text[lo].isWhitespace { lo = text.index(after: lo) }
+        while hi > lo, text[text.index(before: hi)].isWhitespace { hi = text.index(before: hi) }
+        guard lo < hi else { return nil }
+        return NSRange(lo..<hi, in: text)
     }
 
     private func jumpToAdjacentSqlCell(direction: Int) {
@@ -374,7 +419,7 @@ private struct SqlCellView: View {
 private struct SqlCellEditor: NSViewRepresentable {
     @Binding var text: String
     var shouldFocus: Bool
-    let onRun: (NSRange?) -> Void
+    let onRun: (NSRange) -> Void
     let onFocus: () -> Void
     /// Called when the caret tries to move past the cell's first/last line:
     /// +1 for down (jump to next SQL cell), -1 for up.
@@ -389,11 +434,13 @@ private struct SqlCellEditor: NSViewRepresentable {
     /// Host hook for `Explain Statement` — opens the EXPLAIN sheet
     /// on the notebook.
     let onExplain: (String) -> Void
+    /// Reports statement markers for the run gutter.
+    var onMarkers: ([StatementMarker]) -> Void = { _ in }
 
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
-        var onRun: (NSRange?) -> Void
+        var onRun: (NSRange) -> Void
         var onFocus: () -> Void
         var onJumpToAdjacent: (Int) -> Void
         var completions: (_ partial: String, _ fullText: String, _ caretIndex: Int) -> [String]
@@ -402,7 +449,7 @@ private struct SqlCellEditor: NSViewRepresentable {
         /// the connection service inside the AppKit subclass.
         var currentSchema: (() -> SchemaSnapshot)?
 
-        init(text: Binding<String>, onRun: @escaping (NSRange?) -> Void, onFocus: @escaping () -> Void, onJumpToAdjacent: @escaping (Int) -> Void, completions: @escaping (String, String, Int) -> [String]) {
+        init(text: Binding<String>, onRun: @escaping (NSRange) -> Void, onFocus: @escaping () -> Void, onJumpToAdjacent: @escaping (Int) -> Void, completions: @escaping (String, String, Int) -> [String]) {
             self.text = text
             self.onRun = onRun
             self.onFocus = onFocus
@@ -475,8 +522,9 @@ private struct SqlCellEditor: NSViewRepresentable {
         tv.textStorage?.delegate = SQLHighlighter.shared
         tv.onRun = { [weak tv] in
             guard let tv else { return }
-            let sel = tv.selectedRange()
-            context.coordinator.onRun(sel.length > 0 ? sel : nil)
+            // Always report the full selected range (caret = zero length); the
+            // host decides between "statement under caret" and "the selection".
+            context.coordinator.onRun(tv.selectedRange())
         }
         tv.onJumpToAdjacent = { [weak tv] direction in
             _ = tv
@@ -485,12 +533,14 @@ private struct SqlCellEditor: NSViewRepresentable {
         tv.onBecomeFirstResponder = { context.coordinator.onFocus() }
         tv.schemaProvider = { [weak coord = context.coordinator] in coord?.currentSchema?() }
         tv.onExplainRequested = onExplain
+        tv.onLayoutChanged = onMarkers
         tv.string = text
         // Highlight the initial contents — the delegate's edit hook only
         // fires for subsequent mutations.
         if let storage = tv.textStorage {
             SQLHighlighter.shared.highlight(storage)
         }
+        tv.reportMarkers()
         return tv
     }
 
@@ -522,6 +572,10 @@ final class SqlCellNSTextView: NSTextView {
     var onRun: (() -> Void)?
     var onJumpToAdjacent: ((Int) -> Void)?
     var onBecomeFirstResponder: (() -> Void)?
+    /// Reports the cell's statement markers (range + vertical geometry) so the
+    /// SwiftUI run-gutter can place a ▶ next to each statement. Fired after
+    /// every edit and re-layout.
+    var onLayoutChanged: (([StatementMarker]) -> Void)?
     /// Used by hover-to-identify to look up tables / columns under the
     /// mouse. Returns nil when no schema is available.
     var schemaProvider: (() -> SchemaSnapshot?)?
@@ -601,6 +655,41 @@ final class SqlCellNSTextView: NSTextView {
         let ok = super.becomeFirstResponder()
         if ok { onBecomeFirstResponder?() }
         return ok
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        // Wrapping changes statement geometry when the cell width changes.
+        reportMarkers()
+    }
+
+    /// Recompute statement ranges + their vertical geometry and hand them to
+    /// the run gutter. Dispatched to the next runloop turn so we never mutate
+    /// SwiftUI state mid-layout.
+    func reportMarkers() {
+        guard let onLayoutChanged, let lm = layoutManager, let tc = textContainer else { return }
+        lm.ensureLayout(for: tc)
+        let text = string
+        let inset = textContainerInset.height
+        var out: [StatementMarker] = []
+        for (i, stmt) in SQLStatementSplitter.split(text).enumerated() {
+            // The splitter's range starts right after the previous `;`, so it
+            // includes leading whitespace/newlines — measuring that gives the
+            // WRONG line (the previous statement's). Trim to the actual content
+            // so each ▶ sits on its own first line.
+            var lo = stmt.range.lowerBound
+            var hi = stmt.range.upperBound
+            while lo < hi, text[lo].isWhitespace { lo = text.index(after: lo) }
+            while hi > lo, text[text.index(before: hi)].isWhitespace { hi = text.index(before: hi) }
+            guard lo < hi else { continue }
+            let r = NSRange(lo..<hi, in: text)
+            guard r.location != NSNotFound, r.length > 0 else { continue }
+            let glyphs = lm.glyphRange(forCharacterRange: r, actualCharacterRange: nil)
+            let rect = lm.boundingRect(forGlyphRange: glyphs, in: tc)
+            out.append(StatementMarker(id: i, range: r, yTop: rect.minY + inset, height: rect.height))
+        }
+        let result = out
+        DispatchQueue.main.async { onLayoutChanged(result) }
     }
 
     override var intrinsicContentSize: NSSize {
@@ -691,6 +780,7 @@ final class SqlCellNSTextView: NSTextView {
     override func didChangeText() {
         super.didChangeText()
         invalidateIntrinsicContentSize()
+        reportMarkers()
         // Smart as-you-type: only fire when the text grew (insertion,
         // not delete), the last char is an identifier char, the
         // identifier prefix is ≥2 chars, and we've waited 180ms since
@@ -1048,21 +1138,40 @@ private struct ResultGridWithViews: View {
     let page: RowsFetcher.Page
     let service: ConnectionService
     let sourceSQL: String
-    @State private var showPivot = false
-    @State private var showChart = false
-    @State private var showMap = false
+    /// The scratchpad's search_path, so the inline map can resolve unqualified
+    /// table names the same way the original query did.
+    var searchPath: String? = nil
+
+    enum Mode: String, CaseIterable, Identifiable {
+        case grid, pivot, chart, map
+        var id: String { rawValue }
+        var label: String { rawValue.capitalized }
+        var icon: String {
+            switch self {
+            case .grid:  "tablecells"
+            case .pivot: "square.grid.3x3"
+            case .chart: "chart.bar"
+            case .map:   "map"
+            }
+        }
+    }
+    @State private var mode: Mode = .grid
 
     /// A geometry column in this result (when PostGIS is present) → enables the
-    /// Map button. Geometry renders as WKT, so we sniff for it.
+    /// inline Map view. Geometry renders as WKT, so we sniff for it.
     private var spatial: (geom: String, label: String?)? {
         guard service.hasPostGIS else { return nil }
         return SpatialDetect.detect(page)
     }
 
+    private var modes: [Mode] {
+        spatial != nil ? Mode.allCases : Mode.allCases.filter { $0 != .map }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            // Thin toolbar above the grid so the buttons never cover
-            // the top-right data cells.
+            // Thin toolbar above the content so the controls never cover the
+            // top-right data cells.
             HStack(spacing: 8) {
                 Text("\(page.rows.count) row\(page.rows.count == 1 ? "" : "s")\(page.truncated ? "+" : "") · \(page.columns.count) col\(page.columns.count == 1 ? "" : "s")")
                     .font(.caption2)
@@ -1082,88 +1191,57 @@ private struct ResultGridWithViews: View {
                 .controlSize(.mini)
                 .fixedSize()
                 .help("Copy this result to the clipboard")
-                Button {
-                    showPivot = true
-                } label: {
-                    Label("Pivot", systemImage: "square.grid.3x3").font(.caption2)
-                }
-                .controlSize(.mini)
-                .buttonStyle(.borderless)
-                .help("Pivot this result")
-                Button {
-                    showChart = true
-                } label: {
-                    Label("Chart", systemImage: "chart.bar").font(.caption2)
-                }
-                .controlSize(.mini)
-                .buttonStyle(.borderless)
-                .help("Chart this result")
-                if spatial != nil {
-                    Button {
-                        showMap = true
-                    } label: {
-                        Label("Map", systemImage: "map").font(.caption2)
+
+                // Inline view switcher — Grid / Pivot / Chart / Map, all
+                // rendered right here in the result block (no sheets).
+                ForEach(modes) { m in
+                    Button { mode = m } label: {
+                        Label(m.label, systemImage: m.icon)
+                            .labelStyle(.titleAndIcon)
+                            .font(.caption2)
                     }
                     .controlSize(.mini)
                     .buttonStyle(.borderless)
-                    .help("Plot this result's geometry on a map")
+                    .tint(mode == m ? Tokens.Brand.primary : .secondary)
+                    .help("Show as \(m.label)")
                 }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             Divider().opacity(0.3)
-            DataGridView(page: page)
-                .frame(minHeight: 140, idealHeight: 260, maxHeight: 360)
-        }
-        .sheet(isPresented: $showPivot) {
-            PivotResultView(page: page) { showPivot = false }
-        }
-        .sheet(isPresented: $showChart) {
-            ResultChartView(page: page) { showChart = false }
-        }
-        .sheet(isPresented: $showMap) {
-            if let spatial {
-                ResultMapSheet(
-                    service: service,
-                    sourceSQL: sourceSQL,
-                    geometryColumn: spatial.geom,
-                    labelColumn: spatial.label
-                ) { showMap = false }
-            }
+            content
         }
     }
-}
 
-/// Sheet that maps a scratchpad result's geometry by wrapping the original
-/// query as a subquery and re-fetching it as GeoJSON.
-private struct ResultMapSheet: View {
-    let service: ConnectionService
-    let sourceSQL: String
-    let geometryColumn: String
-    let labelColumn: String?
-    let onClose: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Map · \(geometryColumn)").font(.headline)
-                Spacer()
-                Button("Done", action: onClose).keyboardShortcut(.cancelAction)
+    @ViewBuilder
+    private var content: some View {
+        switch mode {
+        case .grid:
+            DataGridView(page: page)
+                .frame(minHeight: 140, idealHeight: 260, maxHeight: 360)
+        case .pivot:
+            PivotResultView(page: page, embedded: true)
+        case .chart:
+            ResultChartView(page: page, embedded: true)
+        case .map:
+            if let spatial {
+                SpatialMapView(
+                    service: service,
+                    fromSQL: "(\(strippedSQL)\n) AS _pgbrain_map",
+                    geometryColumn: spatial.geom,
+                    labelColumn: spatial.label,
+                    searchPath: searchPath
+                )
+                .frame(minHeight: 240, idealHeight: 320, maxHeight: 380)
+            } else {
+                DataGridView(page: page)
+                    .frame(minHeight: 140, idealHeight: 260, maxHeight: 360)
             }
-            .padding(Tokens.Spacing.md)
-            Divider()
-            SpatialMapView(
-                service: service,
-                fromSQL: "(\(strippedSQL)\n) AS _pgbrain_map",
-                geometryColumn: geometryColumn,
-                labelColumn: labelColumn
-            )
         }
-        .frame(width: 720, height: 540)
     }
 
     /// The result's source SQL, minus any trailing semicolons, so it wraps
-    /// cleanly inside `(…) AS _pgbrain_map`.
+    /// cleanly inside `(…) AS _pgbrain_map` for the inline map.
     private var strippedSQL: String {
         var s = sourceSQL.trimmingCharacters(in: .whitespacesAndNewlines)
         while s.hasSuffix(";") { s = String(s.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1269,7 +1347,7 @@ private struct ResultBody: View {
                 }
                 .padding(10)
             } else {
-                ResultGridWithViews(page: q.page, service: service, sourceSQL: result.statement)
+                ResultGridWithViews(page: q.page, service: service, sourceSQL: result.statement, searchPath: notebook.searchPath)
             }
         case .failure(let message):
             HStack(alignment: .top, spacing: 8) {
@@ -1369,21 +1447,17 @@ enum NotebookRunner {
 
         notebook.runningCellID = cell.id
 
-        // Generate fresh IDs OR reuse the IDs of the result cells already
-        // adjacent to this SQL cell (replace-in-place semantics).
-        let existing = notebook.adjacentResults(after: cell.id)
-        var ids: [UUID] = []
-        for i in 0..<plans.count {
-            ids.append(i < existing.count ? existing[i].resultID : UUID())
-        }
-        notebook.replaceAdjacentResults(after: cell.id, with: ids)
+        // Each run STACKS: fresh result widgets are appended after any results
+        // already under this cell, and the prior ones collapse. Re-running the
+        // cell accumulates a history instead of replacing it.
+        let ids = plans.map { _ in UUID() }
+        notebook.stackResults(after: cell.id, newResultIDs: ids)
 
-        // Mark each result as running before kicking off the async pipeline
-        // so the SwiftUI cells flip to the "Running…" state immediately.
-        // Multi-statement runs default each widget to collapsed so the
-        // user sees a scannable stack of headers instead of N expanded
-        // grids — click any header to drill in.
-        let collapseAll = plans.count > 1
+        // Mark each result as running before kicking off the async pipeline so
+        // the SwiftUI cells flip to "Running…" immediately. The current run's
+        // widgets start expanded (it's what you just asked for); a big batch
+        // (>3) starts collapsed to stay scannable.
+        let collapseAll = plans.count > 3
         for (sql, id) in zip(plans, ids) {
             let r = notebook.startResult(id: id, statement: sql)
             r.isCollapsed = collapseAll
