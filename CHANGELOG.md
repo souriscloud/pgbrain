@@ -6,6 +6,27 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
+## Unreleased
+
+### Added
+- **Duplicate a whole schema.** Right-click a schema → Duplicate schema… (or ⌘K)
+  to clone it into a new one, choosing exactly what to copy: table structure,
+  data, sequences, foreign keys, views, materialized views, and functions.
+- **Bulk import/export connections.** Export every connection to a JSON file or
+  the clipboard (passwords opt-in) and import them back — from the Welcome
+  window's Import/Export menu or the new **Settings ▸ Connections** tab.
+  Duplicates are skipped on import.
+- **Live font zoom.** ⌘+ / ⌘− / ⌘0 resize the SQL editor instantly across every
+  open scratchpad.
+- **⌘⌫ deletes rows.** Select rows and press ⌘⌫ to stage them for deletion
+  (committed with the rest of your edits on Apply).
+- **Searchable, comprehensive Help.** A search field and many more topics —
+  editing, autocomplete, schema tools, import/export, and connection management.
+
+### Changed
+- Settings grew up: a Connections tab, a live font preview, and a real Updates
+  tab with “Check for Updates Now” and version info.
+
 ## v0.9.1 — 2026-05-31
 
 A big upgrade to how you enter and edit values, plus IDE-grade SQL completion.

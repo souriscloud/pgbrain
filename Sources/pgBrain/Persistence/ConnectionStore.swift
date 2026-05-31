@@ -53,4 +53,27 @@ final class ConnectionStore {
     func connection(id: UUID) -> Connection? {
         connections.first { $0.id == id }
     }
+
+    /// Import parsed connections as NEW entries (fresh UUIDs), skipping any
+    /// that exactly match an existing connection (same name/host/port/db/
+    /// user) so re-importing a backup doesn't pile up duplicates. Stores any
+    /// included password in the Keychain. Returns the count actually added.
+    @discardableResult
+    func importConnections(_ items: [ConnectionExchange.Imported]) -> Int {
+        var added = 0
+        for item in items {
+            let c = item.connection
+            let isDuplicate = connections.contains {
+                $0.name == c.name && $0.host == c.host && $0.port == c.port
+                    && $0.database == c.database && $0.username == c.username
+            }
+            if isDuplicate { continue }
+            upsert(c)
+            if let pw = item.password, !pw.isEmpty {
+                try? Keychain.setPassword(pw, for: c.id)
+            }
+            added += 1
+        }
+        return added
+    }
 }

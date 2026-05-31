@@ -4,6 +4,7 @@ struct WelcomeView: View {
     @State private var store = ConnectionStore.shared
     @State private var editorTarget: EditorTarget?
     @State private var selection: UUID?
+    @State private var bulkNote: String?
 
     private enum EditorTarget: Identifiable {
         case new
@@ -65,6 +66,14 @@ struct WelcomeView: View {
             )
         }
         .background(pasteShortcut)
+        .alert("Connections", isPresented: Binding(
+            get: { bulkNote != nil },
+            set: { if !$0 { bulkNote = nil } }
+        )) {
+            Button("OK", role: .cancel) { bulkNote = nil }
+        } message: {
+            Text(bulkNote ?? "")
+        }
     }
 
     /// Hidden ⌘V button — when the system clipboard carries a pgBrain
@@ -84,10 +93,28 @@ struct WelcomeView: View {
     }
 
     private func handlePasteAttempt() {
-        guard let raw = NSPasteboard.general.string(forType: .string),
-              let imported = ConnectionExchange.parse(raw)
-        else { return }
-        editorTarget = .imported(imported.connection, password: imported.password)
+        guard let raw = NSPasteboard.general.string(forType: .string) else { return }
+        // A single exchange object opens the editor pre-filled (nicer for a
+        // one-off "Copy as pgBrain"); a multi-connection bundle imports in bulk.
+        if let single = ConnectionExchange.parse(raw) {
+            editorTarget = .imported(single.connection, password: single.password)
+            return
+        }
+        if let items = ConnectionExchange.parseBundle(raw) {
+            let n = store.importConnections(items)
+            bulkNote = n == 0 ? "Nothing new — those connections already exist." : "Imported \(n) connection\(n == 1 ? "" : "s")."
+        }
+    }
+
+    private func handleImport(_ result: ConnectionIO.ImportResult) {
+        switch result {
+        case .imported(let n):
+            bulkNote = n == 0 ? "Nothing new — those connections already exist." : "Imported \(n) connection\(n == 1 ? "" : "s")."
+        case .cancelled:
+            break
+        case .unrecognised:
+            bulkNote = "That file isn't a pgBrain connection export."
+        }
     }
 
     private var brandPane: some View {
@@ -126,6 +153,27 @@ struct WelcomeView: View {
                 Text("Connections")
                     .font(.title2.weight(.semibold))
                 Spacer()
+                Menu {
+                    Button("Import from File…") { handleImport(ConnectionIO.importFromFile()) }
+                    Button("Paste Connections") { handlePasteAttempt() }
+                    Divider()
+                    Button("Export All…") {
+                        ConnectionIO.exportToFile(store.connections, includePasswords: false)
+                    }
+                    .disabled(store.connections.isEmpty)
+                    Button("Copy All as JSON") {
+                        ConnectionIO.copyToClipboard(store.connections, includePasswords: false)
+                        bulkNote = "Copied \(store.connections.count) connection\(store.connections.count == 1 ? "" : "s") to the clipboard."
+                    }
+                    .disabled(store.connections.isEmpty)
+                    Divider()
+                    Text("Passwords are excluded. Use Settings ▸ Connections to include them.")
+                } label: {
+                    Label("Import / Export", systemImage: "square.and.arrow.up.on.square")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Bulk import or export connections")
                 Button {
                     editorTarget = .new
                 } label: {

@@ -583,6 +583,9 @@ final class SqlCellNSTextView: NSTextView {
     /// Tracking area for hover-to-identify. Recreated whenever bounds
     /// change so the area stays the size of the visible cell.
     private var hoverTracking: NSTrackingArea?
+    /// Live editor-font observer; registered while in a window, torn down
+    /// when removed (keeps it main-actor and leak-free).
+    private var fontObserver: NSObjectProtocol?
     /// Character index resolved by the *previous* mouseMoved call.
     /// Used to skip the schema lookup when the cursor hasn't crossed
     /// into a new character — otherwise every pixel of mouse motion
@@ -827,6 +830,28 @@ final class SqlCellNSTextView: NSTextView {
     }
 
     // MARK: - Hover-to-identify
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            if let o = fontObserver { NotificationCenter.default.removeObserver(o); fontObserver = nil }
+        } else if fontObserver == nil {
+            fontObserver = NotificationCenter.default.addObserver(
+                forName: .pgbrainEditorFontChanged, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.applyEditorFont() }
+            }
+        }
+    }
+
+    /// Re-apply the current editor font size to this cell, re-highlight so
+    /// existing runs pick up the new size, and re-flow the gutter geometry.
+    private func applyEditorFont() {
+        font = NSFont.monospacedSystemFont(ofSize: CGFloat(AppSettings.shared.editorFontSize), weight: .regular)
+        if let storage = textStorage { SQLHighlighter.shared.highlight(storage) }
+        invalidateIntrinsicContentSize()
+        reportMarkers()
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()

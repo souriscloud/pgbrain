@@ -823,6 +823,12 @@ struct DataGridView: NSViewRepresentable {
             let sourceRow = coord.sourceIndex(forVisibleRow: visibleRow)
             coord.onCommandClickCell?(sourceRow, dataCol)
         }
+        table.onDeleteSelectedRows = { [weak coord = context.coordinator, weak table] in
+            guard let coord, let table, let onDelete = coord.onDeleteRows else { return }
+            let selected = table.selectedRowIndexes
+            guard !selected.isEmpty else { return }
+            onDelete(selected.map { coord.sourceIndex(forVisibleRow: $0) })
+        }
 
         applyColumns(to: table, coordinator: context.coordinator)
         table.dataSource = context.coordinator
@@ -919,6 +925,12 @@ struct DataGridView: NSViewRepresentable {
             guard let coord else { return }
             let sourceRow = coord.sourceIndex(forVisibleRow: visibleRow)
             coord.onCommandClickCell?(sourceRow, dataCol)
+        }
+        table.onDeleteSelectedRows = { [weak coord = context.coordinator, weak table] in
+            guard let coord, let table, let onDelete = coord.onDeleteRows else { return }
+            let selected = table.selectedRowIndexes
+            guard !selected.isEmpty else { return }
+            onDelete(selected.map { coord.sourceIndex(forVisibleRow: $0) })
         }
         if identityChanged || editableChanged {
             for col in table.tableColumns { table.removeTableColumn(col) }
@@ -1072,6 +1084,9 @@ final class EditableTableView: NSTableView {
     /// row in the currently-filtered view; `dataCol` is 0-indexed
     /// over data columns (not including the gutter).
     var onCommandClick: ((Int, Int) -> Void)?
+    /// ⌘⌫ — stage the selected row(s) for deletion. The closure resolves
+    /// the current selection to source rows and calls the delete hook.
+    var onDeleteSelectedRows: (() -> Void)?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let chars = event.charactersIgnoringModifiers ?? ""
@@ -1115,6 +1130,11 @@ final class EditableTableView: NSTableView {
     }
 
     override func keyDown(with event: NSEvent) {
+        // ⌘⌫ — stage the selected row(s) for deletion (committed on Apply).
+        if event.modifierFlags.contains(.command), event.keyCode == 51 {
+            onDeleteSelectedRows?()
+            return
+        }
         // Arrow keys move the cell-focus; Enter opens the popover.
         switch event.keyCode {
         case 123: onArrowMove?(0, -1); return  // ←

@@ -11,12 +11,14 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gear") }
             EditorSettings(settings: settings)
                 .tabItem { Label("Editor", systemImage: "text.cursor") }
+            ConnectionsSettings()
+                .tabItem { Label("Connections", systemImage: "rectangle.connected.to.line.below") }
             BinariesSettings(settings: settings)
                 .tabItem { Label("Binaries", systemImage: "terminal") }
             UpdatesSettings(settings: settings)
                 .tabItem { Label("Updates", systemImage: "arrow.down.app") }
         }
-        .frame(width: 520, height: 360)
+        .frame(width: 540, height: 420)
     }
 }
 
@@ -53,8 +55,9 @@ private struct EditorSettings: View {
 
     var body: some View {
         Form {
-            Section("SQL editor") {
-                Stepper(value: $settings.editorFontSize, in: 10...22, step: 1) {
+            Section {
+                Stepper(value: $settings.editorFontSize,
+                        in: AppSettings.fontRange, step: 1) {
                     HStack {
                         Text("Font size")
                         Spacer()
@@ -63,12 +66,81 @@ private struct EditorSettings: View {
                             .monospacedDigit()
                     }
                 }
-                Text("Restart the scratchpad tab to pick up font changes.")
-                    .font(.caption)
+                Text("Sample SELECT * FROM users WHERE id = 1;")
+                    .font(.system(size: settings.editorFontSize, design: .monospaced))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } header: {
+                Text("SQL editor")
+            } footer: {
+                Text("Applies live to every open scratchpad. Zoom with ⌘+ / ⌘− (⌘0 resets).")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+private struct ConnectionsSettings: View {
+    @State private var store = ConnectionStore.shared
+    @State private var includePasswords = false
+    @State private var status: String?
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Include passwords", isOn: $includePasswords)
+                    .help("Embeds Keychain passwords in the exported JSON. Treat the file as a secret.")
+                HStack {
+                    Button("Copy All as JSON") {
+                        ConnectionIO.copyToClipboard(store.connections, includePasswords: includePasswords)
+                        status = "Copied \(store.connections.count) connection\(store.connections.count == 1 ? "" : "s") to the clipboard."
+                    }
+                    Button("Export to File…") {
+                        ConnectionIO.exportToFile(store.connections, includePasswords: includePasswords)
+                    }
+                    Spacer()
+                }
+                .disabled(store.connections.isEmpty)
+            } header: {
+                Text("Export \(store.connections.count) saved connection\(store.connections.count == 1 ? "" : "s")")
+            } footer: {
+                if includePasswords {
+                    Label("Export will contain plain-text passwords.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                } else {
+                    Text("Passwords are left out unless you opt in above.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Import") {
+                HStack {
+                    Button("Paste from Clipboard") { handle(ConnectionIO.importFromClipboard()) }
+                    Button("Import from File…") { handle(ConnectionIO.importFromFile()) }
+                    Spacer()
+                }
+                Text("Duplicates (same name/host/port/db/user) are skipped.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            if let status {
+                Text(status).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func handle(_ result: ConnectionIO.ImportResult) {
+        switch result {
+        case .imported(let n):
+            status = n == 0 ? "Nothing new — all connections already exist." : "Imported \(n) connection\(n == 1 ? "" : "s")."
+        case .cancelled:
+            break
+        case .unrecognised:
+            status = "That doesn't look like a pgBrain connection export."
+        }
     }
 }
 
@@ -140,11 +212,27 @@ private struct UpdatesSettings: View {
                     Text("Beta").tag("beta")
                 }
                 .pickerStyle(.segmented)
-                Text("Sparkle auto-update lands in iter-12. The channel choice is captured now so first-update is one click.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Check for Updates Now") {
+                        UpdateController.shared.checkForUpdates(nil)
+                    }
+                    Spacer()
+                }
             } header: {
                 Text("Auto-update")
+            } footer: {
+                Text("pgBrain auto-updates via Sparkle. Stable is recommended; Beta opts into pre-release builds.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("About") {
+                LabeledContent("Version", value: "\(AppInfo.version) (\(AppInfo.build))")
+                HStack {
+                    Link("Website", destination: URL(string: "https://apps.souris.cloud/apps/pgbrain")!)
+                    Link("Source", destination: URL(string: "https://github.com/souriscloud/pgbrain")!)
+                    Link("Support", destination: URL(string: "https://ko-fi.com/souriscloud")!)
+                }
+                .font(.callout)
             }
         }
         .formStyle(.grouped)

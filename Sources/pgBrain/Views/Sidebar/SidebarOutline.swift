@@ -132,6 +132,7 @@ struct SidebarOutlineView: NSViewRepresentable {
     /// Schema-level: rename, drop. Receiver pops a confirmation sheet.
     var onRenameSchema: ((String) -> Void)? = nil
     var onDropSchema: ((String) -> Void)? = nil
+    var onDuplicateSchema: ((String) -> Void)? = nil
     /// Database-level: create a new schema.
     var onCreateSchema: (() -> Void)? = nil
     /// New table in the given schema (nil → let the sheet pick the schema).
@@ -168,6 +169,7 @@ struct SidebarOutlineView: NSViewRepresentable {
         var onEditComments: ((TableNode) -> Void)?
         var onRenameSchema: ((String) -> Void)?
         var onDropSchema: ((String) -> Void)?
+        var onDuplicateSchema: ((String) -> Void)?
         var onCreateSchema: (() -> Void)?
         var onNewTable: ((String?) -> Void)?
         var onFindUsages: ((TableNode) -> Void)?
@@ -302,7 +304,7 @@ struct SidebarOutlineView: NSViewRepresentable {
         }
 
         private func schemaMenu(name: String) -> NSMenu? {
-            guard onRenameSchema != nil || onDropSchema != nil || onCreateSchema != nil || onShowERD != nil || onNewTable != nil else { return nil }
+            guard onRenameSchema != nil || onDropSchema != nil || onDuplicateSchema != nil || onCreateSchema != nil || onShowERD != nil || onNewTable != nil else { return nil }
             let menu = NSMenu()
             if onNewTable != nil {
                 let newTable = NSMenuItem(title: "New table in “\(name)”…", action: #selector(handleNewTable(_:)), keyEquivalent: "")
@@ -330,6 +332,12 @@ struct SidebarOutlineView: NSViewRepresentable {
                 let new = NSMenuItem(title: "New schema…", action: #selector(handleCreateSchema(_:)), keyEquivalent: "")
                 new.target = self
                 menu.addItem(new)
+            }
+            if onDuplicateSchema != nil {
+                let dup = NSMenuItem(title: "Duplicate schema…", action: #selector(handleDuplicateSchema(_:)), keyEquivalent: "")
+                dup.target = self
+                dup.representedObject = name
+                menu.addItem(dup)
             }
             if onRenameSchema != nil {
                 let rename = NSMenuItem(title: "Rename schema…", action: #selector(handleRenameSchema(_:)), keyEquivalent: "")
@@ -480,6 +488,10 @@ struct SidebarOutlineView: NSViewRepresentable {
         @objc private func handleDropSchema(_ sender: NSMenuItem) {
             guard let name = sender.representedObject as? String else { return }
             onDropSchema?(name)
+        }
+        @objc private func handleDuplicateSchema(_ sender: NSMenuItem) {
+            guard let name = sender.representedObject as? String else { return }
+            onDuplicateSchema?(name)
         }
         @objc private func handleCreateSchema(_ sender: NSMenuItem) {
             onCreateSchema?()
@@ -637,6 +649,7 @@ struct SidebarOutlineView: NSViewRepresentable {
         coord.onEditComments = onEditComments
         coord.onRenameSchema = onRenameSchema
         coord.onDropSchema = onDropSchema
+        coord.onDuplicateSchema = onDuplicateSchema
         coord.onCreateSchema = onCreateSchema
         coord.onNewTable = onNewTable
         coord.onFindUsages = onFindUsages

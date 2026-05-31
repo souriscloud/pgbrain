@@ -153,21 +153,73 @@ enum ConnectionExchange {
               let version = obj["pgbrain.connection"] as? String,
               version == "v1"
         else { return nil }
+        return decode(obj)
+    }
 
+    /// Decode one connection object (no magic check — callers do that).
+    /// Reads every field including SSH so a backup round-trips fully.
+    private static func decode(_ obj: [String: Any]) -> Imported {
         var c = Connection(name: (obj["name"] as? String) ?? "Imported connection")
         if let v = obj["host"] as? String { c.host = v }
         if let v = obj["port"] as? Int { c.port = v }
         if let v = obj["database"] as? String { c.database = v }
         if let v = obj["username"] as? String { c.username = v }
-        if let v = obj["sslMode"] as? String, let m = Connection.SSLMode(rawValue: v) {
-            c.sslMode = m
-        }
+        if let v = obj["sslMode"] as? String, let m = Connection.SSLMode(rawValue: v) { c.sslMode = m }
         if let v = obj["isProduction"] as? Bool { c.isProduction = v }
-        if let v = obj["colorTag"] as? String, let tag = Connection.ColorTag(rawValue: v) {
-            c.colorTag = tag
+        if let v = obj["colorTag"] as? String, let tag = Connection.ColorTag(rawValue: v) { c.colorTag = tag }
+        if let v = obj["sshEnabled"] as? Bool { c.sshEnabled = v }
+        if let v = obj["sshHost"] as? String { c.sshHost = v }
+        if let v = obj["sshPort"] as? Int { c.sshPort = v }
+        if let v = obj["sshUser"] as? String { c.sshUser = v }
+        if let v = obj["sshKeyPath"] as? String { c.sshKeyPath = v }
+        return Imported(connection: c, password: obj["password"] as? String)
+    }
+
+    // MARK: - Bulk bundle (export / import all)
+
+    /// JSON document holding many connections, tagged
+    /// `"pgbrain.connections": "v1"`. Passwords included only on opt-in.
+    static func renderBundle(_ connections: [Connection], includePasswords: Bool) -> String {
+        let items: [[String: Any]] = connections.map { c in
+            var p: [String: Any] = [
+                "name": c.name, "host": c.host, "port": c.port,
+                "database": c.database, "username": c.username,
+                "sslMode": c.sslMode.rawValue, "isProduction": c.isProduction,
+                "colorTag": c.colorTag.rawValue,
+                "sshEnabled": c.sshEnabled, "sshHost": c.sshHost,
+                "sshPort": c.sshPort, "sshUser": c.sshUser, "sshKeyPath": c.sshKeyPath,
+            ]
+            if includePasswords, let pw = Keychain.password(for: c.id), !pw.isEmpty {
+                p["password"] = pw
+            }
+            return p
         }
-        let password = obj["password"] as? String
-        return Imported(connection: c, password: password)
+        let payload: [String: Any] = ["pgbrain.connections": "v1", "connections": items]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]),
+              let s = String(data: data, encoding: .utf8) else { return "" }
+        return s + "\n"
+    }
+
+    /// Parse a bundle, a bare JSON array of connection objects, or a single
+    /// `v1` object. Returns nil when the input isn't recognisably ours.
+    static func parseBundle(_ raw: String) -> [Imported]? {
+        guard let data = raw.data(using: .utf8),
+              let any = try? JSONSerialization.jsonObject(with: data, options: []) else { return nil }
+        if let dict = any as? [String: Any] {
+            if dict["pgbrain.connections"] as? String == "v1",
+               let arr = dict["connections"] as? [[String: Any]] {
+                return arr.map(decode)
+            }
+            if dict["pgbrain.connection"] as? String == "v1" {
+                return [decode(dict)]
+            }
+            return nil
+        }
+        if let arr = any as? [[String: Any]] {
+            guard arr.allSatisfy({ $0["host"] != nil || $0["name"] != nil }) else { return nil }
+            return arr.map(decode)
+        }
+        return nil
     }
 
     // MARK: - Helpers

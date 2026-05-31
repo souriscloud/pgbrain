@@ -1,6 +1,13 @@
 import Foundation
 import Observation
 
+extension Notification.Name {
+    /// Posted when the editor font size changes so already-open editors
+    /// re-apply it live (the @Observable property alone doesn't reach the
+    /// AppKit text views baked at make-time).
+    static let pgbrainEditorFontChanged = Notification.Name("cloud.souris.pgbrain.editorFontChanged")
+}
+
 /// User-facing preferences. `@Observable` so SwiftUI can bind toggles in the
 /// Settings window (iter-11) and the rest of the app can react live. Backed
 /// by `UserDefaults` with a tiny key prefix.
@@ -39,9 +46,21 @@ final class AppSettings {
         didSet { defaults.set(verbosePostgresLogging, forKey: keyPrefix + "verbosePostgresLogging") }
     }
 
-    /// Editor font point size (used by iter-11 Editor section).
+    /// Editor font point size. Clamped to a sane range; a change broadcasts
+    /// `.pgbrainEditorFontChanged` so open editors re-apply it live.
+    static let fontRange: ClosedRange<Double> = 9...28
     var editorFontSize: Double {
-        didSet { defaults.set(editorFontSize, forKey: keyPrefix + "editorFontSize") }
+        didSet {
+            let clamped = min(max(editorFontSize, Self.fontRange.lowerBound), Self.fontRange.upperBound)
+            if clamped != editorFontSize { editorFontSize = clamped; return }
+            defaults.set(editorFontSize, forKey: keyPrefix + "editorFontSize")
+            NotificationCenter.default.post(name: .pgbrainEditorFontChanged, object: nil)
+        }
+    }
+
+    /// Nudge the editor font by `delta`, clamped. Used by ⌘+ / ⌘-.
+    func bumpFontSize(by delta: Double) {
+        editorFontSize = min(max(editorFontSize + delta, Self.fontRange.lowerBound), Self.fontRange.upperBound)
     }
 
     /// Sparkle update channel (used by iter-12).

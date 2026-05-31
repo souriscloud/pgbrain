@@ -596,6 +596,18 @@ Living plan. Update on every iteration that lands code or changes direction. Arc
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓ + launch smoke ✓. **Live in-editor click-through still pending** (needs a DB session). Known caveat: in the *cell-editor popover* (a transient `NSPopover`), accepting a completion by **mouse-click** can dismiss the popover — keyboard acceptance is unaffected; the scratchpad / WHERE strip are unaffected. **Not yet released.**
 
+### Iter 40 — Bug-batch: schema clone, delete shortcut, font zoom, connection portability, settings, help (2026-06-01, unreleased)
+Six gaps from a user bug list, in one pass.
+
+- **Duplicate schema** (`SchemaDuplicator.swift` + `DuplicateSchemaSheet.swift`): clone a whole schema into a new one with per-content toggles (tables structure, data, sequences, foreign keys, views, matviews, functions). Catalog-driven, all in **one transaction on one connection** so `search_path` makes view/matview bodies re-resolve to the target without text rewriting; tables via `CREATE TABLE (LIKE … INCLUDING ALL)`, FKs via `pg_get_constraintdef` (composite-safe), serial defaults repointed, identity data via `OVERRIDING SYSTEM VALUE`, functions via `pg_get_functiondef`. Not copied (v1, stated in the sheet): triggers, RLS, grants, partitioning. Wired to the sidebar schema menu + `⌘K` (`.pgbrainDuplicateSchema`). **Validated against the PG18 demo DB** (7 tables + data + a view round-tripped).
+- **⌘⌫ stages selected row(s) for delete** — `EditableTableView.keyDown` → `onDeleteSelectedRows` → existing staged-delete path (committed on Apply).
+- **⌘+ / ⌘− / ⌘0 live editor zoom** — `AppSettings.editorFontSize` (clamped 9…28) now broadcasts `.pgbrainEditorFontChanged`; `SqlCellNSTextView` re-applies font + re-highlights + re-flows the gutter live. New View-menu commands. (Grid zoom deferred — would need a CellFormat/rowHeight refactor.)
+- **Bulk connection import/export** (`ConnectionExchange.renderBundle`/`parseBundle`, `ConnectionIO`, `ConnectionStore.importConnections`): JSON bundle (`pgbrain.connections: v1`) to clipboard or file, passwords opt-in; dedupe on re-import. Surfaced in a Welcome ▸ Import/Export menu (⌘V handles single *or* bundle) and a new **Settings ▸ Connections** tab.
+- **Matured Settings** — added the Connections tab, live font preview, a real Updates tab (Check Now + version + links), bumped the window.
+- **Comprehensive searchable Help** — `searchable` field + per-topic keyword index, expanded from 8 to 13 topics (Managing Connections, Editing Data, Autocomplete, Schema & Objects, Import/Export…) and refreshed the shortcuts list (⌘⌫, ⌘±, ⌥Esc, …).
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓ + launch smoke ✓; schema-clone SQL validated against PG18 `pgbrain_demo`. **Not yet released.**
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

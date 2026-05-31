@@ -62,6 +62,8 @@ extension Notification.Name {
     /// Rename / drop a schema — `userInfo["schema"]`.
     static let pgbrainRenameSchema = Notification.Name("cloud.souris.pgbrain.renameSchema")
     static let pgbrainDropSchema = Notification.Name("cloud.souris.pgbrain.dropSchema")
+    /// Duplicate a schema — `userInfo["schema"]`.
+    static let pgbrainDuplicateSchema = Notification.Name("cloud.souris.pgbrain.duplicateSchema")
     /// pg_dump the database — `userInfo["format"]` (PgDumpCLI.Format raw value).
     static let pgbrainPgDump = Notification.Name("cloud.souris.pgbrain.pgDump")
     /// Export / import the front table tab — `userInfo["format"]` (Exporter.Format)
@@ -108,6 +110,7 @@ struct ConnectionWindowContent: View {
     @State private var tableDesigner: TableDesignerRequest?
     @State private var renameSchemaTarget: IdentifiedString?
     @State private var dropSchemaTarget: IdentifiedString?
+    @State private var duplicateSchemaTarget: IdentifiedString?
     @State private var commentsTarget: CommentsTarget?
     @State private var pendingMaintenance: MaintenanceRequest?
     @State private var showSequenceInspector = false
@@ -171,6 +174,11 @@ struct ConnectionWindowContent: View {
         .sheet(item: $renameSchemaTarget) { target in
             RenameSchemaSheet(service: service, original: target.value) {
                 renameSchemaTarget = nil
+            }
+        }
+        .sheet(item: $duplicateSchemaTarget) { target in
+            DuplicateSchemaSheet(service: service, sourceSchema: target.value) {
+                duplicateSchemaTarget = nil
             }
         }
         .sheet(item: $dropSchemaTarget) { target in
@@ -314,6 +322,7 @@ struct ConnectionWindowContent: View {
             commentsTarget: $commentsTarget,
             renameSchemaTarget: $renameSchemaTarget,
             dropSchemaTarget: $dropSchemaTarget,
+            duplicateSchemaTarget: $duplicateSchemaTarget,
             onPgDump: { runPgDump(format: $0) },
             onMaintenance: { table, action in
                 if action.isDestructive {
@@ -715,6 +724,9 @@ struct ConnectionWindowContent: View {
                     },
                     onDropSchema: { name in
                         dropSchemaTarget = IdentifiedString(id: name)
+                    },
+                    onDuplicateSchema: { name in
+                        duplicateSchemaTarget = IdentifiedString(id: name)
                     },
                     onCreateSchema: { showCreateSchema = true },
                     onNewTable: { schema in tableDesigner = TableDesignerRequest(mode: .create(schema: schema)) },
@@ -1261,6 +1273,7 @@ private struct TableActionsModifier: ViewModifier {
     @Binding var commentsTarget: CommentsTarget?
     @Binding var renameSchemaTarget: IdentifiedString?
     @Binding var dropSchemaTarget: IdentifiedString?
+    @Binding var duplicateSchemaTarget: IdentifiedString?
     let onPgDump: (PgDumpCLI.Format) -> Void
     let onMaintenance: (TableNode, AdminActions.Maintenance) -> Void
 
@@ -1315,6 +1328,11 @@ private struct TableActionsModifier: ViewModifier {
                 guard let id = notif.object as? UUID, id == service.connection.id,
                       let schema = notif.userInfo?["schema"] as? String else { return }
                 dropSchemaTarget = IdentifiedString(id: schema)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pgbrainDuplicateSchema)) { notif in
+                guard let id = notif.object as? UUID, id == service.connection.id,
+                      let schema = notif.userInfo?["schema"] as? String else { return }
+                duplicateSchemaTarget = IdentifiedString(id: schema)
             }
             .onReceive(NotificationCenter.default.publisher(for: .pgbrainPgDump)) { notif in
                 guard let id = notif.object as? UUID, id == service.connection.id,

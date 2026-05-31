@@ -26,6 +26,22 @@ struct pgBrainApp: App {
                 }
                 .keyboardShortcut("k", modifiers: [.command])
             }
+            // View → editor zoom. Lives live across every open scratchpad.
+            CommandGroup(after: .sidebar) {
+                Button("Increase Font Size") {
+                    AppSettings.shared.bumpFontSize(by: 1)
+                }
+                .keyboardShortcut("+", modifiers: [.command])
+                Button("Decrease Font Size") {
+                    AppSettings.shared.bumpFontSize(by: -1)
+                }
+                .keyboardShortcut("-", modifiers: [.command])
+                Button("Reset Font Size") {
+                    AppSettings.shared.editorFontSize = 12
+                }
+                .keyboardShortcut("0", modifiers: [.command])
+                Divider()
+            }
             // Replace the stock Help menu so "pgBrain Help" opens our in-app
             // guide and Send Feedback is one click from the top-level menu.
             CommandGroup(replacing: .help) {

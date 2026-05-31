@@ -122,6 +122,11 @@ enum CommandProviders {
                 AppDelegate.shared?.openConnection(service.connection)
                 NotificationCenter.default.post(name: .pgbrainRenameSchema, object: connID, userInfo: ["schema": name])
             }))
+            out.append(CommandItem(id: "schemaadmin.duplicate.\(name)", icon: "doc.on.doc",
+                                   title: "Duplicate Schema: \(name)…", subtitle: nil, category: .schema, shortcut: nil, action: {
+                AppDelegate.shared?.openConnection(service.connection)
+                NotificationCenter.default.post(name: .pgbrainDuplicateSchema, object: connID, userInfo: ["schema": name])
+            }))
             out.append(CommandItem(id: "schemaadmin.drop.\(name)", icon: "trash",
                                    title: "Drop Schema: \(name)…", subtitle: nil, category: .schema, shortcut: nil, action: {
                 AppDelegate.shared?.openConnection(service.connection)
