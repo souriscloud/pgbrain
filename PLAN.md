@@ -608,6 +608,30 @@ Six gaps from a user bug list, in one pass.
 
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓ + launch smoke ✓; schema-clone SQL validated against PG18 `pgbrain_demo`. **Not yet released.**
 
+### Iter 41 — Bug-batch follow-ups (2026-06-01, unreleased)
+Five deferred items from the iter-40 review, picked up.
+
+- **Whole-app font zoom**: `CellFormat`'s base fonts are now computed from
+  `AppSettings.editorFontSize`; `DataGridView` sets `rowHeight` from it and
+  re-renders/re-heights on `.pgbrainEditorFontChanged`. ⌘+/−/0 now zoom the grid
+  too, not just the scratchpad.
+- **Schema-clone gaps filled** (`SchemaDuplicator`): single-level **partitioning**
+  (`PARTITION BY` parents + re-attached partitions), **triggers**
+  (`pg_get_triggerdef`), **RLS** (enable + `pg_policies` recreation), and an
+  optional **ownership & grants** pass that runs *after* the transaction commits,
+  best-effort, so a privilege the role can't set never rolls back the clone.
+  **Validated against PG18** (partitioned table + trigger + policy round-tripped).
+- **Typed column defaults**: AddColumnSheet gets a "Set a default" toggle +
+  `TypedValueEditor`; the table designer's dense default cell gets a typed-editor
+  popover that writes a SQL fragment back.
+- **Cell-editor popover completion fix**: the popover is now `.semitransient`, so
+  clicking the completion panel (a separate child window) no longer dismisses it.
+- **Appcast analytics**: confirmed there's nothing to remove — the app sends no
+  system profile on update checks; GitHub DMG download counts are the only signal.
+
+**Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓ + launch smoke ✓; the new
+clone paths (partitioning/triggers/RLS) validated against PG18 `pgbrain_demo`.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

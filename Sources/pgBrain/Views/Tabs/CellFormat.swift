@@ -72,9 +72,14 @@ enum CellFormat {
 
     // MARK: - Per-kind renderers
 
-    private static let mono = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-    private static let monoText = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-    private static let body = NSFont.systemFont(ofSize: 12)
+    /// The grid scales with the same setting as the SQL editor, so ⌘+ / ⌘−
+    /// zoom the whole app. Computed (not cached) so a font change is picked
+    /// up on the next render pass — the grid invalidates its render cache on
+    /// `.pgbrainEditorFontChanged`.
+    static var baseSize: CGFloat { CGFloat(AppSettings.shared.editorFontSize) }
+    private static var mono: NSFont { .monospacedDigitSystemFont(ofSize: baseSize, weight: .regular) }
+    private static var monoText: NSFont { .monospacedSystemFont(ofSize: baseSize, weight: .regular) }
+    private static var body: NSFont { .systemFont(ofSize: baseSize) }
 
     private static let intFormatter: NumberFormatter = {
         let f = NumberFormatter()
@@ -173,7 +178,7 @@ enum CellFormat {
         case .some(false): glyph = "·"; color = .tertiaryLabelColor
         case .none:        glyph = raw; color = .secondaryLabelColor
         }
-        let font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+        let font = NSFont.systemFont(ofSize: baseSize + 2, weight: .semibold)
         return Rendered(
             attributed: plain(glyph, color: color, font: font),
             alignment: .center,
@@ -299,7 +304,7 @@ enum CellFormat {
     }
 
     private static func italicFont() -> NSFont {
-        let descriptor = NSFont.systemFont(ofSize: 12).fontDescriptor.withSymbolicTraits(.italic)
+        let descriptor = NSFont.systemFont(ofSize: baseSize).fontDescriptor.withSymbolicTraits(.italic)
         return NSFont(descriptor: descriptor, size: 12) ?? body
     }
 

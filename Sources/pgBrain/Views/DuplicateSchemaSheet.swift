@@ -43,17 +43,24 @@ struct DuplicateSchemaSheet: View {
                 Section("Include") {
                     Toggle("Tables (structure)", isOn: $opts.tableStructure)
                         .onChange(of: opts.tableStructure) { _, on in
-                            if !on { opts.tableData = false; opts.foreignKeys = false }
+                            if !on {
+                                opts.tableData = false; opts.foreignKeys = false
+                                opts.triggers = false; opts.policies = false
+                            }
                         }
                     Toggle("Table data", isOn: $opts.tableData).disabled(!opts.tableStructure)
                     Toggle("Foreign keys", isOn: $opts.foreignKeys).disabled(!opts.tableStructure)
+                    Toggle("Triggers", isOn: $opts.triggers).disabled(!opts.tableStructure)
+                    Toggle("Row-level security policies", isOn: $opts.policies).disabled(!opts.tableStructure)
                     Toggle("Sequences", isOn: $opts.sequences)
                     Toggle("Views", isOn: $opts.views)
                     Toggle("Materialized views", isOn: $opts.matviews)
                     Toggle("Functions & procedures", isOn: $opts.functions)
+                    Toggle("Ownership & grants", isOn: $opts.privileges)
+                        .help("Best-effort, applied after the clone — privileges your role can't set are skipped without failing the clone.")
                 }
                 Section {
-                    Text("Best-effort clone. Triggers, row-level security, grants/ownership, and partitioning are not copied.")
+                    Text("Single-level partitioning is preserved. Not copied: extensions and multi-level sub-partitioning.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

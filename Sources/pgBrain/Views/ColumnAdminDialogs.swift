@@ -12,9 +12,15 @@ struct AddColumnSheet: View {
     @State private var name: String = ""
     @State private var type: String = "text"
     @State private var nullable: Bool = true
-    @State private var defaultExpr: String = ""
+    @State private var hasDefault = false
+    @State private var defaultValue: TypedInputValue = .literal("")
     @State private var saving = false
     @State private var error: String?
+
+    /// The DEFAULT clause expression, or nil when no default is set.
+    private var defaultExpr: String? {
+        hasDefault ? defaultValue.sqlFragment(typeName: type, cast: false) : nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Tokens.Spacing.md) {
@@ -30,9 +36,19 @@ struct AddColumnSheet: View {
                     .font(.system(.body, design: .monospaced))
             }
             labelled("Default") {
-                TextField("(none)", text: $defaultExpr)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("Set a default", isOn: $hasDefault).toggleStyle(.checkbox).font(.callout)
+                    if hasDefault {
+                        TypedValueEditor(
+                            typeName: type, nullable: nullable, enums: service.schema.enums,
+                            allowsDefault: false, allowsExpression: true,
+                            completions: { p, _, _ in
+                                SQLCompletionProvider.items(for: p, in: service.schema, context: .expression(columns: []))
+                            },
+                            value: $defaultValue
+                        )
+                    }
+                }
             }
             Toggle("Nullable", isOn: $nullable).toggleStyle(.checkbox)
             if let error {
@@ -67,7 +83,7 @@ struct AddColumnSheet: View {
                 schema: schema, table: table,
                 name: name.trimmingCharacters(in: .whitespacesAndNewlines),
                 type: type, nullable: nullable,
-                defaultExpr: defaultExpr.trimmingCharacters(in: .whitespaces).isEmpty ? nil : defaultExpr,
+                defaultExpr: defaultExpr,
                 service: service
             )
             saving = false

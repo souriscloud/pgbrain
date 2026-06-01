@@ -225,9 +225,9 @@ struct TableDesignerView: View {
                     .toggleStyle(.checkbox)
                 Toggle("", isOn: col.isPrimaryKey).labelsHidden().frame(width: 26)
                     .toggleStyle(.checkbox)
-                TextField("expr", text: col.defaultValue)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.caption, design: .monospaced))
+                DefaultEditorCell(defaultValue: col.defaultValue,
+                                  typeName: col.type.wrappedValue,
+                                  enums: service.schema.enums)
                     .frame(maxWidth: .infinity)
 
                 Button {
@@ -556,5 +556,52 @@ struct TableDesignerView: View {
         let pks = namedColumns.filter(\.isPrimaryKey).map { SQLIdent.quote($0.name) }
         if !pks.isEmpty { lines.append("  PRIMARY KEY (\(pks.joined(separator: ", ")))") }
         return lines.joined(separator: ",\n")
+    }
+}
+
+/// Default-value cell for the designer grid: a raw expression field plus a
+/// typed-editor popover that writes a SQL fragment back into it. Keeps the
+/// dense row compact while still offering date/enum/now()/expression pickers.
+private struct DefaultEditorCell: View {
+    @Binding var defaultValue: String
+    let typeName: String
+    let enums: [String: [String]]
+    @State private var show = false
+    @State private var typed: TypedInputValue = .literal("")
+
+    var body: some View {
+        HStack(spacing: 2) {
+            TextField("expr", text: $defaultValue)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.caption, design: .monospaced))
+                .frame(maxWidth: .infinity)
+            Button {
+                typed = defaultValue.isEmpty ? .literal("") : .expression(defaultValue)
+                show = true
+            } label: {
+                Image(systemName: "slider.horizontal.3").font(.caption2)
+            }
+            .buttonStyle(.borderless)
+            .help("Build a typed default")
+            .popover(isPresented: $show, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: Tokens.Spacing.sm) {
+                    Text("Default for \(typeName.isEmpty ? "column" : typeName)")
+                        .font(.caption.weight(.semibold))
+                    TypedValueEditor(typeName: typeName, nullable: true, enums: enums,
+                                     allowsDefault: false, allowsExpression: true, value: $typed)
+                    HStack {
+                        Button("Clear") { defaultValue = ""; show = false }
+                        Spacer()
+                        Button("Use") {
+                            defaultValue = typed.sqlFragment(typeName: typeName, cast: false)
+                            show = false
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding(Tokens.Spacing.md)
+                .frame(width: 320)
+            }
+        }
     }
 }

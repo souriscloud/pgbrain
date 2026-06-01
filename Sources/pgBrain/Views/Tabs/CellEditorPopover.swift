@@ -21,7 +21,10 @@ enum CellEditorPopover {
         onCommit: @escaping (TypedInputValue) -> Void
     ) {
         let popover = NSPopover()
-        popover.behavior = .transient
+        // Semi-transient so clicking the schema-completion panel (a separate
+        // child window) doesn't dismiss the editor; it still closes when you
+        // click elsewhere in the host window, or via Save / Cancel / Esc.
+        popover.behavior = .semitransient
         popover.animates = true
 
         let host = NSHostingController(

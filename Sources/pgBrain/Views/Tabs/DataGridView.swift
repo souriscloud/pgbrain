@@ -160,6 +160,15 @@ struct DataGridView: NSViewRepresentable {
             renderCache.removeAll(keepingCapacity: true)
         }
 
+        /// Live editor-font zoom: drop cached renders, re-height rows, redraw.
+        @objc func editorFontDidChange() {
+            invalidateRenderCache()
+            if let t = tableView {
+                t.rowHeight = DataGridView.gridRowHeight()
+                t.reloadData()
+            }
+        }
+
         /// Per-cell invalidation — fires from the commit path so the
         /// next viewFor call re-renders this cell with its pending
         /// value instead of returning the cached pre-edit string.
@@ -765,6 +774,10 @@ struct DataGridView: NSViewRepresentable {
         }
     }
 
+    /// Row height derived from the editor font size so the grid breathes as
+    /// it zooms. Kept in one place so makeNSView and the live-zoom handler agree.
+    static func gridRowHeight() -> CGFloat { (CellFormat.baseSize).rounded() + 10 }
+
     func makeCoordinator() -> Coordinator {
         let c = Coordinator(page: page, editBuffer: editBuffer)
         c.enums = enums
@@ -847,6 +860,16 @@ struct DataGridView: NSViewRepresentable {
             name: NSTableView.columnDidResizeNotification,
             object: table
         )
+        // Live ⌘+ / ⌘− zoom: re-render + re-height the grid when the editor
+        // font size changes. Selector-based observers auto-deregister on the
+        // coordinator's dealloc.
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.editorFontDidChange),
+            name: .pgbrainEditorFontChanged,
+            object: nil
+        )
+        table.rowHeight = Self.gridRowHeight()
 
         let scroll = NSScrollView()
         scroll.documentView = table

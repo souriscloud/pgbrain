@@ -6,6 +6,21 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
+## Unreleased
+
+### Added
+- **⌘+ / ⌘− / ⌘0 now zoom the whole window** — the data grid scales with the SQL
+  editor, not just the scratchpad.
+- **Schema duplication got thorough** — it now also copies **partitioning**
+  (single-level), **triggers**, **row-level-security policies**, and optionally
+  **ownership & grants** (best-effort, applied after the clone).
+- **Typed column defaults** — setting a column default in the table designer or
+  Add Column now offers the same typed editor (date/enum/now()/expression) as
+  cell editing.
+
+### Fixed
+- The cell editor no longer closes when you click an autocomplete suggestion.
+
 ## v0.9.2 — 2026-06-01
 
 ### Added
