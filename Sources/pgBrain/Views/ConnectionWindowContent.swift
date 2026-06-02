@@ -136,7 +136,12 @@ struct ConnectionWindowContent: View {
         ConnectionAppearance(connection: service.connection)
     }
 
-    var body: some View {
+    // NOTE: the view tree is split across several `some View` properties
+    // below — applying all of these sheets/notifications in one `body`
+    // expression overruns the Swift type-checker's solver budget on some
+    // toolchains ("unable to type-check in reasonable time"). Each chunk
+    // chains off the previous; the order is unchanged.
+    private var chromeStack: some View {
         VStack(spacing: 0) {
             // Custom chrome bar IS the title bar: it draws under the
             // transparent titlebar, traffic lights float on top of it, and it
@@ -152,6 +157,10 @@ struct ConnectionWindowContent: View {
         // traffic lights) instead of being pushed below it.
         .ignoresSafeArea(.container, edges: .top)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var withSchemaSheets: some View {
+        chromeStack
         .sheet(item: $copySource) { source in
             CrossDBCopyView(source: source, sourceService: service)
         }
@@ -195,6 +204,10 @@ struct ConnectionWindowContent: View {
                 onSaved: { reloadInspectorFor(schema: target.schema, table: target.table) }
             )
         }
+    }
+
+    private var withObjectSheets: some View {
+        withSchemaSheets
         .sheet(isPresented: $showSequenceInspector) {
             SequenceInspectorView(service: service) { showSequenceInspector = false }
         }
@@ -281,6 +294,10 @@ struct ConnectionWindowContent: View {
         } message: { req in
             Text(req.action.help)
         }
+    }
+
+    private var withNotificationFlows: some View {
+        withObjectSheets
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainOpenSequenceInspector)) { notif in
             if let id = notif.object as? UUID, id == service.connection.id {
                 showSequenceInspector = true
@@ -345,6 +362,10 @@ struct ConnectionWindowContent: View {
                     .tables.first(where: { $0.name == tableName }) else { return }
             tableDesigner = TableDesignerRequest(mode: .edit(node))
         }
+    }
+
+    var body: some View {
+        withNotificationFlows
         .sheet(isPresented: $showQueryHistory) {
             QueryHistoryView(
                 connectionID: service.connection.id,
