@@ -33,6 +33,14 @@ final class QueryHistoryStore {
         load()
     }
 
+    #if DEBUG
+    init(testURL: URL) {
+        self.url = testURL
+        load()
+    }
+    func flushNowForTests() { flush() }
+    #endif
+
     func record(connectionID: UUID, sql: String, startedAt: Date,
                 elapsedSec: Double, success: Bool,
                 errorMessage: String?, rowsAffected: Int?) {

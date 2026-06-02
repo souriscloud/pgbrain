@@ -9,11 +9,19 @@ final class ConnectionStore {
 
     private(set) var connections: [Connection] = []
 
-    private let url = AppSupport.connectionsFile
+    private let url: URL
 
     private init() {
+        self.url = AppSupport.connectionsFile
         load()
     }
+
+    #if DEBUG
+    init(testURL: URL) {
+        self.url = testURL
+        load()
+    }
+    #endif
 
     func load() {
         guard let data = try? Data(contentsOf: url) else {

@@ -3,6 +3,7 @@
 **Pro PostgreSQL for macOS.** Native. Mac-fast. No Electron. No subscriptions. No telemetry.
 
 ![macOS](https://img.shields.io/badge/macOS-15.0%2B-blue) ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-success) ![Swift 6](https://img.shields.io/badge/Swift-6-orange) ![Release](https://img.shields.io/github/v/release/souriscloud/pgbrain) ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
+[![CI](https://github.com/souriscloud/pgbrain/actions/workflows/ci.yml/badge.svg)](https://github.com/souriscloud/pgbrain/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/souriscloud/pgbrain/branch/main/graph/badge.svg)](https://codecov.io/gh/souriscloud/pgbrain)
 
 > If JetBrains DataGrip and macOS had a kid that actually feels like a Mac app, you'd get pgBrain.
 

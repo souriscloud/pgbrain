@@ -19,6 +19,14 @@ final class ColumnLayoutStore {
         load()
     }
 
+    #if DEBUG
+    init(testURL: URL) {
+        self.url = testURL
+        load()
+    }
+    func flushNowForTests() { flush() }
+    #endif
+
     func width(connectionID: UUID, schema: String, table: String, column: String) -> CGFloat? {
         widths[key(connectionID, schema, table)]?[column]
     }

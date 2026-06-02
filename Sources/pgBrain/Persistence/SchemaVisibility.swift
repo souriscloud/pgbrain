@@ -19,11 +19,21 @@ final class SchemaVisibility {
     private(set) var hidden: [UUID: Set<String>] = [:]
 
     private let key = "pgbrain.schemaVisibility.hidden"
-    @ObservationIgnored private let defaults = UserDefaults.standard
+    @ObservationIgnored private let defaults: UserDefaults
 
     private init() {
+        self.defaults = .standard
         load()
     }
+
+    #if DEBUG
+    /// Test-only: back the store with an isolated `UserDefaults` suite so
+    /// `swift test` never touches the real visibility prefs.
+    init(testDefaults: UserDefaults) {
+        self.defaults = testDefaults
+        load()
+    }
+    #endif
 
     /// Hidden schemas for a connection, or empty set when nothing
     /// is configured. Callers should treat membership as "skip this

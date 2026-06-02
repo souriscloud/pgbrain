@@ -1,0 +1,46 @@
+# Coverage is scoped to the logic layer. Roughly half the codebase is
+# AppKit/SwiftUI view code that `swift test` can't reach without an XCUITest
+# bundle (which the no-.xcodeproj rule precludes), so including it would make the
+# badge read ~12% and mean nothing. We ignore the architecturally-uncoverable
+# code below; everything else (query/schema engines, SQL tooling, command-palette
+# builders, persistence stores, models) counts toward the badge.
+
+coverage:
+  round: down
+  precision: 1
+  status:
+    # Don't fail PRs/builds on a coverage delta — informational only.
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+comment:
+  layout: "reach, diff, files"
+  require_changes: true
+
+ignore:
+  # Pure UI / app shell — needs XCUITest.
+  - "Sources/pgBrain/App"
+  - "Sources/pgBrain/Menu"
+  - "Sources/pgBrain/Views"
+  - "Sources/pgBrain/Windows"
+  - "Sources/pgBrain/Feedback"
+  - "Sources/pgBrain/Resources"
+  # AppKit views / text-system controllers in otherwise-logic directories.
+  - "Sources/pgBrain/CommandPalette/CommandPaletteView.swift"
+  - "Sources/pgBrain/CommandPalette/CommandPaletteWindow.swift"
+  - "Sources/pgBrain/Notebook/CompletingTextField.swift"
+  - "Sources/pgBrain/Notebook/CompletionController.swift"
+  - "Sources/pgBrain/Notebook/SQLHighlighter.swift"
+  # Live-connection / external-process / OS-keychain boundaries.
+  - "Sources/pgBrain/Services/ConnectionService.swift"
+  - "Sources/pgBrain/Services/SSHTunnelManager.swift"
+  - "Sources/pgBrain/Persistence/Keychain.swift"
+  - "Sources/pgBrain/Models/ConnectionIO.swift"
+  # Window/notification-bound state.
+  - "Sources/pgBrain/State/WindowManager.swift"
+  - "Sources/pgBrain/State/LongQueryNotifier.swift"
+  - "Tests"

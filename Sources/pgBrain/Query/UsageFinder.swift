@@ -31,6 +31,7 @@ enum UsageFinder {
         FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+          AND p.prokind IN ('f','p')
           AND (pg_get_functiondef(p.oid) ILIKE '%\(qualSafe)%'
             OR pg_get_functiondef(p.oid) ILIKE '%"\(bareSafe)"%'
             OR pg_get_functiondef(p.oid) ILIKE '% \(bareSafe) %'

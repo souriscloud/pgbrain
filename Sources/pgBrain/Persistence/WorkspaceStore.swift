@@ -47,6 +47,14 @@ final class WorkspaceStore {
         load()
     }
 
+    #if DEBUG
+    init(testURL: URL) {
+        self.url = testURL
+        load()
+    }
+    func flushNowForTests() { flush() }
+    #endif
+
     func workspaces(for connID: UUID) -> [SavedWorkspace] {
         (byConnection[connID] ?? []).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }

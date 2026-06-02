@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test + coverage
+    # Standard macOS runners are free for public repos (the 10× macOS multiplier
+    # only applies to private repos). The app imports AppKit, so no Linux runner.
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Start PostgreSQL
+        run: |
+          set -euo pipefail
+          brew install postgresql@16 || true
+          brew services start postgresql@16
+          export PATH="$(brew --prefix postgresql@16)/bin:$PATH"
+          echo "$(brew --prefix postgresql@16)/bin" >> "$GITHUB_PATH"
+          # Wait for the server to accept connections.
+          for _ in $(seq 1 30); do
+            if pg_isready -h 127.0.0.1 -p 5432 >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          # TestDB's local fallback connects as $USER to db "pgbrain_demo" with no
+          # password. Make that role a superuser so the superuser-gated E2E tests
+          # (publications / replication slots / FDW) run instead of skipping.
+          createuser -s "$USER" 2>/dev/null || true
+          createdb pgbrain_demo 2>/dev/null || true
+
+      - name: Run tests with coverage
+        run: swift test --enable-code-coverage
+
+      - name: Export lcov
+        run: |
+          set -euo pipefail
+          BIN="$(swift build --show-bin-path)"
+          XCTEST="$BIN/pgBrainPackageTests.xctest/Contents/MacOS/pgBrainPackageTests"
+          xcrun llvm-cov export -format=lcov \
+            "$XCTEST" \
+            -instr-profile "$BIN/codecov/default.profdata" \
+            -ignore-filename-regex='(\.build|Tests)/' > coverage.lcov
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.lcov
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}

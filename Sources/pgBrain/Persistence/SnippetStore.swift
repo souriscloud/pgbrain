@@ -30,6 +30,17 @@ final class SnippetStore {
         load()
     }
 
+    #if DEBUG
+    /// Test-only: back the store with an isolated file so `swift test` never
+    /// touches the real snippet library. `flush()` is synchronous-on-demand
+    /// via `flushNowForTests()`.
+    init(testURL: URL) {
+        self.url = testURL
+        load()
+    }
+    func flushNowForTests() { flush() }
+    #endif
+
     func add(name: String, body: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !body.isEmpty else { return }

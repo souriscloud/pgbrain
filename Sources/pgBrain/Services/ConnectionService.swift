@@ -474,3 +474,28 @@ final class ConnectionService {
         }
     }
 }
+
+#if DEBUG
+extension ConnectionService {
+    /// Test-only seam: bind an already-running `PostgresClient` (e.g. the one
+    /// owned by the E2E `TestDB` fixture) so the admin/query wrappers can be
+    /// driven against live Postgres without the connect/probe/Keychain path.
+    /// Same-file access lets it write the otherwise-`private(set)` `client`.
+    /// Excluded from release builds.
+    func attachClientForTests(_ client: PostgresClient) {
+        self.client = client
+        self.state = .connected(version: "test", since: .distantPast)
+    }
+
+    /// Test-only seam: inject a schema snapshot (and optionally mark PostGIS
+    /// present) without the live `loadSchema` catalog fetch, so the
+    /// schema-driven UI builders (command palette, sidebar) can be exercised
+    /// deterministically. Excluded from release builds.
+    func injectSchemaForTests(_ snapshot: SchemaSnapshot, postgis: String? = nil) {
+        self.schema = snapshot
+        if let postgis {
+            self.serverInfo = ServerInfo(versionShort: "PostgreSQL test", databaseSize: "0 MB", postgis: postgis)
+        }
+    }
+}
+#endif

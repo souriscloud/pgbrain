@@ -100,10 +100,12 @@ fi
 sparkle generate_keys -p >/dev/null 2>&1 \
     || error "Sparkle EdDSA private key missing from Keychain. Run: ./scripts/sparkle-tools.sh generate_keys"
 
-# Test gate (RELIMPR #3): a broken build shouldn't ship. The package is
-# executable-only today (no test target), so we skip rather than fail when
-# there are no tests — the gate activates automatically once a Tests target
-# or `.testTarget` is added.
+# Test gate (RELIMPR #3): a broken build shouldn't ship. Live since the
+# `pgBrainTests` target landed. The data-layer E2E tests need a Postgres to run
+# against (PGBRAIN_TEST_DSN, else a local pgbrain_demo); when none is reachable
+# they SKIP rather than fail, so this gate still passes on a DB-less box — it
+# catches build breaks and the always-on pure tests, and exercises the real
+# clone engine whenever a database is present.
 if [[ -d "Tests" ]] || grep -q '\.testTarget' Package.swift; then
     info "Running test suite"
     swift test >/dev/null || error "Tests failed — aborting release."

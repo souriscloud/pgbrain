@@ -21,11 +21,32 @@ final class SavedQueryStore {
 
     private(set) var queries: [SavedQuery] = []
 
+    /// Non-nil only in tests (DEBUG seam) so `swift test` writes to an
+    /// isolated file instead of the real library.
+    @ObservationIgnored private let overrideURL: URL?
+
     private init() {
+        self.overrideURL = nil
         load()
     }
 
-    private var fileURL: URL { AppSupport.directory.appendingPathComponent("saved-queries.json") }
+    #if DEBUG
+    init(testURL: URL) {
+        self.overrideURL = testURL
+        load()
+    }
+    /// `persist()` is async; this lets a test write synchronously then assert.
+    func flushNowForTests() {
+        try? AppSupport.ensureDirectoryExists()
+        if let data = try? JSONEncoder().encode(queries) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+    #endif
+
+    private var fileURL: URL {
+        overrideURL ?? AppSupport.directory.appendingPathComponent("saved-queries.json")
+    }
 
     func load() {
         guard let data = try? Data(contentsOf: fileURL),

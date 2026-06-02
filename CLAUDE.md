@@ -67,6 +67,25 @@ There are **two** notions of "Resources":
 ```
 First run regenerates `Resources/AppIcon.icns` if the generator is newer.
 
+## Testing
+```bash
+swift test                                            # local pgbrain_demo as $USER
+PGBRAIN_TEST_DSN=postgres://u:p@host:5432/db swift test  # explicit target
+```
+- **`Tests/pgBrainTests/`** — tier-1 (data-layer) E2E. `@testable import pgBrain`
+  drives the real query engines against a live Postgres in throwaway schemas.
+- **`TestDB`** picks the target from `PGBRAIN_TEST_DSN` (a `postgres://…` URL) or
+  falls back to a local `pgbrain_demo`. **No database reachable → tests SKIP**
+  (5s-bounded probe), they don't fail — so `swift test` is green in CI and the
+  release preflight gate (`scripts/release.sh`) passes on a DB-less box while
+  still running the real clone tests whenever a DB is present.
+- Engines meant to be E2E-tested expose a **pure entrypoint** with no
+  `ConnectionService`/UI dependency (e.g. `SchemaDuplicator.duplicate(client:…)`);
+  the `@MainActor` UI wrapper just adds operations tracking on top. Follow that
+  split when adding tests for other engines.
+- UI-driving E2E (XCUITest) is **not** here — it needs an Xcode UI-test bundle,
+  which collides with the no-`.xcodeproj` rule. Deferred deliberately (see PLAN).
+
 ## Window model (DataGrip-style)
 - **Welcome window** is shown at launch and whenever there are no other windows.
 - **One window per connection**. Closing all connection windows → Welcome reappears (handled by `AppDelegate.applicationShouldHandleReopen` + `WindowManager.connectionWindows` tracking).

@@ -16,7 +16,7 @@ extension Notification.Name {
 final class AppSettings {
     static let shared = AppSettings()
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private let keyPrefix = "pgbrain.settings."
 
     var restoreLastSession: Bool {
@@ -68,8 +68,18 @@ final class AppSettings {
         didSet { defaults.set(sparkleChannel, forKey: keyPrefix + "sparkleChannel") }
     }
 
-    private init() {
-        let d = UserDefaults.standard
+    private convenience init() {
+        self.init(defaults: .standard)
+    }
+
+    #if DEBUG
+    convenience init(testDefaults: UserDefaults) {
+        self.init(defaults: testDefaults)
+    }
+    #endif
+
+    private init(defaults d: UserDefaults) {
+        self.defaults = d
         // First-launch defaults so the UI binds to a real value.
         self.restoreLastSession = d.object(forKey: "pgbrain.settings.restoreLastSession") as? Bool ?? true
         self.defaultRowLimit = (d.object(forKey: "pgbrain.settings.defaultRowLimit") as? Int) ?? 1000

@@ -40,6 +40,18 @@ let package = Package(
                     "-Xlinker", "@executable_path/../Frameworks",
                 ])
             ]
+        ),
+        .testTarget(
+            name: "pgBrainTests",
+            dependencies: [
+                "pgBrain",
+                .product(name: "PostgresNIO", package: "postgres-nio"),
+            ],
+            path: "Tests/pgBrainTests",
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency"),
+                .swiftLanguageMode(.v6)
+            ]
         )
     ]
 )

@@ -632,6 +632,88 @@ Five deferred items from the iter-40 review, picked up.
 **Verified**: `swift build` ✓, `./scripts/bundle.sh` ✓ + launch smoke ✓; the new
 clone paths (partitioning/triggers/RLS) validated against PG18 `pgbrain_demo`.
 
+### Iter 42 — E2E test harness (tier 1: data layer) (2026-06-01, unreleased)
+First automated tests. Targets the layer that can corrupt a user's database —
+the query engines — driven against a real Postgres.
+
+- **`pgBrainTests` target** added to `Package.swift` (Swift 6 / strict
+  concurrency, depends on `pgBrain` + PostgresNIO, `@testable import`).
+- **`TestDB` fixture** — builds a `PostgresClient` from `PGBRAIN_TEST_DSN` (a
+  `postgres://…` URL) or falls back to a local `pgbrain_demo` as `$USER`. A
+  5s-bounded reachability probe means a box with **no Postgres SKIPS** (not
+  fails), so the release gate stays green in CI. Helpers spin up / tear down
+  collision-resistant scratch schemas (`pgb_test_<uuid>`).
+- **`SchemaDuplicator` made testable**: extracted a pure engine entrypoint
+  `duplicate(client:from:to:options:)` (no `ConnectionService`/UI dependency);
+  the `@MainActor` `ConnectionService` wrapper now just wraps it with operations
+  tracking. Behaviour unchanged.
+- **`SchemaDuplicatorTests`** — full round-trip (identity PK + serial FK child +
+  data + view) asserted by re-querying the clone: row counts, FK recreated, view
+  resolves to the cloned tables, identity stays `GENERATED ALWAYS`, serial
+  default repointed, and a **fresh insert into the clone succeeds**. Plus a
+  structure-only clone (tables present, zero rows).
+- **`ConnectionExchangeTests`** — always-on, no DB: connection-bundle codec
+  round-trips every field, rejects foreign JSON, accepts a single `v1` object.
+- **Bug caught + fixed on day one** (`SchemaDuplicator`): cloning a table with a
+  `GENERATED … AS IDENTITY` column left the clone's identity sequence at its
+  start value (rows were force-inserted with `OVERRIDING SYSTEM VALUE`), so the
+  user's **first insert collided on the PK**. Fix: skip identity-owned sequences
+  in `copySequences` (they're recreated by `LIKE INCLUDING IDENTITY`; copying
+  them also left an orphan sequence), and add `resyncIdentitySequences` to
+  `setval` each identity sequence to `max(col)` after data copy. Serial columns
+  were already correct (`setval` from the source's `last_value`).
+- Release **test gate is now live** (auto-activated by the `Tests/` dir);
+  comment in `scripts/release.sh` updated to document the DB-skip semantics.
+
+**Verified**: `swift test` → 5 passed in 0.43s against local PG18; with the DSN
+pointed at a dead port, 2 DB tests skip in ~5s each with **0 failures**. The
+identity fix re-validated by hand in psql (fresh inserts on both the identity and
+serial tables succeed; no orphan sequence left behind).
+
+### Iter 43 — Data-layer coverage grind (2026-06-02, unreleased)
+Pushed the data engines toward full coverage. **217 tests, 0 failures**; the core
+`Query/` + `Schema/` directories are at **~92% line coverage** (every file that
+was at 0% is now covered).
+
+- **New suites** (all driven against live PG via `TestDB`, skip-on-no-DB):
+  `QueryRunner` (stringify across scalar types, auto-limit, command tags,
+  search-path reset, tracker/cancellation wiring), `AdminActions` (every DDL/maint
+  entry point + not-connected + failure/rollback paths), `TableInspector` (rich
+  table structure + DDL render, views/matviews, partitioning, not-found),
+  `FunctionInspector`, `ReplicationFetcher` + `ForeignDataFetcher` (superuser-gated
+  publication/slot/FDW creation), `SchemaDiff` + `SchemaIndex` (pure), and the
+  `ConnectionIO` clipboard paths.
+- **`ConnectionService.attachClientForTests`** — a `#if DEBUG` test seam that binds
+  an already-running `PostgresClient` (the `TestDB` fixture's) so the
+  `ConnectionService`-coupled `AdminActions` can be exercised end-to-end without the
+  live connect/probe/Keychain path. Excluded from release builds.
+- 3 real bugs from iter-41/42 stand; this round added coverage, found no new ones.
+- **Pure SQL engines under `Notebook/`** covered (~99%): `SQLTokenizer`,
+  `SQLScope`, `SQLFormatter`, `JSONFormatter`, `SQLHoverResolver`, `CompletionItem`,
+  plus `SQLCompletionProvider` (94% — schema-aware ranking across every context).
+- **Command palette** covered: `CommandMatcher` 97% (pure fuzzy scoring + ranges),
+  `CommandProviders` 93% — driven by a second DEBUG seam,
+  `ConnectionService.injectSchemaForTests`, so the palette builds against a known
+  schema + workspace with no `loadSchema`/disk writes. The schema-driven item
+  builders are asserted per selection state (table vs scratchpad vs view), and the
+  *safe* action closures are executed for coverage (the unsafe few — global-store
+  mutations, Sparkle, Settings — are filtered out by id).
+- **Persistence stores** covered ~80–93% via per-store DEBUG seams
+  (`init(testURL:)` for the JSON stores, `init(testDefaults:)` for the
+  `UserDefaults`-backed ones) so `swift test` writes to isolated temp files /
+  throwaway suites and never touches the user's real library: `SavedQueryStore`,
+  `SnippetStore`, `QueryHistoryStore` (incl. FIFO cap), `ColumnLayoutStore`,
+  `WorkspaceStore`, `ConnectionStore` (upsert/dedup-import), `SchemaVisibility`,
+  `AppSettings` (font clamping + persistence). `SessionState`'s `Codable` model is
+  round-tripped directly (no seam).
+- **Not coverable via `swift test`** (documented boundary): modal `NSOpen/SavePanel`
+  (`ConnectionIO` file paths), the connect/probe/TLS path + `SSHTunnelManager`, the
+  AppKit text/view layer (`SQLHighlighter`, `CompletionController`,
+  `CompletingTextField`, `CommandPaletteView`), `Keychain` (real keychain), and
+  `SessionStateStore.snapshotAndPersist` (needs a live `AppDelegate`/window manager)
+  — these need XCUITest (deferred, conflicts with the no-`.xcodeproj` rule).
+- **307 tests, 0 failures**; release build verified (DEBUG seams excluded).
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

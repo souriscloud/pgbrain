@@ -228,7 +228,11 @@ enum SchemaFetcher {
         """
         let rows = try await client.query(sql)
         var out: [FunctionNode] = []
-        for try await (schema, name, kindChar, args, ret) in rows.decode((String, String, String, String, String).self) {
+        // `pg_get_function_result` is NULL for procedures (they return nothing),
+        // so decode the result type as optional — decoding it as a plain String
+        // throws the moment the database contains any procedure, which would
+        // fail the entire schema load. FunctionNode.returnType is "" for procs.
+        for try await (schema, name, kindChar, args, ret) in rows.decode((String, String, String, String, String?).self) {
             let kind: FunctionNode.Kind
             switch kindChar {
             case "p": kind = .procedure
@@ -241,7 +245,7 @@ enum SchemaFetcher {
                 name: name,
                 kind: kind,
                 arguments: "(\(args))",
-                returnType: ret
+                returnType: ret ?? ""
             ))
         }
         return out

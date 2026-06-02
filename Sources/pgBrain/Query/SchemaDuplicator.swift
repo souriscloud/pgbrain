@@ -42,23 +42,7 @@ enum SchemaDuplicator {
         guard let client = service.client else { return .failure(AdminError.notConnected) }
         let op = service.operations.begin(kind: .update, summary: "Duplicate schema \(source) → \(target)")
         do {
-            try await client.withTransaction(logger: logger) { c in
-                try await run(c, "CREATE SCHEMA \(ident(target))")
-                if options.sequences { try await copySequences(c, source, target) }
-                if options.tableStructure { try await copyTables(c, source, target) }
-                if options.tableStructure && options.sequences { try await repointSerialDefaults(c, source, target) }
-                if options.tableStructure && options.tableData { try await copyData(c, source, target) }
-                if options.functions { try await copyFunctions(c, source, target) }
-                if options.views { try await copyViews(c, source, target, materialized: false, withData: false) }
-                if options.matviews { try await copyViews(c, source, target, materialized: true, withData: options.tableData) }
-                if options.tableStructure && options.foreignKeys { try await copyForeignKeys(c, source, target) }
-                if options.tableStructure && options.triggers { try await copyTriggers(c, source, target) }
-                if options.tableStructure && options.policies { try await copyPolicies(c, source, target) }
-                try await run(c, "SET search_path TO DEFAULT")
-            }
-            // Privileges are intentionally outside the transaction: best-effort,
-            // each statement independent, failures swallowed.
-            if options.privileges { await copyPrivileges(client, source, target) }
+            try await duplicate(client: client, from: source, to: target, options: options)
             service.operations.finish(op, status: .succeeded)
             return .success(())
         } catch {
@@ -68,13 +52,55 @@ enum SchemaDuplicator {
         }
     }
 
+    /// Pure engine entrypoint — no UI dependency. The structural clone runs in
+    /// ONE transaction; privileges (if requested) are a best-effort post-commit
+    /// pass. Throws on failure. Used by the `ConnectionService` wrapper above and
+    /// driven directly by the E2E test suite against a throwaway schema.
+    static func duplicate(client: PostgresClient, from source: String, to target: String,
+                          options: Options) async throws {
+        try await client.withTransaction(logger: logger) { c in
+            try await run(c, "CREATE SCHEMA \(ident(target))")
+            if options.sequences { try await copySequences(c, source, target) }
+            if options.tableStructure { try await copyTables(c, source, target) }
+            if options.tableStructure && options.sequences { try await repointSerialDefaults(c, source, target) }
+            if options.tableStructure && options.tableData { try await copyData(c, source, target) }
+            // After bulk-loading rows (identity values forced in via OVERRIDING
+            // SYSTEM VALUE), advance each cloned identity sequence to max(col) so
+            // the user's first insert into the clone doesn't collide on the PK.
+            if options.tableStructure && options.tableData { try await resyncIdentitySequences(c, target) }
+            if options.functions { try await copyFunctions(c, source, target) }
+            if options.views { try await copyViews(c, source, target, materialized: false, withData: false) }
+            if options.matviews { try await copyViews(c, source, target, materialized: true, withData: options.tableData) }
+            if options.tableStructure && options.foreignKeys { try await copyForeignKeys(c, source, target) }
+            if options.tableStructure && options.triggers { try await copyTriggers(c, source, target) }
+            if options.tableStructure && options.policies { try await copyPolicies(c, source, target) }
+            try await run(c, "SET search_path TO DEFAULT")
+        }
+        // Privileges are intentionally outside the transaction: best-effort,
+        // each statement independent, failures swallowed.
+        if options.privileges { await copyPrivileges(client, source, target) }
+    }
+
     // MARK: - Sequences
 
     private static func copySequences(_ c: PostgresConnection, _ src: String, _ tgt: String) async throws {
+        // Skip identity-owned sequences (deptype 'i'): `CREATE TABLE … (LIKE …
+        // INCLUDING IDENTITY)` in copyTables recreates those itself. Copying
+        // them here both leaves an orphan sequence behind AND wastes a setval on
+        // a sequence the table doesn't actually use — the real identity sequence
+        // is reset later by `resyncIdentitySequences`. Serial-owned (deptype 'a')
+        // and standalone sequences are still copied.
         let sql = """
-        SELECT sequencename, data_type::text, start_value, min_value, max_value,
-               increment_by, cycle, cache_size, last_value
-        FROM pg_sequences WHERE schemaname = \(lit(src))
+        SELECT s.sequencename, s.data_type::text, s.start_value, s.min_value, s.max_value,
+               s.increment_by, s.cycle, s.cache_size, s.last_value
+        FROM pg_sequences s
+        WHERE s.schemaname = \(lit(src))
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_depend d
+            JOIN pg_class sc ON sc.oid = d.objid AND sc.relkind = 'S'
+            JOIN pg_namespace sn ON sn.oid = sc.relnamespace
+            WHERE sc.relname = s.sequencename AND sn.nspname = s.schemaname AND d.deptype = 'i'
+          )
         """
         let rows = try await c.query(PostgresQuery(unsafeSQL: sql), logger: logger)
         for try await (name, type, start, minv, maxv, inc, cycle, cache, last)
@@ -125,6 +151,34 @@ enum SchemaDuplicator {
             for (col, expr) in fixes {
                 try await run(c, "ALTER TABLE \(ident(tgt)).\(ident(name)) ALTER COLUMN \(ident(col)) SET DEFAULT \(expr)")
             }
+        }
+    }
+
+    /// Reset every identity-owned sequence in the clone to its column's current
+    /// maximum, so `GENERATED … AS IDENTITY` columns keep numbering from where the
+    /// copied data left off. Serial-owned sequences don't need this — they're
+    /// `setval`'d from the source's `last_value` in `copySequences`.
+    private static func resyncIdentitySequences(_ c: PostgresConnection, _ tgt: String) async throws {
+        let sql = """
+        SELECT tbl.relname, att.attname
+        FROM pg_depend d
+        JOIN pg_class seq ON seq.oid = d.objid AND seq.relkind = 'S'
+        JOIN pg_namespace n ON n.oid = seq.relnamespace
+        JOIN pg_class tbl ON tbl.oid = d.refobjid
+        JOIN pg_attribute att ON att.attrelid = d.refobjid AND att.attnum = d.refobjsubid
+        WHERE n.nspname = \(lit(tgt)) AND d.deptype = 'i'
+        """
+        let rows = try await c.query(PostgresQuery(unsafeSQL: sql), logger: logger)
+        var cols: [(String, String)] = []
+        for try await (table, column) in rows.decode((String, String).self) { cols.append((table, column)) }
+        for (table, column) in cols {
+            // is_called = false when the table is empty so the next value is the
+            // sequence's START, not START+1.
+            let maxExpr = "(SELECT max(\(ident(column))) FROM \(ident(tgt)).\(ident(table)))"
+            try await run(c, """
+            SELECT setval(pg_get_serial_sequence(\(lit("\(tgt).\(table)")), \(lit(column))),
+                          COALESCE(\(maxExpr), 1), \(maxExpr) IS NOT NULL)
+            """)
         }
     }
 
