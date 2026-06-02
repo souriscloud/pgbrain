@@ -67,6 +67,7 @@ enum UpdateApplier {
     enum Failure: Error, LocalizedError {
         case noPrimaryKey
         case unknownPrimaryKeyColumn(String)
+        case staleRow(String)
 
         var errorDescription: String? {
             switch self {
@@ -74,6 +75,8 @@ enum UpdateApplier {
                 return "This table has no primary key; rows can't be addressed for an UPDATE."
             case .unknownPrimaryKeyColumn(let name):
                 return "Primary-key column \"\(name)\" isn't in the loaded result set."
+            case .staleRow(let pk):
+                return "The row \(pk) no longer exists — it was deleted or its key changed since this grid loaded. Nothing was saved; refresh and try again."
             }
         }
     }
@@ -108,6 +111,7 @@ enum UpdateApplier {
         let qualifiedTable = SQLIdent.qualified(schema: table.schema, name: table.name)
         let logger = pgbrainQuietLogger
 
+        do {
         try await client.withTransaction(logger: logger) { connection in
             if let opID = operationID, let tracker {
                 let pid = try await OperationsHelpers.fetchBackendPID(connection, logger: logger)
@@ -161,6 +165,7 @@ enum UpdateApplier {
 
                 // WHERE pk1 = $N+1 AND pk2 = $N+2 ...
                 var wherePieces: [String] = []
+                var pkDisplay: [String] = []
                 for (offset, pkCol) in pkColumns.enumerated() {
                     guard let colIndex = columnIndexByName[pkCol.name] else {
                         throw Failure.unknownPrimaryKeyColumn(pkCol.name)
@@ -169,6 +174,7 @@ enum UpdateApplier {
                     let placeholder = "$\(placeholderIndex)"
                     let typeCast = "::" + pkCol.typeName
                     wherePieces.append("\(SQLIdent.quote(pkCol.name)) = \(placeholder)\(typeCast)")
+                    pkDisplay.append("\(pkCol.name)=\(originalRow[colIndex] ?? "NULL")")
                     if let v = originalRow[colIndex] {
                         binds.append(v)
                     } else {
@@ -179,7 +185,14 @@ enum UpdateApplier {
 
                 let sql = "UPDATE \(qualifiedTable) SET \(setPieces.joined(separator: ", ")) WHERE \(wherePieces.joined(separator: " AND "))"
                 let query = PostgresQuery(unsafeSQL: sql, binds: binds)
-                _ = try await connection.query(query, logger: logger)
+                // Materialise so we can read the affected-row count: a 0-row
+                // UPDATE means the row was deleted (or its PK changed) between
+                // load and apply. Surface that instead of silently "succeeding"
+                // — throwing rolls back the whole batch via withTransaction.
+                let result = try await connection.query(query, logger: logger).get()
+                if result.metadata.rows == 0 {
+                    throw Failure.staleRow(pkDisplay.joined(separator: ", "))
+                }
             }
 
             // INSERTs run after UPDATEs, still inside the one transaction.
@@ -244,6 +257,12 @@ enum UpdateApplier {
                 let sql = "DELETE FROM \(qualifiedTable) WHERE \(wherePieces.joined(separator: " AND "))"
                 _ = try await connection.query(PostgresQuery(unsafeSQL: sql, binds: binds), logger: logger)
             }
+        }
+        } catch let txError as PostgresTransactionError {
+            // withTransaction wraps a thrown closure error; surface the real
+            // cause (our Failure / the server's PSQLError) so callers show a
+            // meaningful message instead of the opaque transaction wrapper.
+            throw txError.closureError ?? txError
         }
     }
 }

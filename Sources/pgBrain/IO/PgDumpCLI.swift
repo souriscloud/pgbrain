@@ -98,6 +98,92 @@ enum PgDumpCLI {
     /// Run `pg_dump` for `connection` writing to `destination`. `password` is
     /// piped via the `PGPASSWORD` env var so it never appears on the command
     /// line (visible in `ps`).
+    /// Pure builder for the `pg_dump` argument vector — extracted so it can be
+    /// unit-tested without spawning a subprocess. The password is never an
+    /// argument (it's passed via `PGPASSWORD`), so this is safe to log.
+    static func dumpArguments(
+        connection: Connection,
+        format: Format,
+        destinationPath: String,
+        extraArgs: [String] = []
+    ) -> [String] {
+        var args = [
+            "--host", connection.host,
+            "--port", String(connection.port),
+            "--username", connection.username,
+            "--no-password",
+            "--format", format.flag,
+            "--file", destinationPath,
+        ]
+        if !connection.database.isEmpty {
+            args.append(connection.database)
+        }
+        args.append(contentsOf: extraArgs)
+        return args
+    }
+
+    /// Options for `pg_restore`. `clean` drops objects before recreating them;
+    /// `singleTransaction` makes the whole restore atomic (and disables
+    /// parallel `--jobs`, which Postgres forbids in that mode).
+    struct RestoreOptions: Sendable {
+        var clean: Bool = false
+        var noOwner: Bool = false
+        var singleTransaction: Bool = false
+        var jobs: Int = 1
+
+        init(clean: Bool = false, noOwner: Bool = false, singleTransaction: Bool = false, jobs: Int = 1) {
+            self.clean = clean
+            self.noOwner = noOwner
+            self.singleTransaction = singleTransaction
+            self.jobs = jobs
+        }
+    }
+
+    /// Pure builder for the `pg_restore` argument vector. Restores `archivePath`
+    /// (a custom/directory/tar archive) into `dbname`.
+    static func restoreArguments(
+        connection: Connection,
+        dbname: String,
+        archivePath: String,
+        options: RestoreOptions = RestoreOptions()
+    ) -> [String] {
+        var args = [
+            "--host", connection.host,
+            "--port", String(connection.port),
+            "--username", connection.username,
+            "--no-password",
+            "--dbname", dbname,
+        ]
+        if options.clean { args.append(contentsOf: ["--clean", "--if-exists"]) }
+        if options.noOwner { args.append("--no-owner") }
+        if options.singleTransaction {
+            // `--jobs` is incompatible with a single transaction.
+            args.append("--single-transaction")
+        } else if options.jobs > 1 {
+            args.append(contentsOf: ["--jobs", String(options.jobs)])
+        }
+        args.append(archivePath)
+        return args
+    }
+
+    /// Run `pg_restore`, reading `archive` into the target database. Surfaces
+    /// the same `Result`/error shape as `dump` (`bytesWritten` is 0 — restore
+    /// writes to the database, not a file).
+    static func restore(
+        connection: Connection,
+        password: String,
+        dbname: String,
+        archive: URL,
+        options: RestoreOptions = RestoreOptions()
+    ) async throws -> Result {
+        let started = Date()
+        let binary = try locateBinary(named: "pg_restore")
+        let args = restoreArguments(connection: connection, dbname: dbname,
+                                    archivePath: archive.path, options: options)
+        return try await runTool(binary: binary, args: args, password: password,
+                                 bytesAt: nil, started: started)
+    }
+
     static func dump(
         connection: Connection,
         password: String,
@@ -107,20 +193,19 @@ enum PgDumpCLI {
     ) async throws -> Result {
         let started = Date()
         let binary = try locateBinary(named: "pg_dump")
+        let args = dumpArguments(connection: connection, format: format,
+                                 destinationPath: destination.path, extraArgs: extraArgs)
+        return try await runTool(binary: binary, args: args, password: password,
+                                 bytesAt: destination, started: started)
+    }
 
-        var args = [
-            "--host", connection.host,
-            "--port", String(connection.port),
-            "--username", connection.username,
-            "--no-password",
-            "--format", format.flag,
-            "--file", destination.path,
-        ]
-        if !connection.database.isEmpty {
-            args.append(connection.database)
-        }
-        args.append(contentsOf: extraArgs)
-
+    /// Shared subprocess runner for `pg_dump` / `pg_restore`: pipes the password
+    /// via `PGPASSWORD`, drains stderr concurrently to avoid pipe-buffer
+    /// deadlock, and throws on a non-zero exit. `bytesAt` (when set) is sized
+    /// for the `bytesWritten` field after the tool finishes.
+    private static func runTool(
+        binary: URL, args: [String], password: String, bytesAt: URL?, started: Date
+    ) async throws -> Result {
         let process = Process()
         process.executableURL = binary
         process.arguments = args
@@ -147,7 +232,9 @@ enum PgDumpCLI {
         }
         process.waitUntilExit()
 
-        let bytes = (try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? Int) ?? 0
+        let bytes = bytesAt.flatMap {
+            (try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? Int) ?? 0
+        } ?? 0
         let result = Result(
             exitCode: process.terminationStatus,
             stderr: stderr,

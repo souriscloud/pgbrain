@@ -186,6 +186,41 @@ final class UpdateApplierTests: XCTestCase {
         }
     }
 
+    func testUpdateOnVanishedRowThrowsStaleRowAndRollsBackBatch() async throws {
+        let db = try await TestDB.connectOrSkip(); defer { db.shutdown() }
+        let schema = TestDB.uniqueTag(); await db.dropSchemas(schema)
+        do {
+            try await db.exec("CREATE SCHEMA \"\(schema)\"")
+            let t = try await makeT(db, schema)                       // id=1
+            try await db.exec("INSERT INTO \"\(schema)\".t (id,n) VALUES (2,20)")
+            // The grid loaded both rows…
+            let rows: [[String?]] = [
+                ["2", "20", nil, nil, nil],   // rowIndex 0 → id=2 (still present)
+                ["1", "10", nil, nil, nil],   // rowIndex 1 → id=1 (about to vanish)
+            ]
+            // …then id=1 was deleted out from under us.
+            try await db.exec("DELETE FROM \"\(schema)\".t WHERE id=1")
+
+            let edits = [
+                UpdateApplier.Edit(rowIndex: 0, cells: [.init(column: col(t, "n"), value: .literal("222"))]),
+                UpdateApplier.Edit(rowIndex: 1, cells: [.init(column: col(t, "n"), value: .literal("111"))]),
+            ]
+            await XCTAssertThrowsErrorAsync(
+                try await UpdateApplier.apply(edits: edits, table: t, originalRows: rows, client: db.client)
+            ) {
+                guard case UpdateApplier.Failure.staleRow(let pk) = $0 else {
+                    return XCTFail("expected .staleRow, got \($0)")
+                }
+                XCTAssertTrue(pk.contains("id=1"))
+                XCTAssertTrue($0.localizedDescription.contains("no longer exists"))
+            }
+            // The id=2 update (applied first) must be rolled back by the batch abort.
+            let n2 = try await db.scalarInt("SELECT n FROM \"\(schema)\".t WHERE id=2")
+            XCTAssertEqual(n2, 20, "the whole transaction rolled back — id=2 unchanged")
+        } catch { await db.dropSchemas(schema); throw error }
+        await db.dropSchemas(schema)
+    }
+
     // MARK: operation tracking (cancellation attach)
 
     func testUpdateRegistersCancellableOperation() async throws {
