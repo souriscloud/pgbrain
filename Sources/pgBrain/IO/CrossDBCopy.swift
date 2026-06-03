@@ -13,14 +13,18 @@ import PostgresNIO
 /// memory hit is a single 64KB ByteBuffer.
 enum CrossDBCopy {
     enum Strategy: String, CaseIterable, Identifiable {
-        case append, truncateAndInsert
+        case append, truncateAndInsert, upsert
         var id: String { rawValue }
         var uiLabel: String {
             switch self {
             case .append: return "Append (keep existing rows)"
             case .truncateAndInsert: return "Truncate then insert"
+            case .upsert: return "Upsert (insert or update on conflict)"
             }
         }
+        /// The upsert strategy needs a conflict target (the columns whose
+        /// collision triggers an UPDATE instead of a failed INSERT).
+        var needsConflictColumns: Bool { self == .upsert }
     }
 
     struct Mapping: Sendable {
@@ -36,6 +40,55 @@ enum CrossDBCopy {
         let targetTable: String
         let strategy: Strategy
         let mappings: [Mapping]
+        /// Create the target table (from the source column types) when it
+        /// doesn't already exist, instead of failing the copy.
+        let autoCreate: Bool
+        /// Conflict-target columns for `.upsert`. Ignored by other strategies.
+        let conflictColumns: [String]
+
+        init(source: TableNode, sourceClient: PostgresClient, target: TargetEndpoint,
+             targetSchema: String, targetTable: String, strategy: Strategy,
+             mappings: [Mapping], autoCreate: Bool = false, conflictColumns: [String] = []) {
+            self.source = source
+            self.sourceClient = sourceClient
+            self.target = target
+            self.targetSchema = targetSchema
+            self.targetTable = targetTable
+            self.strategy = strategy
+            self.mappings = mappings
+            self.autoCreate = autoCreate
+            self.conflictColumns = conflictColumns
+        }
+    }
+
+    // MARK: - SQL builders (pure)
+
+    /// `CREATE TABLE IF NOT EXISTS schema.table (target_col source_type, …)` —
+    /// each target column adopts its source column's declared type.
+    static func createTableSQL(schema: String, table: String, mappings: [Mapping]) -> String {
+        let cols = mappings.map { "\(SQLIdent.quote($0.targetColumnName)) \($0.sourceColumn.typeName)" }
+        return "CREATE TABLE IF NOT EXISTS \(SQLIdent.qualified(schema: schema, name: table)) (\(cols.joined(separator: ", ")))"
+    }
+
+    /// `INSERT INTO target (cols) SELECT cols FROM temp ON CONFLICT (keys) …` —
+    /// non-key columns are refreshed from `EXCLUDED`; if every column is part of
+    /// the conflict key there's nothing to update, so it degrades to DO NOTHING.
+    static func upsertSQL(fromTemp tempTable: String, schema: String, table: String,
+                          targetColumns: [String], conflictColumns: [String]) -> String {
+        let target = SQLIdent.qualified(schema: schema, name: table)
+        let colList = targetColumns.map { SQLIdent.quote($0) }.joined(separator: ", ")
+        let conflictList = conflictColumns.map { SQLIdent.quote($0) }.joined(separator: ", ")
+        let updateCols = targetColumns.filter { !conflictColumns.contains($0) }
+        let action: String
+        if updateCols.isEmpty {
+            action = "DO NOTHING"
+        } else {
+            let sets = updateCols.map { "\(SQLIdent.quote($0)) = EXCLUDED.\(SQLIdent.quote($0))" }
+                .joined(separator: ", ")
+            action = "DO UPDATE SET \(sets)"
+        }
+        return "INSERT INTO \(target) (\(colList)) SELECT \(colList) FROM \(SQLIdent.quote(tempTable)) "
+            + "ON CONFLICT (\(conflictList)) \(action)"
     }
 
     /// Either an already-leased client (when the target is currently open in
@@ -95,15 +148,38 @@ enum CrossDBCopy {
                             PostgresQuery(unsafeSQL: "SET LOCAL search_path = \(SQLIdent.quote(plan.targetSchema))"),
                             logger: pgbrainQuietLogger
                         )
-                        if plan.strategy == .truncateAndInsert {
-                            let qualifiedTarget = SQLIdent.qualified(schema: plan.targetSchema, name: plan.targetTable)
+                        let qualifiedTarget = SQLIdent.qualified(schema: plan.targetSchema, name: plan.targetTable)
+                        if plan.autoCreate {
                             _ = try await targetConn.query(
-                                PostgresQuery(unsafeSQL: "TRUNCATE \(qualifiedTarget)"),
+                                PostgresQuery(unsafeSQL: createTableSQL(
+                                    schema: plan.targetSchema, table: plan.targetTable, mappings: plan.mappings)),
                                 logger: pgbrainQuietLogger
                             )
                         }
+                        // Pick the COPY target: upsert stages into a temp table
+                        // (dropped on commit) so we can INSERT … ON CONFLICT from it
+                        // afterwards; other strategies copy straight into the table.
+                        let copyTarget: String
+                        var tempName: String? = nil
+                        if plan.strategy == .upsert {
+                            let tmp = "_pgb_copy_" + UUID().uuidString.prefix(8).lowercased()
+                            _ = try await targetConn.query(
+                                PostgresQuery(unsafeSQL: "CREATE TEMP TABLE \(SQLIdent.quote(tmp)) (LIKE \(qualifiedTarget) INCLUDING DEFAULTS) ON COMMIT DROP"),
+                                logger: pgbrainQuietLogger
+                            )
+                            tempName = tmp
+                            copyTarget = tmp
+                        } else {
+                            if plan.strategy == .truncateAndInsert {
+                                _ = try await targetConn.query(
+                                    PostgresQuery(unsafeSQL: "TRUNCATE \(qualifiedTarget)"),
+                                    logger: pgbrainQuietLogger
+                                )
+                            }
+                            copyTarget = plan.targetTable
+                        }
                         try await targetConn.copyFrom(
-                            table: plan.targetTable,
+                            table: copyTarget,
                             columns: targetColumns,
                             format: .text(.init()),
                             logger: pgbrainQuietLogger
@@ -137,6 +213,15 @@ enum CrossDBCopy {
                             if buffer.readableBytes > 0 {
                                 try await writer.write(buffer)
                             }
+                        }
+                        // Upsert: fold the staged temp rows into the real table.
+                        if plan.strategy == .upsert, let tempName {
+                            _ = try await targetConn.query(
+                                PostgresQuery(unsafeSQL: upsertSQL(
+                                    fromTemp: tempName, schema: plan.targetSchema, table: plan.targetTable,
+                                    targetColumns: targetColumns, conflictColumns: plan.conflictColumns)),
+                                logger: pgbrainQuietLogger
+                            )
                         }
                         _ = try await targetConn.query(
                             PostgresQuery(unsafeSQL: "COMMIT"),
