@@ -6,6 +6,14 @@
         <link>https://github.com/souriscloud/pgbrain</link>
         <language>en</language>
         <item>
+            <title>0.9.5</title>
+            <pubDate>Thu, 04 Jun 2026 03:06:22 +0200</pubDate>
+            <sparkle:version>27</sparkle:version>
+            <sparkle:shortVersionString>0.9.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.9.5/pgBrain-0.9.5.dmg" length="11354489" type="application/octet-stream" sparkle:edSignature="mZResHO82UvKTZN0tobO+yb0ZxfyUUBJTleimbGbR998Ugi+8pp9D/Iz+9cgNvxOtiz4rusL/d+H61poyS7oDQ=="/>
+        </item>
+        <item>
             <title>0.9.4</title>
             <pubDate>Thu, 04 Jun 2026 02:27:35 +0200</pubDate>
             <sparkle:version>26</sparkle:version>
