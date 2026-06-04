@@ -38,6 +38,7 @@ struct CreateDatabaseSheet: View {
                         .font(.system(.body, design: .monospaced))
                 }
             }
+            .disabled(saving)
             if let error {
                 Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             }
@@ -46,6 +47,7 @@ struct CreateDatabaseSheet: View {
                 Button("Cancel", action: onClose).keyboardShortcut(.cancelAction)
                 Button("Create") { run() }
                     .buttonStyle(.borderedProminent)
+                    .tint(Tokens.Brand.primary)
                     .keyboardShortcut(.return)
                     .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || saving)
             }

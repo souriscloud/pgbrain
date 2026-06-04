@@ -97,6 +97,7 @@ struct RestoreDatabaseSheet: View {
                 Button(done ? "Close" : "Cancel", action: onClose).keyboardShortcut(.cancelAction)
                 Button("Restore") { run() }
                     .buttonStyle(.borderedProminent)
+                    .tint(Tokens.Brand.primary)
                     .keyboardShortcut(.return)
                     .disabled(!canRun)
             }

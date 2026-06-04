@@ -1553,7 +1553,7 @@ private final class DataCellView: NSTableCellView, NSTextFieldDelegate {
         // 8pt left inset leaves room for the dirty/applied rail, 6pt
         // right inset stops content from kissing the column boundary.
         let inset = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 6)
-        let h = NSFont.systemFont(ofSize: 12).boundingRectForFont.height + 2
+        let h = NSFont.systemFont(ofSize: CellFormat.baseSize).boundingRectForFont.height + 2
         field.frame = NSRect(
             x: inset.left,
             y: (bounds.height - h) / 2,

@@ -422,6 +422,7 @@ private struct HelpShortcuts: View {
                 ShortcutRow(keys: ["⌘", "↵"], label: "Run statement under caret / selection")
                 ShortcutRow(keys: ["⌥", "Esc"], label: "Trigger autocomplete")
                 ShortcutRow(keys: ["⌘", "⌫"], label: "Stage selected row(s) for delete")
+                ShortcutRow(keys: ["⌃", "⌘", "N"], label: "Set the focused cell to NULL")
                 ShortcutRow(keys: ["⌘", "Z"], label: "Undo a pending cell edit")
                 ShortcutRow(keys: ["⌘", "+"], label: "Increase editor font size")
                 ShortcutRow(keys: ["⌘", "−"], label: "Decrease editor font size")
@@ -431,6 +432,7 @@ private struct HelpShortcuts: View {
                 ShortcutRow(keys: ["⌘", "⇧", "→"], label: "Next page of rows")
                 ShortcutRow(keys: ["⌘", ","], label: "Settings")
                 ShortcutRow(keys: ["⌘", "W"], label: "Close tab / window")
+                ShortcutRow(keys: ["⌘", "?"], label: "Show this help")
             }
         }
     }

@@ -770,7 +770,7 @@ private final class SidebarCellView: NSTableCellView {
 
     @MainActor
     func configure(node: SidebarNode) {
-        icon.image = NSImage(systemSymbolName: node.symbol, accessibilityDescription: nil)
+        icon.image = NSImage(systemSymbolName: node.symbol, accessibilityDescription: node.displayName)
         title.stringValue = node.displayName
         if let s = node.secondary {
             secondary.stringValue = s

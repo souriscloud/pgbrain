@@ -1439,8 +1439,8 @@ private struct ResultBody: View {
             let rows = q.page.rows.count
             let prefix = q.page.truncated ? "\(rows)+" : "\(rows)"
             Text("\(prefix) row\(rows == 1 ? "" : "s") · \(String(format: "%.0f ms", q.page.elapsed * 1000))")
-        case .failure: Text("error")
-        case .cancelled: Text("cancelled")
+        case .failure: Text("Error")
+        case .cancelled: Text("Cancelled")
         }
     }
 

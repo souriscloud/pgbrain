@@ -748,6 +748,37 @@ features were built in parallel (isolated git worktrees) and integrated centrall
   the launch-time `applyAppearance()` (`AppDelegate`) were applied by hand during
   integration.
 
+### Iter 45 — Session-snapshot coverage + parallel UI polish pass (2026-06-04, unreleased)
+Closed the last documented test gap and ran a parallel UI/UX polish audit.
+**337 tests, 0 failures**; release build clean.
+
+- **Session-snapshot coverage** — extracted the pure `windows → SessionState`
+  flattening out of the live-`AppDelegate` path into
+  `SessionStateStore.makeSnapshot(windows:)` (with a `WindowInput` carrier), so the
+  historically-crashiest path (the v0.0.3 isolation crash lived in
+  `snapshotAndPersist`) is now exercised by `swift test` — no `NSWindow`/XCUITest
+  needed. +6 tests (tab capture, empty-clause→nil, selection index, multi-window
+  order, JSON round-trip). The remaining un-coverable bit is just the debounce
+  `Task` + disk write.
+- **Stale doc fixed** — struck the "SQL syntax highlighting: held" open question;
+  it shipped during the iter-37 redo (`SQLHighlighter` is an `NSTextStorage`
+  delegate on the notebook, SQL-expression editor, and `JSONSyntaxEditor`).
+- **Polish pass** — a 6-agent parallel read-only audit surfaced 25 candidate rough
+  edges; 12 were implemented, 13 skipped as taste/no-op/false-positive (each with a
+  recorded reason — e.g. the PRODUCTION-badge "inconsistency" is justified by the
+  red-tinted production chrome, and the 5 "add explicit `.truncationMode(.tail)`"
+  are no-ops since that's already the `lineLimit(1)` default). Landed:
+  - **Font-zoom correctness** — `CellFormat.italicFont()` (NULL cells) and
+    `DataCellView.layout()` row height were hardcoded to size 12 while the rest of
+    the grid scales with `CellFormat.baseSize`; both now follow the zoom.
+  - **Accessibility** — labels/help on the filter clear button, tab close button,
+    status dot (`stateLabel`), and sidebar row icons (`accessibilityDescription`).
+  - **Consistency** — Create-Database + Restore-Database primary buttons get
+    `.tint(Tokens.Brand.primary)`; Create-Database form disables during save;
+    result-summary "Error"/"Cancelled" capitalized; completion icon frame squared.
+  - **Discoverability** — Help → Keyboard Shortcuts now lists the two iter-44
+    shortcuts that were undocumented: ⌃⌘N (Set cell to NULL) and ⌘? (Show help).
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

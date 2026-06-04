@@ -832,6 +832,7 @@ struct ConnectionWindowContent: View {
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
+                .help("Clear filter")
             }
         }
         .padding(.horizontal, 8)
@@ -1275,6 +1276,7 @@ struct StatusFooter: View {
         Circle()
             .fill(statusColor)
             .frame(width: 8, height: 8)
+            .accessibilityLabel(stateLabel)
     }
 
     private var statusColor: Color {

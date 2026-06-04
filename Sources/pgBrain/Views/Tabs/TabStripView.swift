@@ -120,6 +120,7 @@ private struct TabChip: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .help("Close tab")
             .opacity(hovering || isSelected ? 0.8 : 0)
         }
         .padding(.horizontal, 10)

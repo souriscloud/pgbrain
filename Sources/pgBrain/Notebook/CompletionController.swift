@@ -250,7 +250,7 @@ private struct CompletionListView: View {
             Image(systemName: item.kind.symbol)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(isSel ? Color.white : item.kind.tint)
-                .frame(width: 16)
+                .frame(width: 16, height: 16)
             Text(item.label)
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(isSel ? Color.white : .primary)

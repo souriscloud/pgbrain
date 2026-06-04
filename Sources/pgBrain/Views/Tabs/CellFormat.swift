@@ -305,7 +305,7 @@ enum CellFormat {
 
     private static func italicFont() -> NSFont {
         let descriptor = NSFont.systemFont(ofSize: baseSize).fontDescriptor.withSymbolicTraits(.italic)
-        return NSFont(descriptor: descriptor, size: 12) ?? body
+        return NSFont(descriptor: descriptor, size: baseSize) ?? body
     }
 
     static func alignment(for kind: ColumnTypeKind) -> NSTextAlignment {
