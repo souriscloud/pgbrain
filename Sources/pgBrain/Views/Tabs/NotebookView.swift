@@ -22,6 +22,7 @@ struct NotebookView: View {
     @State private var focusedCellID: UUID?
     @State private var explainRequest: ExplainSheetState?
     @State private var diffRequest: DiffSheetState?
+    @State private var parameterRequest: Notebook.ParameterRequest?
 
     struct ExplainSheetState: Identifiable {
         let id = UUID()
@@ -117,6 +118,29 @@ struct NotebookView: View {
                 leftPage: state.leftPage,
                 rightPage: state.rightPage,
                 onClose: { diffRequest = nil }
+            )
+        }
+        .onChange(of: notebook.requestedParameters?.id) { _, _ in
+            if let request = notebook.requestedParameters {
+                parameterRequest = request
+                notebook.requestedParameters = nil
+            }
+        }
+        .sheet(item: $parameterRequest) { request in
+            QueryParametersView(
+                names: request.names,
+                values: notebook.parameters,
+                onRun: { filled in
+                    notebook.parameters = filled
+                    parameterRequest = nil
+                    // Replay the deferred run now that the placeholders are
+                    // filled — `run` re-derives the SQL and substitutes.
+                    if let cell = notebook.sqlCell(id: request.cellID) {
+                        NotebookRunner.run(cell: cell, selection: request.selection,
+                                           notebook: notebook, service: service)
+                    }
+                },
+                onCancel: { parameterRequest = nil }
             )
         }
     }
@@ -462,6 +486,10 @@ private struct SqlCellEditor: NSViewRepresentable {
         func textDidChange(_ notif: Notification) {
             guard let tv = notif.object as? NSTextView else { return }
             text.wrappedValue = tv.string
+            // Per-keystroke autosave so scratchpad edits survive a crash,
+            // not just a clean quit. The store debounces (0.5s) internally,
+            // so a burst of typing collapses into one disk write.
+            SessionStateStore.shared.scheduleSnapshot()
         }
     }
 
@@ -1461,13 +1489,35 @@ enum NotebookRunner {
         }
         guard !plans.isEmpty else { return }
 
+        // DataGrip-style `:name` parameters. Gather the distinct
+        // placeholders across every statement about to run; if any lack a
+        // remembered value, defer the run and ask the host to collect them
+        // — the sheet's confirm handler calls back into `run(...)` with the
+        // same cell/selection once the values are stored on the notebook.
+        let neededNames = plans.reduce(into: [String]()) { acc, sql in
+            for name in ScratchpadParameters.names(in: sql) where !acc.contains(name) {
+                acc.append(name)
+            }
+        }
+        let unfilled = neededNames.filter { (notebook.parameters[$0]?.isEmpty ?? true) }
+        if !unfilled.isEmpty {
+            notebook.requestedParameters = Notebook.ParameterRequest(
+                names: neededNames, cellID: cell.id, selection: selection
+            )
+            return
+        }
+        // Splice the remembered values into each statement before executing.
+        let resolvedPlans = neededNames.isEmpty
+            ? plans
+            : plans.map { ScratchpadParameters.substitute($0, with: notebook.parameters) }
+
         // Production-destructive guardrail.
         if service.connection.isProduction {
-            let destructive = plans.contains {
+            let destructive = resolvedPlans.contains {
                 let v = SQLSafety.classify($0)
                 return v == .destructiveUnscoped || v == .ddl
             }
-            if destructive, !confirmProductionRun(plans: plans, service: service) { return }
+            if destructive, !confirmProductionRun(plans: resolvedPlans, service: service) { return }
         }
 
         notebook.runningCellID = cell.id
@@ -1475,15 +1525,15 @@ enum NotebookRunner {
         // Each run STACKS: fresh result widgets are appended after any results
         // already under this cell, and the prior ones collapse. Re-running the
         // cell accumulates a history instead of replacing it.
-        let ids = plans.map { _ in UUID() }
+        let ids = resolvedPlans.map { _ in UUID() }
         notebook.stackResults(after: cell.id, newResultIDs: ids)
 
         // Mark each result as running before kicking off the async pipeline so
         // the SwiftUI cells flip to "Running…" immediately. The current run's
         // widgets start expanded (it's what you just asked for); a big batch
         // (>3) starts collapsed to stay scannable.
-        let collapseAll = plans.count > 3
-        for (sql, id) in zip(plans, ids) {
+        let collapseAll = resolvedPlans.count > 3
+        for (sql, id) in zip(resolvedPlans, ids) {
             let r = notebook.startResult(id: id, statement: sql)
             r.isCollapsed = collapseAll
         }
@@ -1491,10 +1541,10 @@ enum NotebookRunner {
         // Transactional path: all statements on one connection inside
         // BEGIN/COMMIT. The first failure short-circuits and rolls back
         // the whole batch; remaining widgets get marked `.cancelled`.
-        if notebook.runAsTransaction && plans.count > 1 {
+        if notebook.runAsTransaction && resolvedPlans.count > 1 {
             Task { @MainActor in
                 defer { notebook.runningCellID = nil }
-                await runTransactional(plans: plans, ids: ids, notebook: notebook, service: service, client: client)
+                await runTransactional(plans: resolvedPlans, ids: ids, notebook: notebook, service: service, client: client)
             }
             return
         }
@@ -1502,7 +1552,7 @@ enum NotebookRunner {
         Task { @MainActor in
             defer { notebook.runningCellID = nil }
             var schemaTouched = false
-            for (sql, id) in zip(plans, ids) {
+            for (sql, id) in zip(resolvedPlans, ids) {
                 let op = service.operations.begin(kind: .query, summary: QueryRunner.summary(of: sql))
                 let result = notebook.startResult(id: id, statement: sql)
                 result.isCollapsed = collapseAll

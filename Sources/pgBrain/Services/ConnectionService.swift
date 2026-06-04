@@ -79,6 +79,9 @@ final class ConnectionService {
 
     init(connection: Connection) {
         self.connection = connection
+        // New scratchpads on this connection start scoped to its
+        // configured default schema (empty = unscoped).
+        workspace.defaultSearchPath = connection.defaultSearchPath
         // Prune cached loaders/inspectors when their tab disappears
         // — otherwise closed-tab loaders leak for the workspace's
         // lifetime and re-opening the same table would reuse a stale

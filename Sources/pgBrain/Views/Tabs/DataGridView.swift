@@ -323,6 +323,44 @@ struct DataGridView: NSViewRepresentable {
             presentEditor(row: sourceIndex(forVisibleRow: row), col: col, in: table, buffer: buffer)
         }
 
+        /// ⌃⌘N — stage an explicit NULL for the keyboard-focused cell.
+        /// Distinct from clearing a cell to empty text (which stages the
+        /// literal ""); this routes through `.null` so the cell renders the
+        /// italic "NULL". No-op when the focused column isn't nullable.
+        func setNullForFocusedCell() {
+            guard editBuffer != nil, let row = focusedRow, let col = focusedDataCol,
+                  col >= 0, col < page.columns.count, page.columns[col].nullable
+            else { return }
+            let sourceRow = sourceIndex(forVisibleRow: row)
+            let original = page.rows[row][col]
+            commit(row: sourceRow, col: col, original: original, typed: .null)
+        }
+
+        /// Full-value content for the hover preview popover, or nil when the
+        /// cell isn't worth previewing (short, NULL, or a non-text/json kind).
+        /// JSON is pretty-printed; long text is shown verbatim.
+        func hoverPreview(forVisibleRow visibleRow: Int, dataCol: Int) -> String? {
+            guard visibleRow >= 0, visibleRow < page.rows.count,
+                  dataCol >= 0, dataCol < page.columns.count
+            else { return nil }
+            let column = page.columns[dataCol]
+            let sourceRow = sourceIndex(forVisibleRow: visibleRow)
+            let original = page.rows[visibleRow][dataCol]
+            guard let value = effectiveValue(sourceRow: sourceRow, col: dataCol, original: original)
+            else { return nil }
+            let kind = ColumnTypeKind.from(typeName: column.typeName)
+            switch kind {
+            case .json:
+                return JSONFormatter.pretty(value) ?? value
+            case .text, .unknown:
+                // Only worth a popover when the value is long or wraps.
+                guard value.count > 60 || value.contains("\n") else { return nil }
+                return value
+            default:
+                return nil
+            }
+        }
+
         /// Serialise the current row selection (or the focused cell's row
         /// if no selection) as TSV — values tab-separated, rows
         /// newline-separated, NULL rendered as the empty string. Used by
@@ -516,7 +554,8 @@ struct DataGridView: NSViewRepresentable {
                 edit.representedObject = CellLocator(row: sourceRow, col: dataCol)
                 menu.addItem(edit)
                 if column.nullable {
-                    let setNull = NSMenuItem(title: "Set NULL", action: #selector(handleSetNull(_:)), keyEquivalent: "")
+                    let setNull = NSMenuItem(title: "Set NULL", action: #selector(handleSetNull(_:)), keyEquivalent: "n")
+                    setNull.keyEquivalentModifierMask = [.control, .command]
                     setNull.target = self
                     setNull.representedObject = CellLocator(row: sourceRow, col: dataCol)
                     menu.addItem(setNull)
@@ -842,6 +881,10 @@ struct DataGridView: NSViewRepresentable {
             guard !selected.isEmpty else { return }
             onDelete(selected.map { coord.sourceIndex(forVisibleRow: $0) })
         }
+        table.onSetNull = { [weak coord = context.coordinator] in coord?.setNullForFocusedCell() }
+        table.hoverPreviewProvider = { [weak coord = context.coordinator] visibleRow, dataCol in
+            coord?.hoverPreview(forVisibleRow: visibleRow, dataCol: dataCol)
+        }
 
         applyColumns(to: table, coordinator: context.coordinator)
         table.dataSource = context.coordinator
@@ -954,6 +997,10 @@ struct DataGridView: NSViewRepresentable {
             let selected = table.selectedRowIndexes
             guard !selected.isEmpty else { return }
             onDelete(selected.map { coord.sourceIndex(forVisibleRow: $0) })
+        }
+        table.onSetNull = { [weak coord = context.coordinator] in coord?.setNullForFocusedCell() }
+        table.hoverPreviewProvider = { [weak coord = context.coordinator] visibleRow, dataCol in
+            coord?.hoverPreview(forVisibleRow: visibleRow, dataCol: dataCol)
         }
         if identityChanged || editableChanged {
             for col in table.tableColumns { table.removeTableColumn(col) }
@@ -1110,6 +1157,20 @@ final class EditableTableView: NSTableView {
     /// ⌘⌫ — stage the selected row(s) for deletion. The closure resolves
     /// the current selection to source rows and calls the delete hook.
     var onDeleteSelectedRows: (() -> Void)?
+    /// ⌃⌘N — stage an explicit NULL for the keyboard-focused cell.
+    var onSetNull: (() -> Void)?
+    /// `(visibleRow, dataCol) → preview text?`. The coordinator returns the
+    /// full (pretty-printed for JSON) value when the cell is worth a hover
+    /// popover, else nil. `dataCol` is 0-indexed over data columns.
+    var hoverPreviewProvider: ((Int, Int) -> String?)?
+
+    /// Hover-preview state. We arm a delayed `perform` on mouse-moved over a
+    /// previewable cell and show an `NSPopover` with the full value; moving
+    /// off the cell (or out of the table) cancels/closes it.
+    private var hoverPopover: NSPopover?
+    private var hoverRow: Int = -1
+    private var hoverCol: Int = -1
+    private var hoverTracking: NSTrackingArea?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let chars = event.charactersIgnoringModifiers ?? ""
@@ -1121,6 +1182,11 @@ final class EditableTableView: NSTableView {
                 reloadData()
                 return true
             }
+        }
+        // ⌃⌘N → stage an explicit NULL for the focused cell.
+        if cmd, event.modifierFlags.contains(.control), chars == "n" {
+            onSetNull?()
+            return true
         }
         // ⌘C → TSV of the current selection (rows × visible data columns).
         if cmd, !shift, chars == "c" {
@@ -1173,6 +1239,66 @@ final class EditableTableView: NSTableView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    // MARK: - Hover preview
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = hoverTracking { removeTrackingArea(existing) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
+            owner: self, userInfo: nil
+        )
+        addTrackingArea(area)
+        hoverTracking = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        let point = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: point)
+        let tableCol = self.column(at: point)
+        let dataCol = tableCol - 1
+        // Same cell as last move: leave the armed/visible popover alone.
+        if row == hoverRow, dataCol == hoverCol { return }
+        cancelHoverPreview()
+        hoverRow = row
+        hoverCol = dataCol
+        guard row >= 0, dataCol >= 0 else { return }
+        // Arm a delayed show so the popover only appears on a genuine hover,
+        // not while the pointer sweeps across the grid.
+        perform(#selector(showHoverPreview), with: nil, afterDelay: 0.6)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        cancelHoverPreview()
+        hoverRow = -1
+        hoverCol = -1
+    }
+
+    private func cancelHoverPreview() {
+        NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(showHoverPreview), object: nil)
+        hoverPopover?.close()
+        hoverPopover = nil
+    }
+
+    @objc private func showHoverPreview() {
+        let row = hoverRow
+        let dataCol = hoverCol
+        guard row >= 0, dataCol >= 0,
+              let text = hoverPreviewProvider?(row, dataCol), !text.isEmpty
+        else { return }
+        let rect = frameOfCell(atColumn: dataCol + 1, row: row)
+        guard rect != .zero else { return }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = false
+        popover.contentViewController = HoverPreviewController(text: text)
+        hoverPopover = popover
+        popover.show(relativeTo: rect, of: self, preferredEdge: .maxY)
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         let point = convert(event.locationInWindow, from: nil)
         let row = self.row(at: point)
@@ -1183,6 +1309,59 @@ final class EditableTableView: NSTableView {
             return contextMenuProvider?(row, col)
         }
         return super.menu(for: event)
+    }
+}
+
+/// Scrollable, monospaced read-only display for the cell hover preview.
+/// Sized to the content up to a cap so a 4-line JSON blob shows compactly
+/// while a large document scrolls inside a bounded popover.
+private final class HoverPreviewController: NSViewController {
+    private let text: String
+
+    init(text: String) {
+        self.text = text
+        super.init(nibName: nil, bundle: nil)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func loadView() {
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 4, height: 4)
+        textView.font = .monospacedSystemFont(ofSize: CellFormat.baseSize, weight: .regular)
+        textView.string = text
+        textView.textColor = .labelColor
+
+        // Measure the content so short previews don't open a giant box.
+        let maxSize = NSSize(width: 520, height: 360)
+        textView.textContainer?.containerSize = NSSize(width: maxSize.width - 8,
+                                                       height: .greatestFiniteMagnitude)
+        if let container = textView.textContainer {
+            textView.layoutManager?.ensureLayout(for: container)
+        }
+        let used = (textView.textContainer.map { textView.layoutManager?.usedRect(for: $0).size } ?? nil) ?? maxSize
+        let contentSize = NSSize(
+            width: min(maxSize.width, max(160, used.width + 16)),
+            height: min(maxSize.height, max(28, used.height + 16))
+        )
+
+        let scroll = NSScrollView(frame: NSRect(origin: .zero, size: contentSize))
+        scroll.documentView = textView
+        scroll.hasVerticalScroller = used.height + 16 > maxSize.height
+        scroll.hasHorizontalScroller = false
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        textView.frame = NSRect(origin: .zero, size: NSSize(width: contentSize.width, height: max(contentSize.height, used.height + 16)))
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: contentSize.width, height: .greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+
+        self.view = scroll
+        preferredContentSize = contentSize
     }
 }
 

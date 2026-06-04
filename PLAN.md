@@ -714,6 +714,40 @@ was at 0% is now covered).
   — these need XCUITest (deferred, conflicts with the no-`.xcodeproj` rule).
 - **307 tests, 0 failures**; release build verified (DEBUG seams excluded).
 
+### Iter 44 — Backlog batch: data-edit safety, `:var` params, import/copy power, UI polish (2026-06-04, unreleased)
+Cleared the four backlog buckets. Logic cores landed inline with tests; the six UI
+features were built in parallel (isolated git worktrees) and integrated centrally.
+**331 tests, 0 failures**; release build clean.
+
+- **Data-editing correctness** — `UpdateApplier` now materialises each UPDATE and
+  throws `.staleRow` when `metadata.rows == 0` (the row was deleted or its key
+  changed since the grid loaded), rolling back the whole batch; the
+  `withTransaction` wrapper is unwrapped so callers see the real cause, not
+  `PostgresTransactionError`. (+test)
+- **`:var` query parameters** — new pure `ScratchpadParameters` engine
+  (token-aware: skips strings, `--`/`/* */` comments, dollar-quoted bodies, and
+  `::` casts; `:name` → value). Wired into the notebook run path with a
+  `QueryParametersView` prompt sheet; entered values are remembered across re-runs
+  within a session. Per-keystroke SQL autosave via `SessionStateStore.scheduleSnapshot`.
+  (+10 tests)
+- **Import / copy power** — `PgDumpCLI` gained a pure `restoreArguments` builder +
+  `restore(...)` runner and `RestoreOptions` (clean / no-owner / single-transaction /
+  jobs; `--jobs` suppressed under `--single-transaction`), surfaced by a new
+  `RestoreDatabaseSheet` (palette: "Restore Database…"). `CrossDBCopy` gained an
+  **upsert** strategy (stage into a `TEMP TABLE (LIKE target) ON COMMIT DROP`, then
+  `INSERT … SELECT … ON CONFLICT (keys) DO UPDATE/NOTHING`) and **auto-create target**
+  (`CREATE TABLE IF NOT EXISTS` from source column types). (+13 tests, incl. E2E)
+- **UI polish** — app-wide **appearance picker** (System / Light / Dark via
+  `AppSettings.appearance` → `NSApp.appearance`, applied at launch);
+  **connection-level default schema** (`Connection.defaultSearchPath`, adopted by new
+  scratchpads); grid **⌃⌘N "Set NULL"** keyboard path + **hover preview popover** for
+  long/JSON cells; completion popup rows now show a category label when a row has no
+  explicit detail.
+- Central wiring kept out of the parallel agents (to avoid conflicts): the
+  palette item, sheet host + notification observer (`ConnectionWindowContent`), and
+  the launch-time `applyAppearance()` (`AppDelegate`) were applied by hand during
+  integration.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

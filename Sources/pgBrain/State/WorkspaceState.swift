@@ -77,6 +77,10 @@ final class WorkspaceState {
     private(set) var tabs: [Tab] = []
     var selectedID: UUID?
     @ObservationIgnored private var scratchpadCounter = 0
+    /// Default `search_path` new scratchpads adopt. Set by the owning
+    /// `ConnectionService` from `Connection.defaultSearchPath`. Empty =
+    /// leave the notebook unscoped (server default `search_path`).
+    @ObservationIgnored var defaultSearchPath: String = ""
     /// Fires immediately after a tab is removed. The owning
     /// `ConnectionService` uses this to prune its loader cache, so
     /// closed-tab loaders + edit buffers don't leak.
@@ -114,6 +118,8 @@ final class WorkspaceState {
     func openScratchpad() -> Notebook {
         scratchpadCounter += 1
         let pad = Notebook(title: "Query \(scratchpadCounter)")
+        let trimmed = defaultSearchPath.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty { pad.searchPath = trimmed }
         let tab = Tab(kind: .scratchpad(pad), title: pad.title)
         tabs.append(tab)
         selectedID = tab.id

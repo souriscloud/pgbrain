@@ -45,6 +45,23 @@ final class Notebook: Identifiable {
     /// failures roll back the whole thing. Default off — keeps the
     /// existing "each statement autocommits" mental model.
     var runAsTransaction: Bool = false
+    /// DataGrip-style `:name` query-parameter values, remembered across
+    /// re-runs so the user fills a placeholder once and subsequent runs
+    /// reuse the value. Keyed by parameter name (without the leading `:`).
+    var parameters: [String: String] = [:]
+    /// Pulse: when set, `NotebookView` opens the parameter-collection
+    /// sheet and, on confirm, re-runs the captured cell. Consume-on-use,
+    /// same contract as the other `requested*` pulses.
+    var requestedParameters: ParameterRequest?
+
+    /// A pending parameter prompt: which placeholders to collect and the
+    /// run to replay once they're filled.
+    struct ParameterRequest: Identifiable {
+        let id = UUID()
+        let names: [String]
+        let cellID: UUID
+        let selection: NSRange?
+    }
 
     init(title: String) {
         self.title = title

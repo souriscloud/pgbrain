@@ -27,6 +27,15 @@ private struct GeneralSettings: View {
 
     var body: some View {
         Form {
+            Section("Appearance") {
+                Picker("Theme", selection: $settings.appearance) {
+                    ForEach(AppAppearance.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .help("Force pgBrain into Light or Dark, or follow the macOS system setting.")
+            }
             Section("Startup") {
                 Toggle("Restore last session on launch", isOn: $settings.restoreLastSession)
                     .help("Re-open the windows + tabs you had open at quit. Scratchpad SQL survives.")

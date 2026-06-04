@@ -256,12 +256,13 @@ private struct CompletionListView: View {
                 .foregroundStyle(isSel ? Color.white : .primary)
                 .lineLimit(1)
             Spacer(minLength: 8)
-            if let detail = item.detail {
-                Text(detail)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(isSel ? Color.white.opacity(0.85) : .secondary)
-                    .lineLimit(1)
-            }
+            // Always show a trailing hint: the item's own detail (column
+            // type / function signature) when present, otherwise the kind's
+            // category word so every row reads as typed intellisense.
+            Text(item.detail ?? item.kind.categoryLabel)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(isSel ? Color.white.opacity(0.85) : .secondary)
+                .lineLimit(1)
         }
         .padding(.horizontal, 7)
         .frame(height: CompletionController.rowHeight)

@@ -36,6 +36,10 @@ struct Connection: Identifiable, Codable, Hashable {
     var database: String = ""
     var username: String = ""
     var sslMode: SSLMode = .prefer
+    /// Default `search_path` adopted by new scratchpads on this
+    /// connection. Empty = none (notebooks start unscoped, using the
+    /// server's own `search_path`).
+    var defaultSearchPath: String = ""
     var colorTag: ColorTag = .none
     // MARK: - SSH tunnel (optional)
     /// When true, ConnectionService starts an ssh local-forward
@@ -57,11 +61,13 @@ struct Connection: Identifiable, Codable, Hashable {
     init(
         id: UUID = UUID(), name: String, host: String = "localhost", port: Int = 5432,
         database: String = "", username: String = "", sslMode: SSLMode = .prefer,
-        colorTag: ColorTag = .none, sshEnabled: Bool = false, sshHost: String = "",
+        defaultSearchPath: String = "", colorTag: ColorTag = .none,
+        sshEnabled: Bool = false, sshHost: String = "",
         sshPort: Int = 22, sshUser: String = "", sshKeyPath: String = "", isProduction: Bool = false
     ) {
         self.id = id; self.name = name; self.host = host; self.port = port
         self.database = database; self.username = username; self.sslMode = sslMode
+        self.defaultSearchPath = defaultSearchPath
         self.colorTag = colorTag; self.sshEnabled = sshEnabled; self.sshHost = sshHost
         self.sshPort = sshPort; self.sshUser = sshUser; self.sshKeyPath = sshKeyPath
         self.isProduction = isProduction
@@ -83,6 +89,7 @@ struct Connection: Identifiable, Codable, Hashable {
         database = (try c.decodeIfPresent(String.self, forKey: .database)) ?? ""
         username = (try c.decodeIfPresent(String.self, forKey: .username)) ?? ""
         sslMode = (try c.decodeIfPresent(SSLMode.self, forKey: .sslMode)) ?? .prefer
+        defaultSearchPath = (try c.decodeIfPresent(String.self, forKey: .defaultSearchPath)) ?? ""
         colorTag = (try c.decodeIfPresent(ColorTag.self, forKey: .colorTag)) ?? .none
         sshEnabled = (try c.decodeIfPresent(Bool.self, forKey: .sshEnabled)) ?? false
         sshHost = (try c.decodeIfPresent(String.self, forKey: .sshHost)) ?? ""

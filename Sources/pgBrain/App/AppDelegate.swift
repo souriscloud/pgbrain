@@ -18,6 +18,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         NSApp.setActivationPolicy(.regular)
 
+        // Re-apply a previously-chosen Light/Dark override before any window opens.
+        AppSettings.shared.applyAppearance()
+
         menuBar = MenuBarController(delegate: self)
         menuBar?.install()
 

@@ -117,6 +117,7 @@ struct ConnectionWindowContent: View {
     @State private var showNotifyPanel = false
     @State private var showSnippets = false
     @State private var showCreateDatabase = false
+    @State private var showRestoreDatabase = false
     @State private var dropDatabaseTarget: IdentifiedString?
     @State private var findUsagesTarget: CommentsTarget?
     @State private var functionDesigner: FunctionDesignerRequest?
@@ -223,6 +224,9 @@ struct ConnectionWindowContent: View {
         .sheet(isPresented: $showCreateDatabase) {
             CreateDatabaseSheet(service: service) { showCreateDatabase = false }
         }
+        .sheet(isPresented: $showRestoreDatabase) {
+            RestoreDatabaseSheet(service: service) { showRestoreDatabase = false }
+        }
         .sheet(item: $dropDatabaseTarget) { target in
             DropDatabaseSheet(service: service, target: target.value) { dropDatabaseTarget = nil }
         }
@@ -321,6 +325,11 @@ struct ConnectionWindowContent: View {
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainCreateDatabase)) { notif in
             if let id = notif.object as? UUID, id == service.connection.id {
                 showCreateDatabase = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainRestoreDatabase)) { notif in
+            if let id = notif.object as? UUID, id == service.connection.id {
+                showRestoreDatabase = true
             }
         }
         .modifier(FunctionFlowsModifier(

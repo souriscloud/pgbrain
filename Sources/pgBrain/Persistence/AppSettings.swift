@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -6,6 +7,33 @@ extension Notification.Name {
     /// re-apply it live (the @Observable property alone doesn't reach the
     /// AppKit text views baked at make-time).
     static let pgbrainEditorFontChanged = Notification.Name("cloud.souris.pgbrain.editorFontChanged")
+}
+
+/// Whole-app appearance override. `.system` follows the macOS setting; the
+/// others force light/dark regardless.
+enum AppAppearance: String, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+
+    /// `nil` means "inherit the system appearance".
+    var nsAppearance: NSAppearance? {
+        switch self {
+        case .system: return nil
+        case .light: return NSAppearance(named: .aqua)
+        case .dark: return NSAppearance(named: .darkAqua)
+        }
+    }
 }
 
 /// User-facing preferences. `@Observable` so SwiftUI can bind toggles in the
@@ -68,6 +96,21 @@ final class AppSettings {
         didSet { defaults.set(sparkleChannel, forKey: keyPrefix + "sparkleChannel") }
     }
 
+    /// Whole-app light/dark override. Persists the raw value; a change
+    /// re-applies it to `NSApp` immediately.
+    var appearance: AppAppearance {
+        didSet {
+            defaults.set(appearance.rawValue, forKey: keyPrefix + "appearance")
+            applyAppearance()
+        }
+    }
+
+    /// Push the current `appearance` onto `NSApp`. Call once on launch and
+    /// whenever the setting changes (the `didSet` already does the latter).
+    func applyAppearance() {
+        NSApp?.appearance = appearance.nsAppearance
+    }
+
     private convenience init() {
         self.init(defaults: .standard)
     }
@@ -89,5 +132,7 @@ final class AppSettings {
         self.verbosePostgresLogging = d.bool(forKey: "pgbrain.settings.verbosePostgresLogging")
         self.editorFontSize = (d.object(forKey: "pgbrain.settings.editorFontSize") as? Double) ?? 12
         self.sparkleChannel = d.string(forKey: "pgbrain.settings.sparkleChannel") ?? "stable"
+        self.appearance = (d.string(forKey: "pgbrain.settings.appearance")
+            .flatMap(AppAppearance.init(rawValue:))) ?? .system
     }
 }

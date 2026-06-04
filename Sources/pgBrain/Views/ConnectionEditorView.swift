@@ -140,6 +140,13 @@ struct ConnectionEditorView: View {
                     .autocorrectionDisabled()
             }
 
+            field("Default schema") {
+                TextField("leave blank for the server default search_path",
+                          text: $connection.defaultSearchPath)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+            }
+
             HStack(spacing: Tokens.Spacing.md) {
                 field("Username", flex: 1) {
                     TextField(NSUserName(), text: $connection.username)

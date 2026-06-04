@@ -92,7 +92,7 @@ enum CommandProviders {
     // MARK: - Database tools (pg_dump)
 
     private static func databaseTools(service: ConnectionService) -> [CommandItem] {
-        PgDumpCLI.Format.allCases.map { fmt in
+        var out = PgDumpCLI.Format.allCases.map { fmt in
             CommandItem(
                 id: "pgdump.\(fmt.rawValue)",
                 icon: "arrow.down.doc",
@@ -107,6 +107,19 @@ enum CommandProviders {
                 }
             )
         }
+        out.append(CommandItem(
+            id: "pgrestore",
+            icon: "arrow.up.doc",
+            title: "Restore Database…",
+            subtitle: service.connection.database.isEmpty ? "pg_restore an archive" : "Restore into \(service.connection.database)",
+            category: .action,
+            shortcut: nil,
+            action: {
+                AppDelegate.shared?.openConnection(service.connection)
+                NotificationCenter.default.post(name: .pgbrainRestoreDatabase, object: service.connection.id)
+            }
+        ))
+        return out
     }
 
     // MARK: - Schema admin (rename / drop / visibility)
