@@ -760,7 +760,7 @@ features were built in parallel (isolated git worktrees) and integrated centrall
 ---
 
 ## Open questions for later
-- **SQL syntax highlighting**: shipped iter-4 with a plain `NSTextView` (no highlighting). Held until the scratchpad redo so we don't double-build.
+- ~~**SQL syntax highlighting**~~ — **DONE** (built during/after the iter-37 scratchpad redo). `SQLHighlighter` is an `NSTextStorage` delegate attached to the scratchpad (`NotebookView`), the SQL-expression editor, and `JSONSyntaxEditor`, and renders history/DDL via `SQLHighlighter.attributedString`. This entry was stale.
 - **`COPY ... TO STDOUT` (binary)**: still blocked upstream. postgres-nio **1.33.0** exposes `copyFrom` (COPY FROM STDIN, import direction) but **no** public `copyTo`/STDOUT, so exports stay on `SELECT … ::text`. Revisit when postgres-nio ships a public copy-out; until then a raw-channel CopyData reader is the only path and isn't worth the fragility. (Note: the new `copyFrom` could later speed the importer / cross-DB copy.)
 - **Release pipeline — `generate_appcast`**: deliberately staying on the manual `<item>` append in `release.sh` (it produced correct appcasts through v0.8.2). Switching to Sparkle's `generate_appcast` needs every historical DMG backfilled into `releases/` first or it wipes appcast history — a lateral move with real risk and no user benefit.
 - **Scratchpad model — resolved (iter 37)**: the cell-stack inline model **stays**. A single-editor "console" rewrite was tried and reverted (inline results are essential to the user). Instead added a per-statement run gutter, floating run, caret/selection ⌘↩, result stacking, and inline pivot/chart/map. Remaining polish: `:var` substitution, per-keystroke autosave.

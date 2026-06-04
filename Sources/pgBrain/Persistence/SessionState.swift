@@ -110,13 +110,23 @@ final class SessionStateStore {
         }
     }
 
-    private func snapshotAndPersist() {
-        guard let delegate = AppDelegate.shared else { return }
+    /// One open window's worth of input to the snapshot builder. Carries
+    /// only the primitives `makeSnapshot` needs so the builder has no
+    /// `AppDelegate`/`NSWindow` dependency and stays unit-testable.
+    struct WindowInput {
+        let connectionID: UUID
+        let frame: NSRect
+        let workspace: WorkspaceState
+    }
+
+    /// Pure builder: flatten a set of open windows into the on-disk
+    /// `SessionState`. Extracted from `snapshotAndPersist` so the
+    /// tab-flattening — historically the crashiest path in the app — is
+    /// exercised by `swift test` without a live `AppDelegate` or window.
+    static func makeSnapshot(windows: [WindowInput]) -> SessionState {
         var state = SessionState()
-        for entry in delegate.windowManager.entries {
-            guard let service = entry.service else { continue }
-            let frame = entry.window.frame
-            let tabs: [SessionState.Tab] = service.workspace.tabs.map { tab in
+        for win in windows {
+            let tabs: [SessionState.Tab] = win.workspace.tabs.map { tab in
                 switch tab.kind {
                 case .table(let t):
                     return SessionState.Tab(
@@ -140,20 +150,31 @@ final class SessionStateStore {
                 }
             }
             let selectedIndex: Int? = {
-                guard let id = service.workspace.selectedID else { return nil }
-                return service.workspace.tabs.firstIndex(where: { $0.id == id })
+                guard let id = win.workspace.selectedID else { return nil }
+                return win.workspace.tabs.firstIndex(where: { $0.id == id })
             }()
             state.windows.append(
                 SessionState.Window(
-                    connectionID: service.connection.id,
-                    frame: SessionState.CodableRect(frame),
+                    connectionID: win.connectionID,
+                    frame: SessionState.CodableRect(win.frame),
                     tabs: tabs,
                     selectedTabIndex: selectedIndex
                 )
             )
         }
+        return state
+    }
+
+    private func snapshotAndPersist() {
+        guard let delegate = AppDelegate.shared else { return }
+        let windows: [WindowInput] = delegate.windowManager.entries.compactMap { entry in
+            guard let service = entry.service else { return nil }
+            return WindowInput(connectionID: service.connection.id,
+                               frame: entry.window.frame,
+                               workspace: service.workspace)
+        }
+        let snapshot = Self.makeSnapshot(windows: windows)
         let url = self.url
-        let snapshot = state  // immutable copy captured into the closure
         writeQueue.async {
             do {
                 let data = try JSONEncoder().encode(snapshot)
