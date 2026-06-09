@@ -74,6 +74,19 @@ enum CellEditorPopover {
         popover.delegate = closeObserver
         isPresenting = true
         popover.show(relativeTo: rect, of: view, preferredEdge: .maxY)
+
+        // Hand the popover its own key focus. Popovers don't take key on
+        // their own, so without this the parent grid window stays key:
+        // Tab wouldn't cycle the editor's fields and ⌘C would route to the
+        // grid (copying the row). Making the popover window key — and
+        // selecting its first field — gives a proper edit context where
+        // Tab / ⌘C / typing all act on the editor. Still semitransient, so
+        // outside-click / Esc dismiss it as before.
+        if let window = host.view.window {
+            window.makeKey()
+            window.recalculateKeyViewLoop()
+            window.selectNextKeyView(nil)
+        }
     }
 }
 
