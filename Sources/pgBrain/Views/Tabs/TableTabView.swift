@@ -1582,13 +1582,16 @@ private struct QueryStripView: View {
                 placeholder: "e.g. id = 5  OR  email ILIKE '%@valuo.cz'",
                 tint: .blue,
                 clauseKind: .whereExpr
-            ) {
+            ) { committed in
                 // SwiftUI's TextField onCommit fires both on Enter AND
                 // on focus loss on macOS, so guard against no-op
                 // commits — otherwise tabbing between the two fields
-                // triggers a useless server reload.
-                guard whereDraft != filter.whereClause else { return }
-                filter.whereClause = whereDraft
+                // triggers a useless server reload. Compare against the
+                // live committed string, not the `whereDraft` snapshot,
+                // which can lag a keystroke behind on a same-tick commit.
+                guard committed != filter.whereClause else { return }
+                whereDraft = committed
+                filter.whereClause = committed
                 onSubmit()
             }
             Divider()
@@ -1598,9 +1601,10 @@ private struct QueryStripView: View {
                 placeholder: "e.g. created_at DESC, id",
                 tint: .purple,
                 clauseKind: .orderBy
-            ) {
-                guard orderDraft != filter.orderByClause else { return }
-                filter.orderByClause = orderDraft
+            ) { committed in
+                guard committed != filter.orderByClause else { return }
+                orderDraft = committed
+                filter.orderByClause = committed
                 onSubmit()
             }
             if isRefreshing {
@@ -1636,7 +1640,7 @@ private struct QueryStripView: View {
         placeholder: String,
         tint: Color,
         clauseKind: SQLCompletionContext.ClauseKind,
-        onCommit: @escaping () -> Void
+        onCommit: @escaping (String) -> Void
     ) -> some View {
         HStack(spacing: 0) {
             Text(keyword)

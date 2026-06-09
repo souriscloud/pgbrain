@@ -1173,6 +1173,13 @@ final class EditableTableView: NSTableView {
     private var hoverTracking: NSTrackingArea?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // A cell-editor popover is open — it (and its text field) owns
+        // ⌘C / ⌘Z / typing. The popover is semitransient so this table's
+        // window stays key; without standing down we'd grab ⌘C and copy
+        // the whole row instead of the editor's selection.
+        if CellEditorPopover.isPresenting {
+            return super.performKeyEquivalent(with: event)
+        }
         let chars = event.charactersIgnoringModifiers ?? ""
         let cmd = event.modifierFlags.contains(.command)
         let shift = event.modifierFlags.contains(.shift)

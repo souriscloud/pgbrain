@@ -779,6 +779,34 @@ Closed the last documented test gap and ran a parallel UI/UX polish audit.
   - **Discoverability** — Help → Keyboard Shortcuts now lists the two iter-44
     shortcuts that were undocumented: ⌃⌘N (Set cell to NULL) and ⌘? (Show help).
 
+### Iter 46 — Two interaction bugs + headless AppKit-layer regression tests (2026-06-09, unreleased)
+User-reported grid interaction bugs, both in the SwiftUI↔AppKit glue (invisible to
+pure-logic unit tests). Fixed + guarded at the AppKit-coordinator layer — no
+XCUITest target, runs under `swift test`. **339 tests, 0 failures**.
+
+- **WHERE/ORDER-BY strip didn't re-apply on a second non-empty change** — the
+  commit guard (`whereDraft != filter.whereClause`) compared a SwiftUI `@State`
+  *snapshot* captured into the `CompletingTextField` commit closure, which only
+  refreshes on `updateNSView`. A same-tick type+Enter fired
+  `controlTextDidEndEditing` before that refresh, so the guard saw a stale draft
+  and bailed (clearing to empty and back resynced it by accident). Fix:
+  `CompletingTextField.onCommit` now carries the field's **live `stringValue`**
+  instead of letting the caller read a lagging draft. `load()` has no dedup, so the
+  fetch always follows once the gate fires.
+- **⌘C inside the cell-editor popup copied the whole row** — the editor is a
+  `.semitransient` `NSPopover`, so the parent table window stays key and
+  `EditableTableView.performKeyEquivalent` grabbed ⌘C → `copyAsTSV()` (row) before
+  the popover field saw it. Fix: `CellEditorPopover.isPresenting` (cleared via the
+  popover's close delegate); the grid stands down on ⌘C/⌘Z/⌃⌘N while an editor is
+  open. *Caveat:* this stops the wrong-row copy deterministically, but whether ⌘C
+  then lands a clean cell-text copy depends on the popover field being key — needs
+  an in-app click to confirm.
+- **Tier-A regression tests** — the approach for catching glue bugs without
+  XCUITest: instantiate the `NSView`/coordinator and fire its delegate/overridden
+  methods directly. `CompletingTextFieldTests` (commit reports live value) +
+  `DataGridKeyEquivalentTests` (⌘C stands down while editing, via a DEBUG-only
+  `CellEditorPopover._setPresentingForTesting` seam). Both would fail on a revert.
+
 ### Open Q — commandTag for non-SELECT (2026-05-25)
 **Goal**: scratchpad result block shows "UPDATE 12" / "INSERT 0 5" / "DELETE 3" instead of "OK".
 

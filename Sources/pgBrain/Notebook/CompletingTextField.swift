@@ -16,13 +16,19 @@ struct CompletingTextField: NSViewRepresentable {
     let placeholder: String
     let font: NSFont
     let completions: (String) -> [CompletionItem]
-    let onCommit: () -> Void
+    /// Fired on Enter / focus-loss with the field's *live* string value.
+    /// Passing it explicitly (rather than letting the caller read a
+    /// captured `@State` draft) avoids a stale-snapshot race: SwiftUI may
+    /// not have re-run `updateNSView` to refresh this closure between the
+    /// last keystroke and the commit, so the draft the caller closed over
+    /// could lag a character behind.
+    let onCommit: (String) -> Void
 
     @MainActor
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var text: Binding<String>
         var completions: (String) -> [CompletionItem]
-        var onCommit: () -> Void
+        var onCommit: (String) -> Void
         /// String length on the previous tick — distinguishes
         /// insertions from deletions so we don't open the popup
         /// while the user is backspacing.
@@ -33,7 +39,7 @@ struct CompletingTextField: NSViewRepresentable {
         private var controller: CompletionController?
         private weak var boundEditor: NSTextView?
 
-        init(text: Binding<String>, completions: @escaping (String) -> [CompletionItem], onCommit: @escaping () -> Void) {
+        init(text: Binding<String>, completions: @escaping (String) -> [CompletionItem], onCommit: @escaping (String) -> Void) {
             self.text = text
             self.completions = completions
             self.onCommit = onCommit
@@ -80,7 +86,8 @@ struct CompletingTextField: NSViewRepresentable {
 
         func controlTextDidEndEditing(_ notification: Notification) {
             controller?.cancel()
-            onCommit()
+            let value = (notification.object as? NSTextField)?.stringValue ?? text.wrappedValue
+            onCommit(value)
         }
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {

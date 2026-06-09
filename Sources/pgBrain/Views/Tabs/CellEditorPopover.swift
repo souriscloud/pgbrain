@@ -11,6 +11,31 @@ import SwiftUI
 /// edit buffer.
 @MainActor
 enum CellEditorPopover {
+    /// True while a cell-edit popover is on screen. The data grid reads
+    /// this so its key-equivalent handler (⌘C / ⌘Z / ⌃⌘N) stands down
+    /// while a cell is being edited — otherwise ⌘C inside the popover is
+    /// grabbed by the table and copies the whole row instead of the
+    /// editor's selection. The popover is `.semitransient`, so the parent
+    /// table window stays key and would otherwise win the key equivalent.
+    static private(set) var isPresenting = false
+
+    /// Strongly held so the popover's weak `delegate` survives; flips
+    /// `isPresenting` back off on any close path (Save / Cancel / Esc /
+    /// click-away).
+    private final class CloseObserver: NSObject, NSPopoverDelegate {
+        func popoverDidClose(_ notification: Notification) {
+            CellEditorPopover.isPresenting = false
+        }
+    }
+    private static let closeObserver = CloseObserver()
+
+    #if DEBUG
+    /// Test seam: drive the presenting flag without spinning up a real
+    /// popover + window, so the grid's key-equivalent gating can be
+    /// exercised headlessly under `swift test`.
+    static func _setPresentingForTesting(_ value: Bool) { isPresenting = value }
+    #endif
+
     static func show(
         for column: ColumnNode,
         initial: TypedInputValue,
@@ -46,6 +71,8 @@ enum CellEditorPopover {
         default:              host.preferredContentSize = NSSize(width: 380, height: 190)
         }
         popover.contentViewController = host
+        popover.delegate = closeObserver
+        isPresenting = true
         popover.show(relativeTo: rect, of: view, preferredEdge: .maxY)
     }
 }
