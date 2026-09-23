@@ -449,7 +449,7 @@ private struct HelpShortcuts: View {
                 ShortcutRow(keys: ["⌘", "S"], label: "Apply pending changes")
                 ShortcutRow(keys: ["⌘", "Esc"], label: "Discard pending changes")
                 ShortcutRow(keys: ["⌘", "F"], label: "Find in the grid / editor")
-                ShortcutRow(keys: ["⌘", "⇧", "←"], label: "Previous page (⌘⇧→ next)")
+                ShortcutRow(keys: ["⌃", "⌘", "←"], label: "Previous page (⌃⌘→ next)")
                 ShortcutRow(keys: ["⌘", "R"], label: "Reload rows")
             }
             ShortcutGroup(title: "App") {

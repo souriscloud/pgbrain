@@ -243,15 +243,15 @@ extension TableTabView {
             } label: { Image(systemName: "chevron.left") }
                 .buttonStyle(.borderless)
                 .disabled(!canPrev)
-                .keyboardShortcut(.leftArrow, modifiers: [.command, .shift])
-                .help("Previous page (⌘⇧←)")
+                .keyboardShortcut(.leftArrow, modifiers: [.control, .command])
+                .help("Previous page (⌃⌘←)")
             Button {
                 Task { await loader.loadNextPage() }
             } label: { Image(systemName: "chevron.right") }
                 .buttonStyle(.borderless)
                 .disabled(!canNext)
-                .keyboardShortcut(.rightArrow, modifiers: [.command, .shift])
-                .help("Next page (⌘⇧→)")
+                .keyboardShortcut(.rightArrow, modifiers: [.control, .command])
+                .help("Next page (⌃⌘→)")
 
             if loader.isRefreshing {
                 ProgressView().controlSize(.small).padding(.leading, 4)
