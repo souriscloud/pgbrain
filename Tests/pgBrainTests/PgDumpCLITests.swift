@@ -23,13 +23,13 @@ final class PgDumpCLITests: XCTestCase {
         let args = PgDumpCLI.dumpArguments(connection: conn(), format: .custom,
                                            destinationPath: "/tmp/out.dump")
         XCTAssertEqual(args, [
-            "--host", "db.example.com",
-            "--port", "6543",
-            "--username", "alice",
+            "--host=db.example.com",
+            "--port=6543",
+            "--username=alice",
             "--no-password",
-            "--format", "c",
-            "--file", "/tmp/out.dump",
-            "app",
+            "--format=c",
+            "--file=/tmp/out.dump",
+            "--dbname=dbname='app'",
         ])
         // Password is never on the command line.
         XCTAssertFalse(args.contains { $0.lowercased().contains("password") && $0 != "--no-password" })
@@ -39,20 +39,21 @@ final class PgDumpCLITests: XCTestCase {
         let args = PgDumpCLI.dumpArguments(connection: conn(db: ""), format: .plain,
                                            destinationPath: "/tmp/x.sql",
                                            extraArgs: ["--schema", "public"])
-        XCTAssertFalse(args.contains("app"))
+        XCTAssertFalse(args.contains { $0.hasPrefix("--dbname") })
         XCTAssertEqual(args.suffix(2), ["--schema", "public"])
-        XCTAssertEqual(args[args.firstIndex(of: "--format")! + 1], "p")
+        XCTAssertTrue(args.contains("--format=p"))
     }
 
     func testRestoreArgumentsBaseline() {
         let args = PgDumpCLI.restoreArguments(connection: conn(), dbname: "restored_db",
                                               archivePath: "/tmp/in.dump")
         XCTAssertEqual(args, [
-            "--host", "db.example.com",
-            "--port", "6543",
-            "--username", "alice",
+            "--host=db.example.com",
+            "--port=6543",
+            "--username=alice",
             "--no-password",
-            "--dbname", "restored_db",
+            "--dbname=dbname='restored_db'",
+            "--",
             "/tmp/in.dump",
         ])
     }
@@ -64,7 +65,7 @@ final class PgDumpCLITests: XCTestCase {
         XCTAssertTrue(args.contains("--clean"))
         XCTAssertTrue(args.contains("--if-exists"))
         XCTAssertTrue(args.contains("--no-owner"))
-        XCTAssertEqual(args[args.firstIndex(of: "--jobs")! + 1], "4")
+        XCTAssertTrue(args.contains("--jobs=4"))
         XCTAssertFalse(args.contains("--single-transaction"))
         XCTAssertEqual(args.last, "/a.dump", "archive path is positional, last")
     }
@@ -76,7 +77,7 @@ final class PgDumpCLITests: XCTestCase {
         let args = PgDumpCLI.restoreArguments(connection: conn(), dbname: "d",
                                               archivePath: "/a.dump", options: opts)
         XCTAssertTrue(args.contains("--single-transaction"))
-        XCTAssertFalse(args.contains("--jobs"))
+        XCTAssertFalse(args.contains { $0.hasPrefix("--jobs") })
     }
 
     func testLocateBinaryThrowsWhenAbsent() {
