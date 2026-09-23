@@ -6,6 +6,145 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
+## v0.10.0 — 2026-09-23
+
+A full sweep: navigation rebuilt around how you actually move through a
+database, a spreadsheet-grade grid, real scratchpad sessions, sturdier
+connections, and a long list of fixes for bugs that could silently lose or
+mangle data. Recommended for everyone.
+
+### Navigation
+- **The sidebar stays how you left it.** Expanded and collapsed schemas,
+  selection and scroll position survive refreshes, tab switches and relaunch;
+  refreshing dims the tree instead of blanking it. Column lists now fill in
+  reliably, and empty schemas show up (a schema you just created appears).
+- **Schema picker.** Focus on one schema, hide the rest ("Hide Schema", "Show
+  Only This Schema"), with an "N hidden · Show all" footer. Databases with many
+  schemas open with only `public` (or your search_path schema) expanded.
+  PostGIS and other extension-owned objects are hidden by default; partitions
+  nest under their parent table.
+- **Fuzzy sidebar filter** (⌥⌘F): `pub.us` finds `public.users`; matches tables,
+  views and functions (columns optional), shown in their real schemas.
+- **Keyboard-first tree:** Return opens, Space previews, arrows expand and
+  collapse, type to jump; ↓ from the filter goes to the results.
+- **Go to Table (⌘O)** with recent tables first; ⌘K remains the everything
+  palette.
+- **Preview tabs:** a single click opens an italic preview tab that the next
+  click replaces; double-click, Return, editing or filtering keeps it.
+- **Tab management:** pin tabs, Close Others / to the Right / All, an overflow
+  menu, middle-click to close, short titles (schema only when names collide).
+- **Back / Forward (⌘[ / ⌘])** across tables, including foreign-key jumps —
+  going back restores the previous filter.
+- **Breadcrumb bar:** `database ▸ schema ▾ ▸ table ▾`, each part a menu of its
+  siblings.
+- **Pinned and Recent tables** at the top of the sidebar (⌘D pins).
+- **Database switcher** in the title bar opens other databases on the same
+  server in their own windows; creating a database offers to open it.
+- ⌘T and "New Query in …" start a scratchpad in the selected schema.
+- Tabs follow renamed tables; tabs for dropped tables are marked stale.
+
+### Data grid
+- **Spreadsheet-style editing:** click a cell, ⇧-click or ⇧-arrows to select a
+  range, ⌘C / ⌘V copy and paste cells (TSV), Tab / Return to move, start typing
+  to edit, ⌫ sets NULL, ⌘Z / ⌘⇧Z undo and redo.
+- **Pending changes badge** with **Preview SQL**, Apply (⌘S) and Discard (⌘⎋).
+- **Your staged edits are safe:** paging, sorting, filtering, refreshing,
+  foreign-key jumps and closing a tab or window now ask Apply / Discard /
+  Cancel instead of throwing the edits away.
+- **Apply shows what the server stored** (normalised numbers, booleans, JSON)
+  and refuses to overwrite a row someone else changed or deleted meanwhile.
+- **Tables without a primary key can be edited**, with a clear warning.
+- Pages are ordered by primary key by default, so rows don't jump between
+  pages after an edit; sorting a numeric column by its header sorts
+  numerically.
+- ⌘-click follows multi-column foreign keys. The map view honours WHERE.
+  Structure / DDL pane and grid / form / map mode are remembered per tab.
+- CSV / JSON import asks for encoding, delimiter and header options.
+
+### Scratchpad
+- **Every PostgreSQL type shows exactly as psql shows it** — time, interval,
+  arrays, inet, money, NaN / infinity, exact big numerics, your session's time
+  zone, BC dates. `SELECT * FROM pg_class` no longer fails.
+- **One server session per scratchpad:** `SET`, temp tables, `SET ROLE` and
+  `BEGIN` carry over between runs.
+- **Transaction indicator** with Commit / Roll Back, an Auto / Manual commit
+  switch, and a prompt before closing a tab or window with an open
+  transaction.
+- Stop (⌘.) cancels exactly your statement; a double ⌘↩ no longer runs it
+  twice. Server NOTICEs show under results.
+- Explain is now ⌘⇧E (⌘E is "Use Selection for Find" again); keypad Enter
+  runs; Open .sql… is ⌥⌘O.
+- Function and view editors zoom with the rest and autocomplete.
+- Result history is capped per cell, with a Clear results button.
+
+### Connections
+- **Automatic reconnect** after sleep or a network change; a dropped SSH
+  tunnel restarts; the status bar shows the connection's health with a
+  Reconnect button.
+- **Custom root CA and client certificates**; verify-full now works through
+  an SSH tunnel.
+- **Per-connection read-only mode**, statement timeout and idle-in-transaction
+  timeout; sessions show up as "pgBrain" in `pg_stat_activity`.
+- **Paste a `postgres://` URL or `key=value` string** into the connection
+  editor; import `~/.pg_service.conf`, fill passwords from `~/.pgpass`
+  (Settings ▸ Connections).
+- **pg_dump / pg_restore** find PostgreSQL 18 (Postgres.app, Homebrew, EDB),
+  pick the version that matches your server, work through SSH tunnels, and
+  can be cancelled.
+- SSH tunnels are non-interactive, accept a new host key on first use, explain
+  failures clearly, are shared between windows and stop when you quit.
+
+### Fixed — could lose or corrupt data
+- A data-modifying CTE (`WITH … INSERT`) or `SELECT … INTO` in the scratchpad
+  was silently cut to 1,001 rows by the automatic LIMIT and skipped the
+  production guard.
+- CSV import crashed or swapped values between columns when the file's header
+  order differed from the table's.
+- Editing a timestamp could replace it with the current time or shift it by
+  your time-zone offset; microseconds were dropped.
+- After paging or re-sorting, the grid could keep showing the previous rows.
+- The SQL formatter swallowed the line after a `--` comment.
+- A WHERE filter ending in `-- comment` disabled paging and loaded the whole
+  table.
+- One unreadable entry could wipe the whole connection list; a failed Keychain
+  write could lose a saved password.
+- Stopping a query could cancel a different query running on the same server.
+- Statement splitting and the safety check misread E'…' strings, Windows line
+  endings after `--` comments, and `$1` parameters.
+- CSV export wrote NULL and empty strings identically; JSON export could emit
+  invalid NaN / Infinity; a failed export left a partial file.
+- JSON import turned 0 / 1 into booleans and lost precision on big numbers.
+- Cross-database copy: enum and domain columns, sequences after the copy,
+  duplicate upsert keys, and SSH / TLS targets all work now; Upsert from the
+  copy sheet no longer fails outright.
+- Schema duplicate no longer rewrites look-alike names or text inside strings.
+
+### Fixed — other
+- ⌘C / ⌘Z in the WHERE field, find bar or SQL editor no longer act on the grid.
+- The cell editor opens on the right cell while find is active.
+- A column named `description` no longer shows a descending sort arrow.
+- Closing a window while it was still connecting left an SSH process behind.
+- The "unsaved changes" dot vanished when you switched tabs.
+- The empty-window hint now says ⌘T (not ⌘N) opens a scratchpad.
+
+### Security
+- Saved passwords are readable only by pgBrain (the old "any app" Keychain
+  access list is gone; items migrate on first use). Note: after updating,
+  going back to 0.9.x means re-entering passwords.
+- Query history masks password literals and can be turned off or cleared.
+- Exported connection files are private (0600); copied connection strings with
+  passwords are hidden from clipboard managers.
+- pg_dump / pg_restore get the password via a private temporary file instead
+  of the environment.
+
+### Under the hood
+- The Beta update channel was removed (it pointed at a feed that never
+  existed); Settings ▸ Updates now has the automatic-check toggle.
+- "Verbose Postgres logging" works (it was never wired up); logs go to the
+  unified log under `cloud.souris.pgbrain`.
+- PostgresNIO 1.33.1, Sparkle 2.10.0; the release build carries no hardened
+  runtime exemptions.
+
 ## v0.9.7 — 2026-06-09
 
 ### Fixed

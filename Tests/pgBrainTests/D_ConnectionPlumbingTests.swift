@@ -132,6 +132,7 @@ final class D_KeychainTests: XCTestCase {
     }
 
     func testSetUpdatesInPlaceAndDeletes() throws {
+        try requireKeychainTests()
         let id = UUID()
         defer { Keychain.deletePassword(for: id) }
         do {
@@ -147,6 +148,7 @@ final class D_KeychainTests: XCTestCase {
     }
 
     func testLegacyItemMigratesThenLegacyIsDeleted() throws {
+        try requireKeychainTests()
         let id = UUID()
         defer { Keychain.deletePassword(for: id) }
         guard legacyAdd("old-secret", id: id) == errSecSuccess else {
@@ -158,6 +160,7 @@ final class D_KeychainTests: XCTestCase {
     }
 
     func testSetPasswordRemovesStaleLegacyCopy() throws {
+        try requireKeychainTests()
         let id = UUID()
         defer { Keychain.deletePassword(for: id) }
         guard legacyAdd("stale", id: id) == errSecSuccess else {

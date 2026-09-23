@@ -23,6 +23,7 @@ final class D_ConnectionServiceLiveTests: XCTestCase {
             let parsed = try ConnInfoParser.parse(dsn)
             c.sslMode = .prefer
             if let pw = ConnInfoParser.apply(parsed, to: &c), !pw.isEmpty {
+                try requireKeychainTests()
                 try Keychain.setPassword(pw, for: c.id)
                 createdKeychainID = c.id
             }

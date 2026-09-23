@@ -17,3 +17,12 @@ func XCTAssertThrowsErrorAsync<T>(
         errorHandler(error)
     }
 }
+
+/// Tests that write to the real login Keychain are opt-in: every rebuild of
+/// the test binary has a new ad-hoc signature, so macOS asks for the login
+/// password on each run. Run them with `PGBRAIN_KEYCHAIN_TESTS=1 swift test`.
+func requireKeychainTests(file: StaticString = #filePath, line: UInt = #line) throws {
+    guard ProcessInfo.processInfo.environment["PGBRAIN_KEYCHAIN_TESTS"] == "1" else {
+        throw XCTSkip("Keychain tests are opt-in (PGBRAIN_KEYCHAIN_TESTS=1)", file: file, line: line)
+    }
+}

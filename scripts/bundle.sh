@@ -65,10 +65,28 @@ ditto "$SPARKLE_SRC" "${APP_DIR}/Contents/Frameworks/Sparkle.framework"
 # PkgInfo (legacy but expected).
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
 
-echo "→ Ad-hoc signing for local dev…"
+# Local builds are signed with the Developer ID from scripts/.env when it is
+# available: a stable identity means the Keychain recognises every rebuild as
+# the same app (and as the release build), so saved passwords don't prompt
+# after each build. Without it (or with PGBRAIN_ADHOC=1) fall back to ad-hoc,
+# which the Keychain treats as a new app on every build.
+SIGN_IDENTITY="-"
+if [[ "${PGBRAIN_ADHOC:-0}" != "1" && -f scripts/.env ]]; then
+    CODESIGN_IDENTITY="$(sed -n 's/^CODESIGN_IDENTITY="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' scripts/.env | head -1)"
+    if [[ -n "$CODESIGN_IDENTITY" ]] && security find-identity -v -p codesigning | grep -qF "$CODESIGN_IDENTITY"; then
+        SIGN_IDENTITY="$CODESIGN_IDENTITY"
+    fi
+fi
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+    echo "→ Ad-hoc signing for local dev…"
+    ENTITLEMENTS="Resources/pgBrain-dev.entitlements"
+else
+    echo "→ Signing with ${SIGN_IDENTITY} (local, not notarized)…"
+    ENTITLEMENTS="Resources/pgBrain.entitlements"
+fi
+
 # Sign nested Sparkle helpers first (Apple's strict signing order: deepest
-# first). Skip in release flow — scripts/release.sh re-signs with the real
-# Developer ID identity.
+# first). scripts/release.sh re-signs everything with a secure timestamp.
 SPARKLE_VERSION_DIR="${APP_DIR}/Contents/Frameworks/Sparkle.framework/Versions/B"
 for target in \
     "${SPARKLE_VERSION_DIR}/XPCServices/Downloader.xpc" \
@@ -78,16 +96,16 @@ for target in \
     "${APP_DIR}/Contents/Frameworks/Sparkle.framework"
 do
     [[ -e "$target" ]] || continue
-    codesign --force --sign - --timestamp=none "$target" >/dev/null 2>&1 || echo "  ! ad-hoc sign failed: $target" >&2
+    codesign --force --options runtime --sign "$SIGN_IDENTITY" --timestamp=none "$target" >/dev/null 2>&1 \
+        || echo "  ! sign failed: $target" >&2
 done
 
-codesign --force --sign - \
-    --entitlements Resources/pgBrain-dev.entitlements \
+codesign --force --sign "$SIGN_IDENTITY" \
+    --entitlements "$ENTITLEMENTS" \
     --options runtime \
     --timestamp=none \
     "${APP_DIR}" >/dev/null 2>&1 || {
-        # Fall back to entitlement-less ad-hoc sign if hardened runtime rejects the entitlements during dev.
-        echo "  (retrying without hardened runtime)"
+        echo "  (retrying ad-hoc without hardened runtime)"
         codesign --force --sign - "${APP_DIR}" >/dev/null
     }
 
