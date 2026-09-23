@@ -5,14 +5,27 @@ import AppKit
 /// menu bar's "Open Windows" list.
 ///
 /// A window is identified by (connection id, database): the database
-/// switcher opens sibling windows for the same saved connection.
+/// switcher opens sibling windows for the same saved connection. Database
+/// names are compared resolved — a connection saved without a database lands
+/// on the server's default (the user name, or whatever the server reported),
+/// so "" and that name must be the same key or picking the current database
+/// in the switcher would open a duplicate window.
 @MainActor
 final class WindowManager {
     struct Entry {
         let connectionID: UUID
         let database: String
+        let username: String
         let window: NSWindow
         weak var service: ConnectionService?
+
+        /// The database this window is really on: the explicit one, else
+        /// what the server reported once the schema loaded, else the
+        /// server-side default (the user name).
+        @MainActor var resolvedDatabase: String {
+            let reported = service?.schema.databaseName ?? ""
+            return WindowManager.resolve(database: database, reported: reported, username: username)
+        }
     }
 
     private(set) var entries: [Entry] = []
@@ -23,10 +36,17 @@ final class WindowManager {
         entries.map { ($0.connectionID, $0.window) }
     }
 
+    nonisolated static func resolve(database: String, reported: String, username: String) -> String {
+        if !database.isEmpty { return database }
+        if !reported.isEmpty { return reported }
+        return username
+    }
+
     func register(window: NSWindow, service: ConnectionService) {
         if !entries.contains(where: { $0.window === window }) {
             entries.append(Entry(connectionID: service.connection.id,
                                  database: service.connection.database,
+                                 username: service.connection.username,
                                  window: window, service: service))
         }
     }
@@ -40,15 +60,27 @@ final class WindowManager {
         entries.first(where: { $0.connectionID == connectionID })?.window
     }
 
-    func window(for connectionID: UUID, database: String) -> NSWindow? {
-        entries.first(where: { $0.connectionID == connectionID && $0.database == database })?.window
+    func window(for connectionID: UUID, database: String, username: String) -> NSWindow? {
+        entry(for: connectionID, database: database, username: username)?.window
     }
 
-    /// Live `ConnectionService` for a connection if its window is currently
-    /// open, otherwise nil. iter-9 cross-DB copy uses this to reuse an
-    /// already-leased PostgresClient instead of opening a transient one.
-    func service(for connectionID: UUID) -> ConnectionService? {
-        entries.first(where: { $0.connectionID == connectionID })?.service
+    /// Live service for exactly this (connection, database), so tools that
+    /// act on "the target database" never borrow a sibling window's pool.
+    func service(for connectionID: UUID, database: String, username: String) -> ConnectionService? {
+        entry(for: connectionID, database: database, username: username)?.service
+    }
+
+    private func entry(for connectionID: UUID, database: String, username: String) -> Entry? {
+        let wanted = Self.resolve(database: database, reported: "", username: username)
+        return entries.first { entry in
+            guard entry.connectionID == connectionID else { return false }
+            return entry.database == database || entry.resolvedDatabase == wanted
+        }
+    }
+
+    /// Whether any window of the connection is open, whatever its database.
+    func hasWindow(for connectionID: UUID) -> Bool {
+        entries.contains { $0.connectionID == connectionID }
     }
 
     func service(for window: NSWindow?) -> ConnectionService? {
@@ -61,8 +93,8 @@ final class WindowManager {
         service(for: NSApp.keyWindow) ?? service(for: NSApp.mainWindow)
     }
 
-    /// Other open databases of the same connection, for the switcher.
+    /// Resolved database names open for the connection, for the switcher.
     func openDatabases(for connectionID: UUID) -> [String] {
-        entries.filter { $0.connectionID == connectionID }.map(\.database)
+        entries.filter { $0.connectionID == connectionID }.map(\.resolvedDatabase)
     }
 }

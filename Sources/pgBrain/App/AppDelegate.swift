@@ -138,7 +138,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `restoring` to repopulate the window's frame + tab list + scratchpad
     /// text from a `SessionState` snapshot.
     func openConnection(_ connection: Connection, restoring snapshot: SessionState.Window? = nil) {
-        if let existing = windowManager.window(for: connection.id, database: connection.database) {
+        if let existing = windowManager.window(for: connection.id, database: connection.database,
+                                               username: connection.username) {
+            // Two saved windows can resolve to the same (connection,
+            // database) — e.g. one on "" and one on the default database by
+            // name. Replay the second one's tabs into the window that won
+            // instead of dropping them.
+            if let snapshot, let service = windowManager.service(for: existing) {
+                restoreTabs(into: service, from: snapshot, selectRestored: false)
+            }
             NSApp.activate(ignoringOtherApps: true)
             existing.makeKeyAndOrderFront(nil)
             return
@@ -194,7 +202,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Wait for the connection's schema to load, then replay each persisted
     /// tab against the live schema. Tables that no longer exist are dropped.
-    private func restoreTabs(into service: ConnectionService, from snapshot: SessionState.Window) {
+    private func restoreTabs(into service: ConnectionService, from snapshot: SessionState.Window,
+                             selectRestored: Bool = true) {
         Task { @MainActor in
             // Spin until the schema reaches a terminal state. The earlier
             // version only waited on `.loading`, but a fresh window starts
@@ -224,6 +233,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                               let live = service.schema.schemas.first(where: { $0.name == schema })?
                                 .tables.first(where: { $0.name == name })
                         else { continue }
+                        // Merging into a live window: a table it already
+                        // shows keeps that tab's own state.
+                        guard workspace.tab(showing: live.id) == nil else { continue }
                         workspace.openTable(live)
                         // Carry the per-tab WHERE + ORDER BY + color +
                         // custom title onto the newly opened Tab so the
@@ -266,7 +278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             opened.isPinned = persisted.isPinned ?? false
                         }
                     }
-                    if snapshot.selectedTabIndex == idx, let last = workspace.tabs.last {
+                    if selectRestored, snapshot.selectedTabIndex == idx, let last = workspace.tabs.last {
                         workspace.selectedID = last.id
                     }
                 }

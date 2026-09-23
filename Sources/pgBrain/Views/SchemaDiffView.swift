@@ -7,10 +7,19 @@ struct SchemaDiffView: View {
     let source: ConnectionService
     let onClose: () -> Void
 
-    @State private var selectedTargetID: UUID?
+    @State private var selectedTarget: Target?
     @State private var diff: SchemaDiff.Result?
     @State private var status: String?
-    @State private var store = ConnectionStore.shared
+
+    /// One open window, identified by (connection, database): sibling
+    /// windows of the same connection sit on different databases, and the
+    /// diff must read exactly the one picked.
+    struct Target: Hashable {
+        let connectionID: UUID
+        let database: String
+        let username: String
+        let label: String
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,25 +44,29 @@ struct SchemaDiffView: View {
             Text("Diff schemas — left: \(source.connection.name)")
                 .font(.headline)
             Spacer()
-            Picker("Right", selection: $selectedTargetID) {
-                Text("Pick…").tag(UUID?.none)
-                ForEach(eligibleTargets) { c in
-                    Text(c.name).tag(UUID?.some(c.id))
+            Picker("Right", selection: $selectedTarget) {
+                Text("Pick…").tag(Target?.none)
+                ForEach(eligibleTargets, id: \.self) { t in
+                    Text(t.label).tag(Target?.some(t))
                 }
             }
             .frame(width: 240)
             Button("Compare") { Task { await compare() } }
                 .buttonStyle(.borderedProminent)
                 .tint(Tokens.Brand.primary)
-                .disabled(selectedTargetID == nil)
+                .disabled(selectedTarget == nil)
         }
         .padding(Tokens.Spacing.md)
     }
 
-    private var eligibleTargets: [Connection] {
-        store.connections.filter { conn in
-            conn.id != source.connection.id
-                && AppDelegate.shared?.windowManager.service(for: conn.id) != nil
+    private var eligibleTargets: [Target] {
+        guard let manager = AppDelegate.shared?.windowManager else { return [] }
+        return manager.entries.compactMap { entry in
+            guard let service = entry.service, service !== source else { return nil }
+            let db = entry.resolvedDatabase
+            return Target(connectionID: entry.connectionID, database: service.connection.database,
+                          username: service.connection.username,
+                          label: db.isEmpty ? service.connection.name : "\(service.connection.name) · \(db)")
         }
     }
 
@@ -149,8 +162,9 @@ struct SchemaDiffView: View {
 
     @MainActor
     private func compare() async {
-        guard let id = selectedTargetID,
-              let other = AppDelegate.shared?.windowManager.service(for: id) else {
+        guard let target = selectedTarget,
+              let other = AppDelegate.shared?.windowManager.service(
+                  for: target.connectionID, database: target.database, username: target.username) else {
             status = "Target connection isn't open."
             return
         }
