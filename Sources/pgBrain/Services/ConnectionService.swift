@@ -111,6 +111,10 @@ final class ConnectionService {
     @ObservationIgnored private let observers = ObserverBag()
     @ObservationIgnored private let ownerID = UUID().uuidString
     @ObservationIgnored private var tunnelOwner: String?
+    /// Pools replaced by a background reconnect, kept running for a grace
+    /// period so queries already in flight on them can finish.
+    @ObservationIgnored private var retiredPools: [Task<Void, Never>] = []
+    @ObservationIgnored private var consecutivePingFailures = 0
 
     init(connection: Connection) {
         self.connection = connection
@@ -162,6 +166,7 @@ final class ConnectionService {
         healthTask?.cancel()
         pathCheckTask?.cancel()
         pathMonitor?.cancel()
+        for pool in retiredPools { pool.cancel() }
         observers.removeAll()
         if let owner = tunnelOwner {
             let id = connection.id
@@ -175,8 +180,19 @@ final class ConnectionService {
     func loader(for tab: WorkspaceState.Tab, table: TableNode) -> RowsLoader {
         if let cached = loaderCache[tab.id] { return cached }
         let loader = RowsLoader(table: table, service: self)
+        loader.tab = tab
         loaderCache[tab.id] = loader
         return loader
+    }
+
+    /// After a schema reload re-pointed tabs at fresh `TableNode`s (rename,
+    /// primary-key change), hand them to the cached loaders so UPDATE /
+    /// DELETE target the right relation and key.
+    func syncLoadersWithTabs() {
+        for tab in workspace.tabs {
+            guard let table = tab.tableNode, let loader = loaderCache[tab.id] else { continue }
+            loader.adoptTable(table)
+        }
     }
 
     /// Inspector cache — same caching contract as `loader(for:table:)`.
@@ -203,18 +219,35 @@ final class ConnectionService {
         connectTask = Task { [weak self] in await self?.connect(generation: gen) }
     }
 
+    /// Retry / Reconnect rebuild only the pool. Scratchpad sessions are
+    /// independent sockets: closing a healthy one would make the server
+    /// silently roll back its open transaction, and a dead one reopens
+    /// itself on the next run anyway.
     func retry() {
-        shutdown()
+        tearDownPool()
         start()
     }
 
-    /// Manual "Reconnect": drops the current session and connects afresh.
-    /// Tabs, loaders and the workspace survive — they live on the service.
+    /// Manual "Reconnect": drops the pooled session and connects afresh.
+    /// Tabs, loaders, scratchpad sessions and the workspace survive.
     func reconnect() {
         retry()
     }
 
+    /// Window close: the pool, every scratchpad session and the per-tab
+    /// caches go. Loaders hold the service strongly, so the caches must be
+    /// emptied here or the service never deallocates.
     func shutdown() {
+        tearDownPool()
+        for tab in workspace.tabs {
+            if case .scratchpad(let pad) = tab.kind { pad.closeSession() }
+        }
+        Self.releaseEndpoint(for: connection, owner: scratchpadTunnelOwner)
+        loaderCache.removeAll()
+        inspectorCache.removeAll()
+    }
+
+    private func tearDownPool() {
         generation &+= 1
         connectTask?.cancel()
         connectTask = nil
@@ -223,14 +256,13 @@ final class ConnectionService {
         stopHealthMonitor()
         clientTask?.cancel()
         clientTask = nil
+        for pool in retiredPools { pool.cancel() }
+        retiredPools.removeAll()
         client = nil
         state = .closed
         health = .healthy
+        consecutivePingFailures = 0
         releaseTunnel()
-        for tab in workspace.tabs {
-            if case .scratchpad(let pad) = tab.kind { pad.closeSession() }
-        }
-        Self.releaseEndpoint(for: connection, owner: scratchpadTunnelOwner)
     }
 
     /// Tunnel owner shared by every scratchpad session in this window, so
@@ -285,11 +317,18 @@ final class ConnectionService {
         }
     }
 
-    private func adopt(_ session: Session) {
+    /// `drainOld`: a background reconnect replaced a pool that may still be
+    /// serving queries (a slow link, not a dead one) — let it wind down
+    /// instead of cancelling them mid-flight.
+    private func adopt(_ session: Session, drainOld: Bool = false) {
         let old = clientTask
         client = session.client
         clientTask = session.runTask
-        old?.cancel()
+        if drainOld, let old {
+            retire(old)
+        } else {
+            old?.cancel()
+        }
         serverVersionNum = session.versionNum
         if let num = session.versionNum {
             Self.serverVersionNums[connection.id] = num
@@ -365,6 +404,25 @@ final class ConnectionService {
     private static let healthInterval: Duration = .seconds(30)
     private static let pingTimeout: Double = 8
     private static let attemptsBeforeError = 3
+    /// One slow ping on a congested link isn't an outage; recovery tears the
+    /// pool down, so it needs a second, quick confirmation.
+    nonisolated static let pingFailuresBeforeRecovery = 2
+    private static let pingRecheckDelay: Duration = .seconds(3)
+    private static let poolDrainWindow: Duration = .seconds(120)
+
+    /// Pure: whether this many consecutive failed pings mean the session is lost.
+    nonisolated static func shouldRecover(afterConsecutivePingFailures failures: Int) -> Bool {
+        failures >= pingFailuresBeforeRecovery
+    }
+
+    private func retire(_ pool: Task<Void, Never>) {
+        retiredPools.append(pool)
+        Task { [weak self] in
+            try? await Task.sleep(for: Self.poolDrainWindow)
+            pool.cancel()
+            self?.retiredPools.removeAll { $0 == pool }
+        }
+    }
 
     nonisolated static func reconnectDelay(afterAttempt attempt: Int) -> Duration {
         let steps: [Int] = [1, 2, 5, 10, 20, 30]
@@ -442,11 +500,24 @@ final class ConnectionService {
         let gen = generation
         let ok = await Self.ping(client, timeoutSeconds: Self.pingTimeout)
         guard gen == generation, client === self.client else { return }
-        if !ok { beginRecovery(reason: "The server stopped answering.") }
+        if ok {
+            consecutivePingFailures = 0
+            return
+        }
+        consecutivePingFailures += 1
+        if Self.shouldRecover(afterConsecutivePingFailures: consecutivePingFailures) {
+            beginRecovery(reason: "The server stopped answering.")
+            return
+        }
+        Log.connection.info("ping to \(self.connection.id.uuidString, privacy: .public) failed; re-checking before reconnecting")
+        try? await Task.sleep(for: Self.pingRecheckDelay)
+        guard gen == generation, client === self.client else { return }
+        await checkHealth()
     }
 
     private func beginRecovery(reason: String) {
         guard recoveryTask == nil, case .connected = state else { return }
+        consecutivePingFailures = 0
         Log.connection.info("connection \(self.connection.id.uuidString, privacy: .public) lost: \(reason, privacy: .public)")
         let gen = generation
         recoveryTask = Task { [weak self] in await self?.recover(generation: gen, reason: reason) }
@@ -460,7 +531,7 @@ final class ConnectionService {
             health = .reconnecting(attempt: attempt)
             do {
                 let session = try await establish(generation: gen)
-                adopt(session)
+                adopt(session, drainOld: true)
                 health = .healthy
                 recoveryTask = nil
                 if case .connected = state {
