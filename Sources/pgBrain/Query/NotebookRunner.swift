@@ -177,6 +177,7 @@ enum NotebookRunner {
                 return
             }
             fail(results, message: describe(error))
+            if isSessionLoss(error) { weak.value?.appliedSearchPath = .none }
             weak.value?.syncTransaction(session.transactionStatus)
             return
         }
@@ -293,7 +294,7 @@ enum NotebookRunner {
                 return .unsupported
             }
             let message = describe(error)
-            if case PGWireError.connectionClosed = error {
+            if isSessionLoss(error) {
                 weak.value?.syncTransaction(.idle)
                 weak.value?.appliedSearchPath = .none
             }
@@ -427,12 +428,33 @@ enum NotebookRunner {
     /// has fallen back to pooled execution.
     private static func usableSession(_ weak: WeakNotebook, service: ConnectionService) async throws -> ScratchpadSession? {
         guard let reason = weak.value.map({ $0.sessionUnavailableReason }), reason == nil else { return nil }
-        if let existing = weak.value?.session, !existing.isClosed { return existing }
+        if let existing = weak.value?.session, !existing.isClosed {
+            guard service.connection.sshEnabled else { return existing }
+            // A restarted ssh tunnel listens on a new local port; the session
+            // captured the old one and would get "connection refused" forever.
+            let target = try await ConnectionService.openEndpoint(for: service.connection, owner: service.scratchpadTunnelOwner)
+            if !endpointMoved(existing.endpoint, to: target) { return existing }
+            Log.connection.notice("SSH tunnel moved to port \(target.port, privacy: .public); rebuilding the scratchpad session")
+            let wasInTransaction = existing.transactionStatus != .idle
+            let endpoint = try await endpoint(for: service)
+            guard let notebook = weak.value else { return nil }
+            let session = ScratchpadSession(endpoint: endpoint)
+            notebook.attach(session: session)
+            notebook.syncTransaction(.idle)
+            notebook.sessionNotice = wasInTransaction
+                ? "Reconnected through a restarted SSH tunnel — the open transaction was rolled back by the server, and temp tables and settings are gone."
+                : "Reconnected through a restarted SSH tunnel — temp tables and session settings are gone."
+            return session
+        }
         let endpoint = try await endpoint(for: service)
         guard let notebook = weak.value else { return nil }
         let session = ScratchpadSession(endpoint: endpoint)
         notebook.attach(session: session)
         return session
+    }
+
+    static func endpointMoved(_ current: PGWireEndpoint, to target: ConnectionService.Endpoint) -> Bool {
+        current.host != target.host || current.port != target.port
     }
 
     static func endpoint(for service: ConnectionService) async throws -> PGWireEndpoint {
@@ -489,6 +511,11 @@ enum NotebookRunner {
         ]
         if control.contains(first) { return false }
         return SQLSafety.classify(sql) != .readOnly
+    }
+
+    private static func isSessionLoss(_ error: any Error) -> Bool {
+        guard let wire = error as? PGWireError else { return false }
+        return wire == .connectionClosed || wire == .transactionLost
     }
 
     private static func isCancellation(_ error: any Error) -> Bool {
