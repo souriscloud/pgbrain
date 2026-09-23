@@ -1,7 +1,5 @@
 import SwiftUI
-import PostgresNIO
-import NIOCore
-import NIOSSL
+import UniformTypeIdentifiers
 
 struct ConnectionEditorView: View {
     @State private var connection: Connection
@@ -9,9 +7,13 @@ struct ConnectionEditorView: View {
     @State private var isTesting = false
     @State private var testMessage: String?
     @State private var testOK = false
+    @State private var connectionString = ""
+    @State private var connectionStringMessage: String?
+    @State private var connectionStringOK = false
 
     let onSave: (Connection, String) -> Void
     let onCancel: () -> Void
+    private let loadsKeychainPassword: Bool
 
     init(
         connection: Connection?,
@@ -23,8 +25,9 @@ struct ConnectionEditorView: View {
         _connection = State(initialValue: initial)
         // `initialPassword` wins (used by the Welcome paste-import
         // path so the user sees the pasted secret before they hit
-        // Save). Falls back to the Keychain entry for `.edit`.
-        _password = State(initialValue: initialPassword ?? Keychain.password(for: initial.id) ?? "")
+        // Save). Otherwise `.edit` loads the Keychain entry in `.task`.
+        _password = State(initialValue: initialPassword ?? "")
+        loadsKeychainPassword = initialPassword == nil && connection != nil
         self.onSave = onSave
         self.onCancel = onCancel
     }
@@ -39,7 +42,14 @@ struct ConnectionEditorView: View {
             Divider()
             footer
         }
-        .frame(width: 520, height: 620)
+        .frame(width: 540, height: 700)
+        .task {
+            // Keychain reads can block on an access prompt — keep them off-main.
+            guard loadsKeychainPassword else { return }
+            if let stored = await Keychain.passwordAsync(for: connection.id), password.isEmpty {
+                password = stored
+            }
+        }
     }
 
     private var header: some View {
@@ -58,12 +68,16 @@ struct ConnectionEditorView: View {
                     .foregroundStyle(.white)
                     .clipShape(RoundedRectangle(cornerRadius: Tokens.Corner.chip))
             }
+            if connection.readOnly {
+                Text("READ-ONLY")
+                    .font(.caption2.weight(.bold))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.secondary.opacity(0.25))
+                    .clipShape(RoundedRectangle(cornerRadius: Tokens.Corner.chip))
+            }
             Spacer()
-            // Quick-import: paste a pgBrain exchange JSON from the
-            // clipboard and the editor's fields fill in. Button is
-            // dimmed when the pasteboard doesn't carry a recognisable
-            // payload. ⌘V on this button also triggers the same path
-            // (any-key for accessibility).
+            // Quick-import from the clipboard: a pgBrain exchange JSON, a
+            // postgres:// URL or a libpq key=value string.
             Button {
                 pasteFromClipboard()
             } label: {
@@ -72,20 +86,19 @@ struct ConnectionEditorView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .help("Paste a pgBrain exchange JSON from the clipboard to fill the fields")
+            .help("Fill the fields from a pgBrain exchange JSON, postgres:// URL or key=value string on the clipboard")
             .keyboardShortcut("v", modifiers: [.command, .shift])
         }
         .padding(Tokens.Spacing.lg)
     }
 
-    /// Look at the pasteboard for the canonical exchange JSON. If
-    /// found, copy each field into the bound `connection`. We don't
-    /// auto-fire on the editor opening — too magical — but ⌘⇧V or the
-    /// header button both reach this path.
     private func pasteFromClipboard() {
-        guard let raw = NSPasteboard.general.string(forType: .string),
-              let imported = ConnectionExchange.parse(raw)
-        else { return }
+        guard let raw = NSPasteboard.general.string(forType: .string) else { return }
+        guard let imported = ConnectionExchange.parse(raw) else {
+            connectionString = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            applyConnectionString()
+            return
+        }
         // Preserve the existing id (so "Edit…" doesn't clobber the
         // saved connection's identity), but copy everything else.
         let existingID = connection.id
@@ -96,10 +109,67 @@ struct ConnectionEditorView: View {
             // sees what was imported before they hit Save.
             password = pw
         }
+        if !imported.warnings.isEmpty {
+            connectionStringOK = false
+            connectionStringMessage = imported.warnings.joined(separator: "\n")
+        }
+    }
+
+    /// Fill fields from a `postgres://` URL or libpq `key=value` string.
+    /// Only keys present in the string are touched.
+    private func applyConnectionString() {
+        do {
+            let parsed = try ConnInfoParser.parse(connectionString)
+            if let pw = ConnInfoParser.apply(parsed, to: &connection) { password = pw }
+            if connection.name.isEmpty || connection.name == "Local Postgres" {
+                let derived = parsed.service ?? [parsed.database, parsed.host].compactMap { $0 }.joined(separator: " @ ")
+                if !derived.isEmpty { connection.name = derived }
+            }
+            connectionStringOK = true
+            var note = "Filled from connection string."
+            if !parsed.ignored.isEmpty {
+                note += " Ignored: " + parsed.ignored.keys.sorted().joined(separator: ", ") + "."
+            }
+            connectionStringMessage = note
+            connectionString = ""
+        } catch {
+            connectionStringOK = false
+            connectionStringMessage = error.localizedDescription
+        }
+    }
+
+    private var sshValidationError: String? {
+        guard connection.sshEnabled else { return nil }
+        do {
+            try SSHCommand.validate(connection)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     private var form: some View {
         VStack(alignment: .leading, spacing: Tokens.Spacing.md) {
+            field("Connection string (optional)") {
+                HStack(spacing: 6) {
+                    TextField("postgres://user@host:5432/db?sslmode=require  or  host=… dbname=…",
+                              text: $connectionString)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .font(.system(.body, design: .monospaced))
+                        .onSubmit(applyConnectionString)
+                    Button("Fill", action: applyConnectionString)
+                        .disabled(connectionString.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            if let connectionStringMessage {
+                Label(connectionStringMessage,
+                      systemImage: connectionStringOK ? "checkmark.circle" : "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(connectionStringOK ? Color.secondary : Color.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             field("Name") {
                 TextField("e.g. Local Postgres", text: $connection.name)
                     .textFieldStyle(.roundedBorder)
@@ -179,6 +249,10 @@ struct ConnectionEditorView: View {
                 }
             }
 
+            if connection.sslMode != .disable {
+                sslFiles
+            }
+
             Toggle(isOn: $connection.isProduction) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Production").font(.callout.weight(.medium))
@@ -189,6 +263,8 @@ struct ConnectionEditorView: View {
             .toggleStyle(.switch)
             .tint(Tokens.Brand.danger)
             .padding(.top, Tokens.Spacing.xs)
+
+            sessionSettings
 
             // SSH tunnel section — optional. When enabled we shell
             // out to /usr/bin/ssh with `-L localport:dbhost:dbport`
@@ -208,9 +284,10 @@ struct ConnectionEditorView: View {
                     field("SSH Host") {
                         TextField("bastion.example.com", text: $connection.sshHost)
                             .textFieldStyle(.roundedBorder)
+                            .autocorrectionDisabled()
                     }
                     field("Port", flex: 0) {
-                        TextField("22", value: $connection.sshPort, format: .number)
+                        TextField("22", value: $connection.sshPort, format: .number.grouping(.never))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 80)
                     }
@@ -219,12 +296,22 @@ struct ConnectionEditorView: View {
                     field("SSH User") {
                         TextField("ec2-user", text: $connection.sshUser)
                             .textFieldStyle(.roundedBorder)
+                            .autocorrectionDisabled()
                     }
                     field("Private key (optional)") {
-                        TextField("~/.ssh/id_ed25519 — leave blank to use agent / defaults",
-                                  text: $connection.sshKeyPath)
-                            .textFieldStyle(.roundedBorder)
+                        HStack(spacing: 4) {
+                            TextField("blank = agent / default keys", text: $connection.sshKeyPath)
+                                .textFieldStyle(.roundedBorder)
+                            Button("Choose…") { pickFile(into: $connection.sshKeyPath, directory: ".ssh") }
+                        }
                     }
+                }
+                Text("Keys with a passphrase must be loaded into ssh-agent (ssh-add --apple-use-keychain). New hosts are added to known_hosts automatically; changed host keys are refused.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let sshValidationError {
+                    Label(sshValidationError, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
                 }
             }
 
@@ -242,6 +329,107 @@ struct ConnectionEditorView: View {
         }
     }
 
+    @ViewBuilder
+    private var sslFiles: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            pathRow("Root CA", placeholder: "system trust store", binding: $connection.sslRootCertPath)
+            pathRow("Client cert", placeholder: "none", binding: $connection.sslClientCertPath)
+            pathRow("Client key", placeholder: "none (unencrypted PEM)", binding: $connection.sslClientKeyPath)
+            Text(sslHint)
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var sslHint: String {
+        switch connection.sslMode {
+        case .disable:
+            return ""
+        case .allow, .prefer:
+            return "\(connection.sslMode.rawValue) encrypts when the server offers TLS but verifies nothing; the root CA is ignored."
+        case .require:
+            return "require encrypts without verifying — unless a Root CA is set, then the chain is verified (like verify-ca)."
+        case .verifyCA:
+            return "verify-ca checks the certificate chain against the Root CA (or the system trust store), not the hostname."
+        case .verifyFull:
+            return "verify-full checks the chain and that the certificate matches \(connection.host.isEmpty ? "the host" : connection.host) — also through an SSH tunnel."
+        }
+    }
+
+    private func pathRow(_ label: String, placeholder: String, binding: Binding<String>) -> some View {
+        HStack(spacing: 6) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+                .frame(width: 72, alignment: .trailing)
+            TextField(placeholder, text: binding)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.caption, design: .monospaced))
+            Button("Choose…") { pickFile(into: binding, directory: nil) }
+                .controlSize(.small)
+            if !binding.wrappedValue.isEmpty {
+                Button {
+                    binding.wrappedValue = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var sessionSettings: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle(isOn: $connection.readOnly) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Read-only sessions").font(.callout.weight(.medium))
+                    Text("Starts every session with default_transaction_read_only = on, so writes fail unless you explicitly SET it off. A guard rail, not a permission.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            if connection.isProduction && !connection.readOnly {
+                Label("Production connection — consider turning on read-only sessions.", systemImage: "lightbulb")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            HStack(spacing: Tokens.Spacing.md) {
+                secondsField("Statement timeout", value: $connection.statementTimeoutSeconds)
+                secondsField("Idle-in-transaction timeout", value: $connection.idleInTransactionTimeoutSeconds)
+            }
+            Text("Seconds; 0 keeps the server default. Sent as startup parameters — some poolers (PgBouncer) reject them.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, Tokens.Spacing.xs)
+    }
+
+    private func secondsField(_ label: String, value: Binding<Int>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            TextField("0", value: Binding(
+                get: { value.wrappedValue },
+                set: { value.wrappedValue = max(0, $0) }
+            ), format: .number.grouping(.never))
+            .textFieldStyle(.roundedBorder)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func pickFile(into binding: Binding<String>, directory: String?) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        if let directory {
+            panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(directory)
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        binding.wrappedValue = url.path.hasPrefix(home + "/") ? "~" + url.path.dropFirst(home.count) : url.path
+    }
+
     private var footer: some View {
         HStack {
             Button {
@@ -256,7 +444,7 @@ struct ConnectionEditorView: View {
                     Label("Test Connection", systemImage: "bolt.horizontal")
                 }
             }
-            .disabled(isTesting || connection.host.isEmpty)
+            .disabled(isTesting || connection.host.isEmpty || sshValidationError != nil)
             Spacer()
             Button("Cancel", role: .cancel, action: onCancel)
                 .keyboardShortcut(.cancelAction)
@@ -266,7 +454,8 @@ struct ConnectionEditorView: View {
             .buttonStyle(.borderedProminent)
             .tint(Tokens.Brand.primary)
             .keyboardShortcut(.defaultAction)
-            .disabled(connection.name.trimmingCharacters(in: .whitespaces).isEmpty || connection.host.isEmpty)
+            .disabled(connection.name.trimmingCharacters(in: .whitespaces).isEmpty || connection.host.isEmpty
+                      || sshValidationError != nil)
         }
         .padding(Tokens.Spacing.md)
     }
@@ -286,25 +475,17 @@ struct ConnectionEditorView: View {
         defer { isTesting = false }
         testMessage = nil
 
-        // Delegate to the same pre-flight probe ConnectionService uses, so
-        // both surfaces give identical, actionable errors. We don't pull a
-        // version string back from this — the probe just answers "can we
-        // authenticate against this server?" — and on success we tell the
-        // user as much.
-        let outcome = await ConnectionService.probe(connection: connection, password: password)
+        // Same pre-flight probe ConnectionService uses (through the SSH
+        // tunnel when enabled), so both surfaces give identical errors.
+        let outcome = await ConnectionService.testConnection(connection, password: password)
         switch outcome {
         case .ok:
             testOK = true
-            testMessage = "Connected to \(connection.host):\(connection.port) — credentials accepted."
+            testMessage = "Connected to \(connection.host):\(connection.port)\(connection.sshEnabled ? " via SSH" : "") — credentials accepted."
         case .failure(let message):
             testOK = false
             testMessage = message
         }
-    }
-
-    private enum ProbeResult: Sendable {
-        case ok(String)
-        case failure(String)
     }
 
     /// "host:port" → ("host", port). Accepts IPv4/hostname forms only —
@@ -314,56 +495,6 @@ struct ConnectionEditorView: View {
         let portPart = raw[raw.index(after: colon)...]
         guard let port = Int(portPart), port > 0, port < 65_536 else { return nil }
         return (String(raw[..<colon]), port)
-    }
-
-    nonisolated private static func probe(connection: Connection, password: String) async -> ProbeResult {
-        let tls: PostgresClient.Configuration.TLS
-        switch connection.sslMode {
-        case .disable: tls = .disable
-        case .allow, .prefer:
-            tls = .prefer(TLSConfiguration.makeClientConfiguration())
-        case .require, .verifyCA, .verifyFull:
-            tls = .require(TLSConfiguration.makeClientConfiguration())
-        }
-
-        let config = PostgresClient.Configuration(
-            host: connection.host,
-            port: connection.port,
-            username: connection.username,
-            password: password.isEmpty ? nil : password,
-            database: connection.database.isEmpty ? nil : connection.database,
-            tls: tls
-        )
-        let client = PostgresClient(configuration: config)
-        // Hard 10s timeout so a wrong host / mismatched SSL mode surfaces
-        // as a real error instead of leaving the user staring at a spinner.
-        return await withTaskGroup(of: ProbeResult?.self, returning: ProbeResult.self) { group in
-            group.addTask { await client.run(); return nil }
-            group.addTask {
-                do {
-                    let rows = try await client.query("SELECT version()")
-                    for try await (v) in rows.decode(String.self) {
-                        return .ok(v)
-                    }
-                    return .failure("Connected but no version returned.")
-                } catch {
-                    return .failure(error.localizedDescription)
-                }
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
-                return .failure("Timed out after 10s. If SSL mode is require/verify-*, try \"prefer\" — some servers don't speak TLS.")
-            }
-            var outcome: ProbeResult = .failure("Unknown error")
-            for await result in group {
-                if let result {
-                    outcome = result
-                    group.cancelAll()
-                    break
-                }
-            }
-            return outcome
-        }
     }
 }
 

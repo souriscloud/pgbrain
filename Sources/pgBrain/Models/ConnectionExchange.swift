@@ -123,6 +123,7 @@ enum ConnectionExchange {
             "isProduction": c.isProduction,
             "colorTag": c.colorTag.rawValue,
         ]
+        payload.merge(extendedFields(c)) { _, new in new }
         if let pw = password, !pw.isEmpty {
             payload["password"] = pw
         }
@@ -142,6 +143,23 @@ enum ConnectionExchange {
         /// Plain-text password if present in the payload — caller
         /// stashes it into the Keychain after saving the connection.
         let password: String?
+        /// Fields that were dropped as unsafe (e.g. an SSH host starting
+        /// with "-"), for the caller to mention.
+        var warnings: [String] = []
+    }
+
+    /// Fields added after the v1 format shipped — optional on read, so older
+    /// payloads still parse and older builds ignore them.
+    private static func extendedFields(_ c: Connection) -> [String: Any] {
+        var p: [String: Any] = [:]
+        if !c.defaultSearchPath.isEmpty { p["defaultSearchPath"] = c.defaultSearchPath }
+        if !c.sslRootCertPath.isEmpty { p["sslRootCertPath"] = c.sslRootCertPath }
+        if !c.sslClientCertPath.isEmpty { p["sslClientCertPath"] = c.sslClientCertPath }
+        if !c.sslClientKeyPath.isEmpty { p["sslClientKeyPath"] = c.sslClientKeyPath }
+        if c.statementTimeoutSeconds > 0 { p["statementTimeoutSeconds"] = c.statementTimeoutSeconds }
+        if c.idleInTransactionTimeoutSeconds > 0 { p["idleInTransactionTimeoutSeconds"] = c.idleInTransactionTimeoutSeconds }
+        if c.readOnly { p["readOnly"] = true }
+        return p
     }
 
     /// Inverse of `renderPGBrain`. Returns nil for any input that
@@ -172,7 +190,49 @@ enum ConnectionExchange {
         if let v = obj["sshPort"] as? Int { c.sshPort = v }
         if let v = obj["sshUser"] as? String { c.sshUser = v }
         if let v = obj["sshKeyPath"] as? String { c.sshKeyPath = v }
-        return Imported(connection: c, password: obj["password"] as? String)
+        if let v = obj["defaultSearchPath"] as? String { c.defaultSearchPath = v }
+        if let v = obj["sslRootCertPath"] as? String { c.sslRootCertPath = v }
+        if let v = obj["sslClientCertPath"] as? String { c.sslClientCertPath = v }
+        if let v = obj["sslClientKeyPath"] as? String { c.sslClientKeyPath = v }
+        if let v = obj["statementTimeoutSeconds"] as? Int { c.statementTimeoutSeconds = max(0, v) }
+        if let v = obj["idleInTransactionTimeoutSeconds"] as? Int { c.idleInTransactionTimeoutSeconds = max(0, v) }
+        if let v = obj["readOnly"] as? Bool { c.readOnly = v }
+        let warnings = sanitize(&c)
+        return Imported(connection: c, password: obj["password"] as? String, warnings: warnings)
+    }
+
+    /// Imported payloads are untrusted: SSH values end up on an `ssh`
+    /// command line. Anything that fails validation disables the tunnel and
+    /// clears the offending fields rather than importing it verbatim.
+    static func sanitize(_ c: inout Connection) -> [String] {
+        var warnings: [String] = []
+        if !(1...65_535).contains(c.port) {
+            warnings.append("\(c.name): invalid port \(c.port), reset to 5432")
+            c.port = 5432
+        }
+        if !(1...65_535).contains(c.sshPort) {
+            warnings.append("\(c.name): invalid SSH port \(c.sshPort), reset to 22")
+            c.sshPort = 22
+        }
+        let keyPathUnsafe = c.sshKeyPath.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+        if keyPathUnsafe {
+            warnings.append("\(c.name): SSH key path contained control characters and was cleared")
+            c.sshKeyPath = ""
+        }
+        let sshTouched = c.sshEnabled || !c.sshHost.isEmpty || !c.sshUser.isEmpty
+        if sshTouched {
+            var probe = c
+            if probe.sshHost.isEmpty { probe.sshHost = "placeholder" }
+            do {
+                try SSHCommand.validate(probe)
+            } catch {
+                warnings.append("\(c.name): SSH tunnel disabled — \(error.localizedDescription)")
+                c.sshEnabled = false
+                c.sshHost = ""
+                c.sshUser = ""
+            }
+        }
+        return warnings
     }
 
     // MARK: - Bulk bundle (export / import all)
@@ -189,6 +249,7 @@ enum ConnectionExchange {
                 "sshEnabled": c.sshEnabled, "sshHost": c.sshHost,
                 "sshPort": c.sshPort, "sshUser": c.sshUser, "sshKeyPath": c.sshKeyPath,
             ]
+            p.merge(extendedFields(c)) { _, new in new }
             if includePasswords, let pw = Keychain.password(for: c.id), !pw.isEmpty {
                 p["password"] = pw
             }
