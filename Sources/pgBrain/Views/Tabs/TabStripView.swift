@@ -8,38 +8,43 @@ import UniformTypeIdentifiers
 struct TabStripView: View {
     @Bindable var workspace: WorkspaceState
     var appearance: ConnectionAppearance
+    /// Tab context menu "Reveal in Sidebar".
+    var onReveal: ((TableNode) -> Void)? = nil
     @State private var draggingID: UUID?
+    @State private var contentWidth: CGFloat = 0
+    @State private var viewportWidth: CGFloat = 0
+
+    private var overflows: Bool { contentWidth > viewportWidth + 1 }
 
     var body: some View {
         HStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 0) {
-                    ForEach(workspace.tabs) { tab in
-                        TabChip(
-                            tab: tab,
-                            isSelected: workspace.selectedID == tab.id,
-                            isDragging: draggingID == tab.id,
-                            accent: appearance.emphasized,
-                            onSelect: { workspace.selectedID = tab.id },
-                            onClose: { workspace.closeTab(id: tab.id) }
-                        )
-                        .onDrag {
-                            draggingID = tab.id
-                            return NSItemProvider(object: tab.id.uuidString as NSString)
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 0) {
+                        ForEach(workspace.tabs) { tab in
+                            chip(for: tab)
+                                .id(tab.id)
+                            Divider().frame(height: 18).opacity(0.4)
                         }
-                        .onDrop(
-                            of: [.text],
-                            delegate: TabDropDelegate(
-                                target: tab,
-                                workspace: workspace,
-                                draggingID: $draggingID
-                            )
-                        )
-                        Divider().frame(height: 18).opacity(0.4)
                     }
+                    .padding(.horizontal, 4)
+                    .animation(.easeInOut(duration: 0.18), value: workspace.tabs.map(\.id))
+                    .background(GeometryReader { g in
+                        Color.clear.preference(key: TabContentWidthKey.self, value: g.size.width)
+                    })
                 }
-                .padding(.horizontal, 4)
-                .animation(.easeInOut(duration: 0.18), value: workspace.tabs.map(\.id))
+                .background(GeometryReader { g in
+                    Color.clear.preference(key: TabViewportWidthKey.self, value: g.size.width)
+                })
+                .onChange(of: workspace.selectedID) { _, id in
+                    guard let id else { return }
+                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(id) }
+                }
+            }
+            .onPreferenceChange(TabContentWidthKey.self) { contentWidth = $0 }
+            .onPreferenceChange(TabViewportWidthKey.self) { viewportWidth = $0 }
+            if overflows {
+                overflowMenu
             }
             Spacer(minLength: 0)
             Button {
@@ -60,15 +65,109 @@ struct TabStripView: View {
         .frame(height: 30)
         .background(Color(nsColor: .underPageBackgroundColor))
     }
+
+    private func chip(for tab: WorkspaceState.Tab) -> some View {
+        TabChip(
+            tab: tab,
+            displayTitle: workspace.displayTitle(for: tab),
+            isSelected: workspace.selectedID == tab.id,
+            isDragging: draggingID == tab.id,
+            accent: appearance.emphasized,
+            onSelect: { workspace.selectedID = tab.id },
+            onClose: { close([tab.id]) },
+            onKeep: { workspace.keepTab(id: tab.id) },
+            menu: { AnyView(contextMenu(for: tab)) }
+        )
+        .onDrag {
+            draggingID = tab.id
+            return NSItemProvider(object: tab.id.uuidString as NSString)
+        }
+        .onDrop(
+            of: [.text],
+            delegate: TabDropDelegate(
+                target: tab,
+                workspace: workspace,
+                draggingID: $draggingID
+            )
+        )
+    }
+
+    private func close(_ ids: [UUID]) {
+        TabCloseGuard.close(ids, in: workspace)
+    }
+
+    @ViewBuilder
+    private func contextMenu(for tab: WorkspaceState.Tab) -> some View {
+        Button(tab.isPinned ? "Unpin Tab" : "Pin Tab") { workspace.togglePinned(id: tab.id) }
+        if tab.isPreview {
+            Button("Keep Tab Open") { workspace.keepTab(id: tab.id) }
+        }
+        Button("Rename Tab…") { tab.requestedRename = true }
+        Button("Pick Color…") { tab.requestedColorPicker = true }
+        if let t = tab.tableNode, let onReveal {
+            Button("Reveal in Sidebar") { onReveal(t) }
+        }
+        Divider()
+        Button("Close Tab") { close([tab.id]) }
+        Button("Close Other Tabs") { close(workspace.idsToCloseOthers(keeping: tab.id)) }
+            .disabled(workspace.idsToCloseOthers(keeping: tab.id).isEmpty)
+        Button("Close Tabs to the Right") { close(workspace.idsToCloseRight(of: tab.id)) }
+            .disabled(workspace.idsToCloseRight(of: tab.id).isEmpty)
+        Button("Close All Tabs") { close(workspace.idsToCloseAll()) }
+    }
+
+    /// Chevron listing every tab when the strip is too narrow to show them.
+    private var overflowMenu: some View {
+        Menu {
+            ForEach(workspace.tabs) { tab in
+                Button {
+                    workspace.selectedID = tab.id
+                } label: {
+                    Label(workspace.displayTitle(for: tab),
+                          systemImage: workspace.selectedID == tab.id ? "checkmark" : tab.iconName)
+                }
+            }
+        } label: {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 10, weight: .semibold))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .padding(.horizontal, 6)
+        .help("All tabs (\(workspace.tabs.count))")
+    }
+}
+
+private struct TabContentWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+private struct TabViewportWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+extension WorkspaceState.Tab {
+    var iconName: String {
+        switch kind {
+        case .table(let t): return t.symbolName
+        case .scratchpad: return "doc.text"
+        }
+    }
 }
 
 private struct TabChip: View {
     @Bindable var tab: WorkspaceState.Tab
+    let displayTitle: String
     let isSelected: Bool
     let isDragging: Bool
     let accent: Color
     let onSelect: () -> Void
     let onClose: () -> Void
+    let onKeep: () -> Void
+    let menu: () -> AnyView
 
     @State private var hovering = false
     @State private var isRenaming = false
@@ -84,9 +183,14 @@ private struct TabChip: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: icon)
+            if tab.isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary)
+            }
+            Image(systemName: tab.isStale ? "exclamationmark.triangle.fill" : icon)
                 .font(.system(size: 11))
-                .foregroundStyle(isSelected ? accent : .secondary)
+                .foregroundStyle(tab.isStale ? Color.orange : (isSelected ? accent : .secondary))
             if isRenaming {
                 TextField("", text: $draftTitle)
                     .textFieldStyle(.plain)
@@ -102,10 +206,13 @@ private struct TabChip: View {
                         DispatchQueue.main.async { renameFocused = true }
                     }
             } else {
-                Text(tab.title)
+                Text(displayTitle)
                     .font(.system(size: 12, weight: isSelected ? .medium : .regular))
-                    .foregroundStyle(.primary)
+                    .italic(tab.isPreview)
+                    .strikethrough(tab.isStale)
+                    .foregroundStyle(tab.isStale ? .secondary : .primary)
                     .lineLimit(1)
+                    .help(tooltip)
             }
             if tab.hasPendingChanges {
                 Circle()
@@ -140,16 +247,15 @@ private struct TabChip: View {
         )
         .opacity(isDragging ? 0.4 : 1)
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { if canRename { startRename() } }
+        .onTapGesture(count: 2) {
+            // Double-click keeps a preview tab (editor convention); on a
+            // regular tab it starts an inline rename.
+            if tab.isPreview { onKeep() } else if canRename { startRename() }
+        }
         .onTapGesture { if !isRenaming { onSelect() } }
         .onHover { hovering = $0 }
-        .contextMenu {
-            if canRename {
-                Button("Rename Tab…") { startRename() }
-            }
-            Button("Pick Color…") { showColorPicker = true }
-            Button("Close Tab", role: .destructive, action: onClose)
-        }
+        .overlay(MiddleClickCatcher(onMiddleClick: onClose))
+        .contextMenu { menu() }
         // External rename request (e.g. via ⌘K → "Rename Tab…")
         // arrives by flipping `tab.requestedRename` to true.
         .onChange(of: tab.requestedRename) { _, want in
@@ -175,6 +281,7 @@ private struct TabChip: View {
                 selected: tab.color,
                 onPick: { tag in
                     tab.color = (tag == .none) ? nil : tag
+                    tab.isPreview = false
                     // Persist immediately — colour lives on the Tab,
                     // and Tab mutations don't auto-trigger the session
                     // snapshot the way workspace.tabs additions do.
@@ -204,6 +311,7 @@ private struct TabChip: View {
     }
 
     private func startRename() {
+        tab.isPreview = false
         draftTitle = tab.title
         isRenaming = true
         // Make sure the tab is also selected so the rename feels like
@@ -233,17 +341,51 @@ private struct TabChip: View {
         isRenaming = false
     }
 
-    private var icon: String {
+    private var icon: String { tab.iconName }
+
+    private var tooltip: String {
+        var parts: [String] = []
         switch tab.kind {
-        case .table(let t):
-            switch t.kind {
-            case .table: return "tablecells"
-            case .view: return "rectangle.stack"
-            case .materializedView: return "rectangle.stack.fill"
-            }
-        case .scratchpad:
-            return "doc.text"
+        case .table(let t): parts.append(t.qualifiedName)
+        case .scratchpad(let pad): parts.append(pad.title)
         }
+        if tab.isPreview { parts.append("Preview — double-click or edit to keep it open") }
+        if tab.isStale { parts.append("This relation no longer exists") }
+        return parts.joined(separator: "\n")
+    }
+}
+
+/// Transparent overlay that only claims middle-button clicks (SwiftUI has
+/// no gesture for them); everything else hit-tests straight through.
+private struct MiddleClickCatcher: NSViewRepresentable {
+    let onMiddleClick: () -> Void
+
+    final class CatcherView: NSView {
+        var onMiddleClick: (() -> Void)?
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            let type = NSApp.currentEvent?.type
+            guard type == .otherMouseDown || type == .otherMouseUp else { return nil }
+            return super.hitTest(point)
+        }
+
+        override func otherMouseUp(with event: NSEvent) {
+            if event.buttonNumber == 2 { onMiddleClick?() } else { super.otherMouseUp(with: event) }
+        }
+
+        override func otherMouseDown(with event: NSEvent) {
+            if event.buttonNumber != 2 { super.otherMouseDown(with: event) }
+        }
+    }
+
+    func makeNSView(context: Context) -> CatcherView {
+        let v = CatcherView()
+        v.onMiddleClick = onMiddleClick
+        return v
+    }
+
+    func updateNSView(_ nsView: CatcherView, context: Context) {
+        nsView.onMiddleClick = onMiddleClick
     }
 }
 

@@ -15,6 +15,14 @@ struct SessionState: Codable {
         /// Index of the selected tab in `tabs`. Index-based rather than
         /// UUID-based because UUIDs are regenerated on restore.
         var selectedTabIndex: Int?
+        /// Database this window was opened on when it differs per window
+        /// (database switcher). nil/empty = the connection's own database.
+        var database: String?
+        var sidebarVisible: Bool?
+        var sidebarFilter: String?
+        var sidebarIncludeColumns: Bool?
+        /// Stable sidebar node ids that were expanded.
+        var expandedSidebarNodes: [String]?
     }
 
     struct Tab: Codable {
@@ -43,6 +51,8 @@ struct SessionState: Codable {
         /// also keep `scratchpadTitle` in sync because the saved-
         /// queries panel reads it from the Notebook directly.
         var tabTitle: String?
+        var isPreview: Bool?
+        var isPinned: Bool?
     }
 
     struct CodableRect: Codable {
@@ -117,6 +127,7 @@ final class SessionStateStore {
         let connectionID: UUID
         let frame: NSRect
         let workspace: WorkspaceState
+        var database: String = ""
     }
 
     /// Pure builder: flatten a set of open windows into the on-disk
@@ -136,7 +147,9 @@ final class SessionStateStore {
                         tableWhereClause: tab.tableWhereClause.isEmpty ? nil : tab.tableWhereClause,
                         tableOrderByClause: tab.tableOrderByClause.isEmpty ? nil : tab.tableOrderByClause,
                         colorTag: tab.color?.rawValue,
-                        tabTitle: tab.title == t.qualifiedName ? nil : tab.title
+                        tabTitle: tab.title == t.qualifiedName ? nil : tab.title,
+                        isPreview: tab.isPreview ? true : nil,
+                        isPinned: tab.isPinned ? true : nil
                     )
                 case .scratchpad(let pad):
                     return SessionState.Tab(
@@ -145,7 +158,8 @@ final class SessionStateStore {
                         scratchpadText: pad.plainText,
                         scratchpadSearchPath: pad.searchPath,
                         colorTag: tab.color?.rawValue,
-                        tabTitle: tab.title == pad.title ? nil : tab.title
+                        tabTitle: tab.title == pad.title ? nil : tab.title,
+                        isPinned: tab.isPinned ? true : nil
                     )
                 }
             }
@@ -158,7 +172,12 @@ final class SessionStateStore {
                     connectionID: win.connectionID,
                     frame: SessionState.CodableRect(win.frame),
                     tabs: tabs,
-                    selectedTabIndex: selectedIndex
+                    selectedTabIndex: selectedIndex,
+                    database: win.database.isEmpty ? nil : win.database,
+                    sidebarVisible: win.workspace.sidebarVisible,
+                    sidebarFilter: win.workspace.sidebarFilter.isEmpty ? nil : win.workspace.sidebarFilter,
+                    sidebarIncludeColumns: win.workspace.sidebarIncludeColumns ? true : nil,
+                    expandedSidebarNodes: win.workspace.expandedSidebarNodes.map { Array($0).sorted() }
                 )
             )
         }
@@ -169,9 +188,14 @@ final class SessionStateStore {
         guard let delegate = AppDelegate.shared else { return }
         let windows: [WindowInput] = delegate.windowManager.entries.compactMap { entry in
             guard let service = entry.service else { return nil }
+            // Only record an override: a window on the saved database
+            // should follow later edits to the connection's database.
+            let saved = ConnectionStore.shared.connections.first { $0.id == service.connection.id }?.database
+            let override = service.connection.database == saved ? "" : service.connection.database
             return WindowInput(connectionID: service.connection.id,
                                frame: entry.window.frame,
-                               workspace: service.workspace)
+                               workspace: service.workspace,
+                               database: override)
         }
         let snapshot = Self.makeSnapshot(windows: windows)
         let url = self.url
