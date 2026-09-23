@@ -78,7 +78,12 @@ final class WorkspaceState {
         }
         /// Single-click "preview" tab (italic title). At most one per
         /// window; the next preview replaces it until something pins it.
-        var isPreview: Bool = false
+        var isPreview: Bool = false {
+            didSet { if oldValue, !isPreview { onPromoted?() } }
+        }
+        /// Fired once a preview tab becomes a kept tab (double-click, edit,
+        /// filter, pin, Keep Tab Open) — the moment it counts as "opened".
+        @ObservationIgnored var onPromoted: (() -> Void)?
         /// User-pinned tab: kept at the front of the strip and skipped by
         /// Close Others / Close to the Right / Close All.
         var isPinned: Bool = false
@@ -130,8 +135,10 @@ final class WorkspaceState {
     /// `ConnectionService` uses this to prune its loader cache, so
     /// closed-tab loaders + edit buffers don't leak.
     @ObservationIgnored var onTabClosed: ((UUID) -> Void)?
-    /// Fires whenever a table is opened or re-focused via `openTable`;
-    /// the window wires it to the recents store.
+    /// Fires when a table is really opened — a kept tab, or a preview tab
+    /// once it's promoted; the window wires it to the recents store.
+    /// Previews don't count: recording them reshuffled the sidebar's Recent
+    /// section on every single click, moving rows under a double-click.
     @ObservationIgnored var onTableOpened: ((TableNode) -> Void)?
 
     // MARK: Sidebar UI state (per window, persisted by SessionState)
@@ -167,7 +174,7 @@ final class WorkspaceState {
     /// tab instead of adding one; any non-preview open of an existing
     /// preview tab pins it.
     func openTable(_ table: TableNode, focusPane: TablePane = .data, preview: Bool = false) {
-        defer { onTableOpened?(table) }
+        defer { if !preview { onTableOpened?(table) } }
         if let existing = tab(showing: table.id) {
             existing.requestedPane = focusPane
             if !preview { existing.isPreview = false }
@@ -177,6 +184,11 @@ final class WorkspaceState {
         let tab = Tab(kind: .table(table), title: table.qualifiedName)
         tab.requestedPane = focusPane
         tab.isPreview = preview
+        if preview {
+            tab.onPromoted = { [weak self, weak tab] in
+                if let node = tab?.tableNode { self?.onTableOpened?(node) }
+            }
+        }
         if preview, let idx = tabs.firstIndex(where: { $0.isPreview && !$0.hasPendingChanges }) {
             let old = tabs[idx]
             tabs[idx] = tab
@@ -412,9 +424,10 @@ final class WorkspaceState {
     }
 
     /// Re-point open table tabs at the freshly loaded snapshot. Tabs whose
-    /// relation was renamed (same oid) are replaced by a fresh tab so the
-    /// per-tab loader cache can't keep querying the old name; tabs whose
-    /// relation vanished are closed when they were only previews and
+    /// relation was renamed (same oid) keep their identity — and with it
+    /// their cached loader and staged edits — and get the new node; the
+    /// owner then pushes it into the loader (`syncLoadersWithTabs`). Tabs
+    /// whose relation vanished are closed when they were only previews and
     /// marked stale otherwise (they may hold unapplied edits).
     @discardableResult
     func reconcile(with snapshot: SchemaSnapshot) -> ReconcileResult {
@@ -429,7 +442,7 @@ final class WorkspaceState {
             }
         }
         var toClose: [UUID] = []
-        for (idx, tab) in tabs.enumerated() {
+        for tab in tabs {
             guard case .table(let old) = tab.kind else { continue }
             if let fresh = byID[old.id] {
                 tab.isStale = false
@@ -439,26 +452,13 @@ final class WorkspaceState {
                     tab.kind = .table(merged)
                 }
             } else if old.oid != 0, let renamed = byOID[old.oid] {
-                let replacement = Tab(kind: .table(renamed),
-                                      title: tab.title == old.qualifiedName ? renamed.qualifiedName : tab.title)
-                replacement.tableWhereClause = tab.tableWhereClause
-                replacement.tableOrderByClause = tab.tableOrderByClause
-                replacement.color = tab.color
-                replacement.isPinned = tab.isPinned
-                replacement.isPreview = tab.isPreview
-                tabs[idx] = replacement
-                for i in backStack.indices where backStack[i].tabID == tab.id {
-                    backStack[i] = NavigationEntry(tabID: replacement.id, whereClause: backStack[i].whereClause)
-                }
-                for i in forwardStack.indices where forwardStack[i].tabID == tab.id {
-                    forwardStack[i] = NavigationEntry(tabID: replacement.id, whereClause: forwardStack[i].whereClause)
-                }
-                if selectedID == tab.id {
-                    suppressHistory = true
-                    selectedID = replacement.id
-                    suppressHistory = false
-                }
-                onTabClosed?(tab.id)
+                // Same Tab, new node: its loader (and any staged edits) stay
+                // keyed by tab id; the owner re-points the loader afterwards.
+                var merged = renamed
+                if merged.columns.isEmpty { merged.columns = old.columns }
+                if tab.title == old.qualifiedName { tab.title = renamed.qualifiedName }
+                tab.isStale = false
+                tab.kind = .table(merged)
                 result.renamed.append((old.qualifiedName, renamed.qualifiedName))
             } else {
                 if !tab.isStale { result.dropped.append(old.qualifiedName) }
@@ -476,7 +476,7 @@ final class WorkspaceState {
 
     /// Column lists are ignored: phase-2 enrichment fills them in on every
     /// load and swapping the node for that alone would re-render every tab.
-    private static func relationChanged(_ a: TableNode, _ b: TableNode) -> Bool {
+    static func relationChanged(_ a: TableNode, _ b: TableNode) -> Bool {
         a.kind != b.kind || a.flavor != b.flavor || a.primaryKey != b.primaryKey
             || a.foreignKeys != b.foreignKeys || a.oid != b.oid
     }

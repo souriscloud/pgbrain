@@ -178,41 +178,130 @@ final class Notebook: Identifiable {
 
     /// Ask before discarding an open transaction (tab or window close).
     /// Returns false when the user chose to keep the tab open. Commit runs on
-    /// the session before it closes; Roll Back just closes it (the server
-    /// rolls back on disconnect). With no open transaction this closes the
-    /// session and returns true without asking.
+    /// the session and is waited for; the tab only closes once the server
+    /// confirmed it, so a failed COMMIT can never turn into a silent
+    /// rollback. Roll Back just closes the session (the server rolls back on
+    /// disconnect). With no open transaction this closes the session and
+    /// returns true without asking.
     func confirmCloseWithOpenTransaction() -> Bool {
         guard transaction.isOpen, let session else {
             closeSession()
             return true
         }
+        let busy = isRunning || runTask != nil
         let failed = transaction.status == .failed
         let alert = NSAlert()
         alert.messageText = "“\(title)” has an open transaction"
-        alert.informativeText = failed
-            ? "The transaction has failed and can only be rolled back."
-            : "\(transaction.statementCount) statement\(transaction.statementCount == 1 ? "" : "s") since BEGIN. Commit them, or roll everything back?"
-        if !failed { alert.addButton(withTitle: "Commit") }
-        alert.addButton(withTitle: "Roll Back")
-        alert.addButton(withTitle: "Cancel")
-        let choices = failed ? ["rollback", "cancel"] : ["commit", "rollback", "cancel"]
+        var choices: [String]
+        if busy {
+            alert.informativeText = "A statement is still running inside the transaction, so it can't be committed yet. Wait for it to finish, or stop it and roll everything back."
+            alert.addButton(withTitle: "Stop and Roll Back")
+            alert.addButton(withTitle: "Cancel")
+            choices = ["rollback", "cancel"]
+        } else {
+            alert.informativeText = failed
+                ? "The transaction has failed and can only be rolled back."
+                : "\(transaction.statementCount) statement\(transaction.statementCount == 1 ? "" : "s") since BEGIN. Commit them, or roll everything back?"
+            if !failed { alert.addButton(withTitle: "Commit") }
+            alert.addButton(withTitle: "Roll Back")
+            alert.addButton(withTitle: "Cancel")
+            choices = failed ? ["rollback", "cancel"] : ["commit", "rollback", "cancel"]
+        }
         let index = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
         switch choices.indices.contains(index) ? choices[index] : "cancel" {
         case "commit":
-            runTask?.cancel()
-            sessionBox.detach()
-            transaction = TransactionState()
-            Task.detached {
-                _ = try? await session.run("COMMIT", rowLimit: 1)
-                session.close()
-            }
-            return true
+            return commitBeforeClose(session)
         case "rollback":
             closeSession()
             return true
         default:
             return false
         }
+    }
+
+    /// Outcome of the COMMIT issued from the close prompt.
+    enum CloseCommitOutcome: Equatable {
+        case committed
+        case failed(String)
+        case timedOut
+    }
+
+    static let closeCommitTimeout: TimeInterval = 20
+
+    /// Pure mapping from what the session reported to the close decision:
+    /// a COMMIT that ran on a freshly reopened connection committed nothing
+    /// (the old backend rolled back when it died), and a transaction still
+    /// open afterwards means the COMMIT didn't end it.
+    nonisolated static func closeCommitOutcome(
+        reconnected: Bool, statusAfter: ScratchpadSession.TransactionStatus
+    ) -> CloseCommitOutcome {
+        if reconnected {
+            return .failed("The session's connection was lost before COMMIT, so the server already rolled the transaction back.")
+        }
+        if statusAfter != .idle {
+            return .failed("The transaction is still open after COMMIT.")
+        }
+        return .committed
+    }
+
+    private func commitBeforeClose(_ session: ScratchpadSession) -> Bool {
+        let outcome: CloseCommitOutcome
+        switch Self.waitSynchronously(timeout: Self.closeCommitTimeout, {
+            try await session.run("COMMIT", rowLimit: 1)
+        }) {
+        case .none:
+            outcome = .timedOut
+        case .some(.success(let response)):
+            outcome = Self.closeCommitOutcome(reconnected: response.reconnected, statusAfter: response.transaction)
+        case .some(.failure(let error)):
+            outcome = .failed(PostgresErrorMessage.describe(error))
+        }
+        switch outcome {
+        case .committed:
+            closeSession()
+            return true
+        case .failed(let message):
+            syncTransaction(session.transactionStatus)
+            Self.showCloseCommitProblem("COMMIT failed — “\(title)” stays open", message)
+            return false
+        case .timedOut:
+            Self.showCloseCommitProblem(
+                "COMMIT hasn't finished — “\(title)” stays open",
+                "The server didn't answer within \(Int(Self.closeCommitTimeout)) seconds. Check the transaction indicator once it settles before closing again.")
+            return false
+        }
+    }
+
+    private static func showCloseCommitProblem(_ title: String, _ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    /// Runs `operation` off the main actor and blocks the caller by spinning
+    /// the main run loop until it finishes. Close and quit confirmations are
+    /// synchronous AppKit callbacks (`windowShouldClose`,
+    /// `applicationShouldTerminate`), so the COMMIT has to land before they
+    /// return. nil = timed out (the operation keeps running).
+    static func waitSynchronously<T: Sendable>(
+        timeout: TimeInterval,
+        _ operation: @escaping @Sendable () async throws -> T
+    ) -> Result<T, Error>? {
+        let box = ResultBox<T>()
+        Task.detached {
+            let result: Result<T, Error>
+            do { result = .success(try await operation()) } catch { result = .failure(error) }
+            box.set(result)
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let done = box.value { return done }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        return box.value
     }
 
     /// Per-cell cap on stacked result history. Older results under a cell are
@@ -443,5 +532,15 @@ private final class SessionBox: Sendable {
             return s
         }
         old?.close()
+    }
+}
+
+private final class ResultBox<T: Sendable>: Sendable {
+    private let state = Mutex<Result<T, Error>?>(nil)
+
+    var value: Result<T, Error>? { state.withLock { $0 } }
+
+    func set(_ result: Result<T, Error>) {
+        state.withLock { $0 = result }
     }
 }

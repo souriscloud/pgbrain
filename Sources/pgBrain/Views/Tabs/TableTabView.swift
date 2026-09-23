@@ -18,7 +18,9 @@ struct TableTabView: View {
     let service: ConnectionService
 
     @State var loader: RowsLoader
-    @State var inspector: InspectorLoader
+    /// Looked up each time rather than held in `@State`: a rename keeps the
+    /// tab (and this view) but needs an inspector for the new name.
+    var inspector: InspectorLoader { service.inspector(for: tab, table: table) }
     @State var showApplyErrorPopover = false
     @State var distinctValuesColumn: ColumnNameID?
     @State var showPreviewSQL = false
@@ -30,10 +32,7 @@ struct TableTabView: View {
         self.table = table
         self.tab = tab
         self.service = service
-        let loader = service.loader(for: tab, table: table)
-        loader.tab = tab
-        _loader = State(initialValue: loader)
-        _inspector = State(initialValue: service.inspector(for: tab, table: table))
+        _loader = State(initialValue: service.loader(for: tab, table: table))
     }
 
     /// Columns with real types — the view's `table` is captured at tab-open
@@ -442,6 +441,7 @@ private struct TableTabLifecycle: ViewModifier {
         content
             .task(id: view.table.id) { await view.firstLoad() }
             .onAppear {
+                if loader.tab !== tab { loader.tab = tab }
                 view.consumeRequestedPane()
                 view.consumeFilterReload()
             }

@@ -115,7 +115,8 @@ struct CrossDBCopyView: View {
     }
 
     private func label(for connection: Connection) -> String {
-        let suffix = AppDelegate.shared?.windowManager.service(for: connection.id) != nil ? " · open" : ""
+        let suffix = AppDelegate.shared?.windowManager.service(
+            for: connection.id, database: connection.database, username: connection.username) != nil ? " · open" : ""
         let prod = connection.isProduction ? " · PROD" : ""
         return "\(connection.name)\(prod)\(suffix)"
     }
@@ -136,7 +137,10 @@ struct CrossDBCopyView: View {
         else { return }
 
         let endpoint: CrossDBCopy.TargetEndpoint
-        if let liveService = AppDelegate.shared?.windowManager.service(for: id),
+        // Only a window on the target's own database may lend its pool — a
+        // sibling window of the same connection is connected elsewhere.
+        if let liveService = AppDelegate.shared?.windowManager.service(
+               for: id, database: targetConn.database, username: targetConn.username),
            let liveClient = liveService.client {
             endpoint = .existing(liveClient)
         } else {

@@ -196,8 +196,8 @@ final class B_WorkspaceNavigationTests: XCTestCase {
         XCTAssertEqual(titles(ws), ["public.keep", "public.new_name", "public.gone"])
         XCTAssertEqual(ws.tabs[0].tableNode?.primaryKey, ["id"], "live node swapped in")
         XCTAssertEqual(ws.tabs[1].tableWhereClause, "x > 1")
-        XCTAssertNotEqual(ws.tabs[1].id, renamedTabID, "renamed tab is a fresh tab so its loader resets")
-        XCTAssertTrue(closed.contains(renamedTabID))
+        XCTAssertEqual(ws.tabs[1].id, renamedTabID, "renamed tab keeps its identity so staged edits survive")
+        XCTAssertFalse(closed.contains(renamedTabID))
         XCTAssertTrue(ws.tabs[2].isStale)
 
         // Re-running doesn't re-report the same drop.

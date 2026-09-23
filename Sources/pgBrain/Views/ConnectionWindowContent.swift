@@ -685,14 +685,14 @@ struct ConnectionWindowContent: View {
         WorkspaceStore.shared.save(ws, for: service.connection.id)
     }
 
-    /// Replace the current tab set with the saved one. We close every
-    /// open tab first (no confirmation — workspaces are how the user
-    /// "saves" their state, so this is the explicit opt-in to
-    /// discard) then replay the saved tabs in order.
+    /// Replace the current tab set with the saved one. Every open tab is
+    /// closed through the close guard first, so unapplied edits and open
+    /// transactions are asked about; cancelling keeps the current tabs.
     private func switchTo(workspace: SavedWorkspace) {
-        for tab in service.workspace.tabs {
-            service.workspace.closeTab(id: tab.id)
-        }
+        let current = service.workspace.tabs.map(\.id)
+        let closable = TabCloseGuard.confirmClosing(current, in: service.workspace)
+        guard closable.count == current.count else { return }
+        service.workspace.closeTabs(closable)
         for saved in workspace.tabs {
             switch saved.kind {
             case .table:
@@ -1007,6 +1007,7 @@ struct ConnectionWindowContent: View {
 
     private func reconcileTabs(with snapshot: SchemaSnapshot) {
         let result = service.workspace.reconcile(with: snapshot)
+        service.syncLoadersWithTabs()
         for r in result.renamed {
             service.toasts.show(.info, "\(r.from) was renamed to \(r.to) — tab updated")
         }
@@ -1292,7 +1293,7 @@ struct ConnectionWindowContent: View {
                 switch selected.kind {
                 case .table(let table):
                     TableTabView(table: table, tab: selected, service: service)
-                        .id(table.id)
+                        .id(selected.id)
                 case .scratchpad(let pad):
                     NotebookView(notebook: pad, service: service)
                         .id(pad.id)

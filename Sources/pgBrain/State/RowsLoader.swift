@@ -54,7 +54,9 @@ final class RowsLoader {
     private(set) var contentRevision = 0
 
     let editBuffer = EditBuffer()
-    private(set) var isApplying = false
+    private(set) var isApplying = false {
+        didSet { if !isApplying { adoptDeferredTableIfClean() } }
+    }
     private(set) var applyError: String?
     private(set) var applySuccess: String?
     /// Cells that were just applied — rendered with a fading green tint.
@@ -62,12 +64,19 @@ final class RowsLoader {
 
     /// Source-row indices (into the loaded page) that are draft INSERTs.
     private(set) var pendingInsertRows: Set<Int> = [] {
-        didSet { syncPendingFlag() }
+        didSet { stagingChanged() }
     }
     /// Source-row indices of existing rows staged for DELETE.
     private(set) var pendingDeleteRows: Set<Int> = [] {
-        didSet { syncPendingFlag() }
+        didSet { stagingChanged() }
     }
+    /// Bumps on every staging mutation (cell edit, draft row, delete mark),
+    /// so a load can tell whether the user staged something while it was
+    /// in flight.
+    @ObservationIgnored private(set) var stagingRevision = 0
+    /// A schema reload changed this relation (e.g. its primary key) while
+    /// edits were staged against the old shape; adopted once they're gone.
+    @ObservationIgnored private var deferredTable: TableNode?
 
     var pendingNavigation: PendingNavigation?
     var focusRequest: FocusRequest?
@@ -108,7 +117,46 @@ final class RowsLoader {
     init(table: TableNode, service: ConnectionService) {
         self.table = table
         self.service = service
-        editBuffer.onChange = { [weak self] in self?.syncPendingFlag() }
+        editBuffer.onChange = { [weak self] in self?.stagingChanged() }
+    }
+
+    private func stagingChanged() {
+        stagingRevision &+= 1
+        syncPendingFlag()
+        adoptDeferredTableIfClean()
+    }
+
+    private func adoptDeferredTableIfClean() {
+        guard let deferred = deferredTable, !hasPendingChanges, !isApplying else { return }
+        deferredTable = nil
+        adoptTable(deferred)
+    }
+
+    /// Point the loader at a freshly reloaded `TableNode` for the same tab
+    /// (rename, primary-key or FK change). Staged edits were planned against
+    /// the old key, so with anything pending the swap waits until they are
+    /// applied or discarded, and the user is told.
+    func adoptTable(_ fresh: TableNode) {
+        guard fresh.id != table.id || WorkspaceState.relationChanged(table, fresh) else { return }
+        guard !hasPendingChanges, !isApplying else {
+            if deferredTable == nil {
+                service.toasts.show(.info, "\(table.qualifiedName) changed on the server — apply or discard the staged edits, then refresh.")
+            }
+            deferredTable = fresh
+            return
+        }
+        var merged = fresh
+        if merged.columns.isEmpty { merged.columns = table.columns }
+        table = merged
+        foreignKeys = nil
+    }
+
+    /// What a finished load may do with the staged state: the guard only let
+    /// the load start with nothing staged (or with the user's consent to
+    /// drop it), so edits made while it was in flight are new work that the
+    /// fresh page's row indices no longer line up with.
+    nonisolated static func landingKeepsStagedEdits(revisionAtStart: Int, revisionNow: Int, hasPendingChanges: Bool) -> Bool {
+        revisionAtStart != revisionNow && hasPendingChanges
     }
 
     /// Restore clauses persisted on the tab before the first load.
@@ -275,6 +323,7 @@ final class RowsLoader {
         let offset = pageOffset
         let size = pageSize
         let table = self.table
+        let revisionAtStart = stagingRevision
         let spatial = service.hasPostGIS
         let estimateWanted = filter.whereClause.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         do {
@@ -289,6 +338,12 @@ final class RowsLoader {
             let est = await estimate
             let pretty = await sizeText
             guard generation == loadGeneration, !Task.isCancelled else { return }
+            if Self.landingKeepsStagedEdits(revisionAtStart: revisionAtStart, revisionNow: stagingRevision,
+                                            hasPendingChanges: hasPendingChanges) {
+                refreshError = "You edited rows while the refresh was running, so the refreshed page was set aside to keep those edits. Apply or discard them, then refresh again."
+                isRefreshing = false
+                return
+            }
             // Staged changes are dropped only once the replacement page is
             // here: the guard already had the user's consent, and a failed
             // load keeps both the old page and the edits.
@@ -482,7 +537,8 @@ final class RowsLoader {
                         guard case .literal(let v) = entry else { continue }
                         value = v
                     } else {
-                        value = page.rows[source][c]
+                        let row = page.rows[source]
+                        value = c < row.count ? row[c] : nil
                     }
                     if let value { editBuffer.set(row: index, column: c, value: value) }
                 }
