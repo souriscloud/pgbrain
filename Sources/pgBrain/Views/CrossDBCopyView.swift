@@ -17,12 +17,18 @@ struct CrossDBCopyView: View {
     @State private var mappings: [Mapping] = []
     @State private var statusMessage: String?
     @State private var submitting = false
+    @State private var autoCreate = false
 
     private struct Mapping: Identifiable {
         let id = UUID()
         let sourceColumn: ColumnNode
         var include: Bool = true
         var targetName: String
+        var isKey: Bool = false
+    }
+
+    private var conflictColumns: [String] {
+        mappings.filter { $0.include && $0.isKey }.map(\.targetName)
     }
 
     var body: some View {
@@ -44,8 +50,9 @@ struct CrossDBCopyView: View {
                             Text(s.uiLabel).tag(s)
                         }
                     }
+                    Toggle("Create target table if it doesn't exist", isOn: $autoCreate)
                 }
-                Section("Columns") {
+                Section {
                     ForEach($mappings) { $m in
                         HStack {
                             Toggle("", isOn: $m.include)
@@ -56,7 +63,20 @@ struct CrossDBCopyView: View {
                             TextField("target column", text: $m.targetName)
                                 .textFieldStyle(.roundedBorder)
                                 .font(.system(.body, design: .monospaced))
+                            if strategy.needsConflictColumns {
+                                Toggle("Key", isOn: $m.isKey)
+                                    .toggleStyle(.checkbox)
+                                    .disabled(!m.include)
+                                    .help("Conflict (key) column for the upsert")
+                            }
                         }
+                    }
+                } header: {
+                    Text("Columns")
+                } footer: {
+                    if strategy.needsConflictColumns && conflictColumns.isEmpty {
+                        Text("Upsert needs at least one Key column (usually the target's primary key).")
+                            .font(.caption).foregroundStyle(.orange)
                     }
                 }
             }
@@ -81,7 +101,9 @@ struct CrossDBCopyView: View {
         .frame(width: 560, height: 540)
         .onAppear {
             if mappings.isEmpty {
-                mappings = source.columns.map { Mapping(sourceColumn: $0, targetName: $0.name) }
+                mappings = source.columns.map {
+                    Mapping(sourceColumn: $0, targetName: $0.name, isKey: source.primaryKey.contains($0.name))
+                }
             }
             if targetSchema.isEmpty { targetSchema = source.schema }
             if targetTable.isEmpty { targetTable = source.name }
@@ -104,6 +126,7 @@ struct CrossDBCopyView: View {
             && !targetSchema.isEmpty
             && !targetTable.isEmpty
             && mappings.contains(where: { $0.include })
+            && (!strategy.needsConflictColumns || !conflictColumns.isEmpty)
     }
 
     private func submit() async {
@@ -132,7 +155,9 @@ struct CrossDBCopyView: View {
             targetSchema: targetSchema,
             targetTable: targetTable,
             strategy: strategy,
-            mappings: planMappings
+            mappings: planMappings,
+            autoCreate: autoCreate,
+            conflictColumns: strategy.needsConflictColumns ? conflictColumns : []
         )
 
         submitting = true
@@ -150,8 +175,13 @@ struct CrossDBCopyView: View {
             tracker.finish(op, status: .succeeded)
             statusMessage = "Copied \(stats.rowsCopied) rows in \(String(format: "%.1fs", stats.elapsed))."
             submitting = false
-            try? await Task.sleep(nanoseconds: 600_000_000)
-            dismiss()
+            if stats.warnings.isEmpty {
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                dismiss()
+            } else {
+                // Keep the sheet up so the type substitutions are actually read.
+                statusMessage! += "\n" + stats.warnings.joined(separator: "\n")
+            }
         } catch is CancellationError {
             tracker.finish(op, status: .cancelled)
             statusMessage = "Cancelled."
