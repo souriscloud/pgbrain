@@ -4,139 +4,123 @@ import Security
 /// Stores connection passwords as Keychain generic-password items keyed
 /// by connection UUID.
 ///
-/// **Why the rewrite?** The original implementation set
-/// `kSecAttrAccessibleAfterFirstUnlock` on its own. That keeps the
-/// item *available* without re-auth across reboots, but it doesn't
-/// touch the per-item ACL — by default the ACL is "the exact binary
-/// that created this item only". On every Sparkle update the
-/// designated requirement of our binary is still the same Team ID,
-/// but the *binary signature* is different, so macOS treated the new
-/// binary as untrusted and threw up the "Always Allow / Allow / Deny"
-/// dialog on every password read.
+/// Items live in the login (file-based) keychain with the **default ACL**:
+/// only pgBrain itself reads silently, any other app triggers a prompt. For
+/// the Developer ID build the ACL is bound to the designated requirement
+/// (team + bundle id), so Sparkle updates keep silent access. Ad-hoc dev
+/// builds get a fresh signature per build and see a one-time prompt.
 ///
-/// Fix: create items with a `SecAccessControl` built via
-/// `SecAccessControlCreateWithFlags` and an empty flags set. That
-/// replaces the implicit "only this specific binary" ACL with one
-/// that says "any process can read once the device is unlocked".
-/// Code signing + the hardened runtime entitlements still keep
-/// third-party apps out — they can't read your Keychain unless they
-/// know the right service/account and pass macOS's process-trust
-/// checks at the kSec layer. For us it just means the prompt never
-/// re-fires after the first install.
+/// Why not the data-protection keychain (`kSecUseDataProtectionKeychain`):
+/// on macOS it requires a `keychain-access-groups` / application-identifier
+/// entitlement, which for a Developer ID app means an embedded provisioning
+/// profile. The release build ships with no entitlements and no profile, so
+/// the call would fail with `errSecMissingEntitlement`.
 ///
-/// Existing items written by the old scheme get migrated on their
-/// next `setPassword` call (we delete-then-add so the ACL is rebuilt).
+/// Migration: builds ≤ 0.9.x wrote items under `legacyService` with a custom
+/// "every application is trusted" ACL. On first read an item is copied to
+/// `service` (default ACL), verified by reading it back, and only then is
+/// the legacy item deleted.
 enum Keychain {
-    static let service = "cloud.souris.pgbrain"
+    static let service = "cloud.souris.pgbrain.connection"
+    static let legacyService = "cloud.souris.pgbrain"
 
     enum KeychainError: Error, CustomStringConvertible {
         case unhandled(OSStatus)
+        case verificationFailed
         var description: String {
             switch self {
             case .unhandled(let status):
                 let msg = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
                 return "Keychain error: \(msg)"
+            case .verificationFailed:
+                return "Keychain error: the stored password could not be read back."
             }
         }
     }
 
-    /// Legacy-keychain `SecAccess` whose ACL trusts **every** application, so
-    /// reads never throw the `Always Allow / Allow / Deny` dialog — no matter
-    /// how often the binary's signature changes (dev rebuilds, Sparkle
-    /// updates). The previous implementation used `kSecAttrAccessControl`,
-    /// which is a *data-protection* keychain attribute and is ignored by the
-    /// legacy file keychain we actually write to — so items kept the default
-    /// "only this exact binary" ACL and re-prompted on every new build.
-    ///
-    /// Trade-off: any process running as you can read these DB passwords once
-    /// the keychain is unlocked. That's the project's deliberate choice (see
-    /// the rewrite note above) for a developer tool that updates frequently.
-    private static func makeAllAppsAccess() -> SecAccess? {
-        var access: SecAccess?
-        guard SecAccessCreate("pgBrain connection password" as CFString, nil, &access) == errSecSuccess,
-              let access else { return nil }
-        var aclList: CFArray?
-        guard SecAccessCopyACLList(access, &aclList) == errSecSuccess,
-              let acls = aclList as? [SecACL] else { return access }
-        for acl in acls {
-            // A nil application list means "any application is trusted" — no
-            // prompt. An *empty* array would mean the opposite (always prompt).
-            SecACLSetContents(acl, nil, "pgBrain" as CFString, [])
-        }
-        return access
+    private static func baseQuery(service: String, account: String) -> [CFString: Any] {
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+        ]
     }
 
-    /// Connection IDs already re-written with the all-apps ACL. Persisted so
-    /// the one-time migration (a delete-then-add) runs exactly once ever, not
-    /// on every launch. UserDefaults is thread-safe.
-    private static let migratedKey = "cloud.souris.pgbrain.keychainMigratedV1"
-    private static func isMigrated(_ id: UUID) -> Bool {
-        (UserDefaults.standard.stringArray(forKey: migratedKey) ?? []).contains(id.uuidString)
-    }
-    private static func markMigrated(_ id: UUID) {
-        var ids = UserDefaults.standard.stringArray(forKey: migratedKey) ?? []
-        guard !ids.contains(id.uuidString) else { return }
-        ids.append(id.uuidString)
-        UserDefaults.standard.set(ids, forKey: migratedKey)
-    }
-
+    /// Update in place, add only when missing. Never deletes first: a failed
+    /// add after a delete would lose the password.
     static func setPassword(_ password: String, for connectionID: UUID) throws {
         let account = connectionID.uuidString
-        let data = Data(password.utf8)
-
-        // Always delete-then-add so old items get migrated to the new
-        // SecAccessControl. Updating an existing item leaves the old
-        // ACL in place even if we change kSecAttrAccessible, so
-        // post-Sparkle-update reads would still prompt.
-        let baseQuery: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: account
-        ]
-        _ = SecItemDelete(baseQuery as CFDictionary)
-
-        var addQuery = baseQuery
-        addQuery[kSecValueData] = data
-        if let access = makeAllAppsAccess() {
-            addQuery[kSecAttrAccess] = access
-        } else {
-            addQuery[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
-        }
-        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-        if addStatus == errSecSuccess {
-            markMigrated(connectionID)
-            return
-        }
-        throw KeychainError.unhandled(addStatus)
+        try write(Data(password.utf8), service: service, account: account)
+        // The new item is in place; a stale legacy copy would otherwise be
+        // re-migrated over it on a later read.
+        _ = SecItemDelete(baseQuery(service: legacyService, account: account) as CFDictionary)
     }
 
-    static func password(for connectionID: UUID) -> String? {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: connectionID.uuidString,
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne
-        ]
+    private static func write(_ data: Data, service: String, account: String) throws {
+        let query = baseQuery(service: service, account: account)
+        let update: [CFString: Any] = [kSecValueData: data]
+        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        switch status {
+        case errSecSuccess:
+            return
+        case errSecItemNotFound:
+            var add = query
+            add[kSecValueData] = data
+            add[kSecAttrLabel] = "pgBrain connection password"
+            let addStatus = SecItemAdd(add as CFDictionary, nil)
+            guard addStatus == errSecSuccess else { throw KeychainError.unhandled(addStatus) }
+        default:
+            throw KeychainError.unhandled(status)
+        }
+    }
+
+    private static func read(service: String, account: String) -> (OSStatus, Data?) {
+        var query = baseQuery(service: service, account: account)
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data,
-              let password = String(data: data, encoding: .utf8) else { return nil }
-        // First successful read of a legacy item → re-write it with the
-        // all-apps ACL so this prompt never fires again (this build or any
-        // future one). Costs one prompt per connection, once, then silent.
-        if !isMigrated(connectionID) {
-            try? setPassword(password, for: connectionID)
+        return (status, result as? Data)
+    }
+
+    /// Synchronous and potentially slow (a keychain prompt can block for as
+    /// long as the user takes to answer) — call from a background task.
+    static func password(for connectionID: UUID) -> String? {
+        let account = connectionID.uuidString
+        let (status, data) = read(service: service, account: account)
+        if status == errSecSuccess, let data {
+            return String(data: data, encoding: .utf8)
+        }
+        guard status == errSecItemNotFound else { return nil }
+        return migrateLegacy(account: account)
+    }
+
+    /// Off-main convenience for UI code.
+    static func passwordAsync(for connectionID: UUID) async -> String? {
+        await Task.detached(priority: .userInitiated) { password(for: connectionID) }.value
+    }
+
+    private static func migrateLegacy(account: String) -> String? {
+        let (status, data) = read(service: legacyService, account: account)
+        guard status == errSecSuccess, let data, let password = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        do {
+            try write(data, service: service, account: account)
+            let (verifyStatus, verifyData) = read(service: service, account: account)
+            guard verifyStatus == errSecSuccess, verifyData == data else {
+                throw KeychainError.verificationFailed
+            }
+            _ = SecItemDelete(baseQuery(service: legacyService, account: account) as CFDictionary)
+        } catch {
+            Log.persistence.error("keychain migration kept legacy item: \(String(describing: error), privacy: .public)")
         }
         return password
     }
 
     static func deletePassword(for connectionID: UUID) {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: connectionID.uuidString
-        ]
-        _ = SecItemDelete(query as CFDictionary)
+        let account = connectionID.uuidString
+        _ = SecItemDelete(baseQuery(service: service, account: account) as CFDictionary)
+        _ = SecItemDelete(baseQuery(service: legacyService, account: account) as CFDictionary)
     }
 }

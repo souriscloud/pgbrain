@@ -25,6 +25,7 @@ struct RestoreDatabaseSheet: View {
     @State private var stderr: String?
     @State private var running = false
     @State private var done = false
+    @State private var task: Task<Void, Never>?
 
     init(service: ConnectionService, onClose: @escaping () -> Void) {
         self.service = service
@@ -94,7 +95,12 @@ struct RestoreDatabaseSheet: View {
             HStack {
                 if running { ProgressView().controlSize(.small) }
                 Spacer()
-                Button(done ? "Close" : "Cancel", action: onClose).keyboardShortcut(.cancelAction)
+                Button(done ? "Close" : "Cancel") {
+                    // Cancelling the task terminates pg_restore.
+                    task?.cancel()
+                    onClose()
+                }
+                .keyboardShortcut(.cancelAction)
                 Button("Restore") { run() }
                     .buttonStyle(.borderedProminent)
                     .tint(Tokens.Brand.primary)
@@ -150,7 +156,7 @@ struct RestoreDatabaseSheet: View {
 
         let conn = service.connection
         let target = dbname.trimmingCharacters(in: .whitespacesAndNewlines)
-        let password = Keychain.password(for: conn.id) ?? ""
+        let serverVersion = service.serverVersionNum
         let options = PgDumpCLI.RestoreOptions(
             clean: clean,
             noOwner: noOwner,
@@ -162,19 +168,24 @@ struct RestoreDatabaseSheet: View {
             summary: "pg_restore → \(target)"
         )
         let tracker = service.operations
-        Task {
+        task = Task {
             do {
+                let password = await Keychain.passwordAsync(for: conn.id) ?? ""
                 let result = try await PgDumpCLI.restore(
                     connection: conn,
                     password: password,
                     dbname: target,
                     archive: archive,
-                    options: options
+                    options: options,
+                    serverVersionNum: serverVersion
                 )
                 running = false
                 done = true
                 stderr = result.stderr
                 tracker.finish(op, status: .succeeded)
+            } catch is CancellationError {
+                running = false
+                tracker.finish(op, status: .cancelled)
             } catch {
                 running = false
                 if let cliError = error as? PgDumpCLI.CLIError,

@@ -74,6 +74,12 @@ final class AppSettings {
         didSet { defaults.set(verbosePostgresLogging, forKey: keyPrefix + "verbosePostgresLogging") }
     }
 
+    /// Keep a local log of executed statements (Query History). Password
+    /// literals are redacted either way; this turns recording off entirely.
+    var saveQueryHistory: Bool {
+        didSet { defaults.set(saveQueryHistory, forKey: keyPrefix + "saveQueryHistory") }
+    }
+
     /// Editor font point size. Clamped to a sane range; a change broadcasts
     /// `.pgbrainEditorFontChanged` so open editors re-apply it live.
     static let fontRange: ClosedRange<Double> = 9...28
@@ -125,6 +131,7 @@ final class AppSettings {
         self.pgRestorePath = d.string(forKey: "pgbrain.binaryOverride.pg_restore") ?? ""
         self.psqlPath = d.string(forKey: "pgbrain.binaryOverride.psql") ?? ""
         self.verbosePostgresLogging = d.bool(forKey: "pgbrain.settings.verbosePostgresLogging")
+        self.saveQueryHistory = d.object(forKey: "pgbrain.settings.saveQueryHistory") as? Bool ?? true
         self.editorFontSize = (d.object(forKey: "pgbrain.settings.editorFontSize") as? Double) ?? 12
         d.removeObject(forKey: "pgbrain.settings.sparkleChannel")
         self.appearance = (d.string(forKey: "pgbrain.settings.appearance")

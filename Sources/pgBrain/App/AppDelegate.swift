@@ -269,4 +269,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
+
+    // MARK: - Termination
+
+    func applicationWillTerminate(_ notification: Notification) {
+        AppTermination.run()
+    }
 }
