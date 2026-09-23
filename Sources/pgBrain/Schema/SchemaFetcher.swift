@@ -21,11 +21,12 @@ enum SchemaFetcher {
         async let funcs = fetchFunctions(client: client)
         async let fks = fetchForeignKeys(client: client)
         async let enumLabels = fetchEnums(client: client)
+        async let spaces = fetchNamespaces(client: client)
 
-        let (db, rels, primaryKeys, functions, foreignKeys, enums) =
-            try await (dbName, relations, pks, funcs, fks, enumLabels)
+        let (db, rels, primaryKeys, functions, foreignKeys, enums, namespaces) =
+            try await (dbName, relations, pks, funcs, fks, enumLabels, spaces)
         var snapshot = assemble(
-            databaseName: db, relations: rels, columns: [],
+            databaseName: db, namespaces: namespaces, relations: rels, columns: [],
             primaryKeys: primaryKeys, functions: functions,
             foreignKeys: foreignKeys
         )
@@ -107,6 +108,37 @@ enum SchemaFetcher {
         let schema: String
         let name: String
         let kind: TableNode.Kind
+        var flavor: TableNode.Flavor = .plain
+        var oid: Int = 0
+        var isExtensionOwned = false
+        var partitionOf: String? = nil
+    }
+
+    private struct Namespace: Sendable {
+        let name: String
+        let isExtensionOwned: Bool
+    }
+
+    /// Every user-visible namespace, including empty ones — schemas are
+    /// otherwise only discovered through the objects they contain.
+    private static func fetchNamespaces(client: PostgresClient) async throws -> [Namespace] {
+        let sql: PostgresQuery = """
+        SELECT n.nspname,
+               EXISTS (SELECT 1 FROM pg_depend d
+                       WHERE d.classid = 'pg_namespace'::regclass
+                         AND d.objid = n.oid AND d.deptype = 'e')
+        FROM pg_namespace n
+        WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+          AND n.nspname NOT LIKE 'pg_temp_%'
+          AND n.nspname NOT LIKE 'pg_toast%'
+        ORDER BY n.nspname
+        """
+        let rows = try await client.query(sql)
+        var out: [Namespace] = []
+        for try await (name, ext) in rows.decode((String, Bool).self) {
+            out.append(Namespace(name: name, isExtensionOwned: ext))
+        }
+        return out
     }
 
     private struct ColumnRow: Sendable {
@@ -127,10 +159,17 @@ enum SchemaFetcher {
 
     private static func fetchRelations(client: PostgresClient) async throws -> [Relation] {
         let sql: PostgresQuery = """
-        SELECT n.nspname, c.relname, c.relkind::text
+        SELECT n.nspname, c.relname, c.relkind::text, c.oid::int8,
+               EXISTS (SELECT 1 FROM pg_depend d
+                       WHERE d.classid = 'pg_class'::regclass
+                         AND d.objid = c.oid AND d.deptype = 'e'),
+               pn.nspname, pc.relname
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE c.relkind IN ('r','v','m','p')
+        LEFT JOIN pg_inherits i ON c.relispartition AND i.inhrelid = c.oid
+        LEFT JOIN pg_class pc ON pc.oid = i.inhparent
+        LEFT JOIN pg_namespace pn ON pn.oid = pc.relnamespace
+        WHERE c.relkind IN ('r','v','m','p','f')
           AND n.nspname NOT IN ('pg_catalog','information_schema')
           AND n.nspname NOT LIKE 'pg_temp_%'
           AND n.nspname NOT LIKE 'pg_toast%'
@@ -138,14 +177,21 @@ enum SchemaFetcher {
         """
         let rows = try await client.query(sql)
         var out: [Relation] = []
-        for try await (schema, name, relkind) in rows.decode((String, String, String).self) {
+        for try await (schema, name, relkind, oid, ext, parentSchema, parentName)
+            in rows.decode((String, String, String, Int, Bool, String?, String?).self) {
             let kind: TableNode.Kind
+            var flavor: TableNode.Flavor = .plain
             switch relkind {
             case "v": kind = .view
             case "m": kind = .materializedView
-            default:  kind = .table  // 'r' and 'p'
+            case "p": kind = .table; flavor = .partitioned
+            case "f": kind = .table; flavor = .foreign
+            default:  kind = .table
             }
-            out.append(Relation(schema: schema, name: name, kind: kind))
+            var parent: String?
+            if let parentSchema, let parentName { parent = "\(parentSchema).\(parentName)" }
+            out.append(Relation(schema: schema, name: name, kind: kind, flavor: flavor,
+                                oid: oid, isExtensionOwned: ext, partitionOf: parent))
         }
         return out
     }
@@ -163,7 +209,7 @@ enum SchemaFetcher {
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE a.attnum > 0
           AND NOT a.attisdropped
-          AND c.relkind IN ('r','v','m','p')
+          AND c.relkind IN ('r','v','m','p','f')
           AND n.nspname NOT IN ('pg_catalog','information_schema')
           AND n.nspname NOT LIKE 'pg_temp_%'
           AND n.nspname NOT LIKE 'pg_toast%'
@@ -218,7 +264,10 @@ enum SchemaFetcher {
                p.proname,
                p.prokind::text,
                pg_get_function_arguments(p.oid),
-               pg_get_function_result(p.oid)
+               pg_get_function_result(p.oid),
+               EXISTS (SELECT 1 FROM pg_depend d
+                       WHERE d.classid = 'pg_proc'::regclass
+                         AND d.objid = p.oid AND d.deptype = 'e')
         FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname NOT IN ('pg_catalog','information_schema')
@@ -232,7 +281,8 @@ enum SchemaFetcher {
         // so decode the result type as optional — decoding it as a plain String
         // throws the moment the database contains any procedure, which would
         // fail the entire schema load. FunctionNode.returnType is "" for procs.
-        for try await (schema, name, kindChar, args, ret) in rows.decode((String, String, String, String, String?).self) {
+        for try await (schema, name, kindChar, args, ret, ext)
+            in rows.decode((String, String, String, String, String?, Bool).self) {
             let kind: FunctionNode.Kind
             switch kindChar {
             case "p": kind = .procedure
@@ -245,7 +295,8 @@ enum SchemaFetcher {
                 name: name,
                 kind: kind,
                 arguments: "(\(args))",
-                returnType: ret ?? ""
+                returnType: ret ?? "",
+                isExtensionOwned: ext
             ))
         }
         return out
@@ -300,6 +351,7 @@ enum SchemaFetcher {
 
     private static func assemble(
         databaseName: String,
+        namespaces: [Namespace],
         relations: [Relation],
         columns: [ColumnRow],
         primaryKeys: [PrimaryKeyRow],
@@ -335,15 +387,21 @@ enum SchemaFetcher {
             ))
         }
 
-        // Group relations by schema in original (ordered) iteration.
-        var schemas: [SchemaNode] = []
+        var schemas: [SchemaNode] = namespaces.map {
+            SchemaNode(name: $0.name, tables: [], isExtensionOwned: $0.isExtensionOwned)
+        }
         var indexBySchema: [String: Int] = [:]
+        for (i, s) in schemas.enumerated() { indexBySchema[s.name] = i }
         for r in relations {
             let key = "\(r.schema)\u{1F}\(r.name)"
             let cols = colsByTable[key] ?? []
             let pk = pksByTable[key] ?? []
             let fks = fksByTable[key] ?? []
-            let table = TableNode(schema: r.schema, name: r.name, kind: r.kind, columns: cols, primaryKey: pk, foreignKeys: fks)
+            var table = TableNode(schema: r.schema, name: r.name, kind: r.kind, columns: cols, primaryKey: pk, foreignKeys: fks)
+            table.flavor = r.flavor
+            table.oid = r.oid
+            table.partitionOf = r.partitionOf
+            table.isExtensionOwned = r.isExtensionOwned
             if let i = indexBySchema[r.schema] {
                 schemas[i].tables.append(table)
             } else {
@@ -361,6 +419,7 @@ enum SchemaFetcher {
                 schemas.append(SchemaNode(name: f.schema, tables: [], functions: [f]))
             }
         }
+        schemas.sort { $0.name < $1.name }
         return SchemaSnapshot(databaseName: databaseName, schemas: schemas)
     }
 }
