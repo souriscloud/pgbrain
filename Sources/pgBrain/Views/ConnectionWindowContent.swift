@@ -305,7 +305,10 @@ struct ConnectionWindowContent: View {
             )
         }
         .sheet(item: $erdSchema) { target in
-            if let schemaNode = service.visibleSchema.schemas.first(where: { $0.name == target.value }) {
+            if var schemaNode = service.visibleSchema.schemas.first(where: { $0.name == target.value }) {
+                // Same catalog the sidebar shows: partitions live under their
+                // parent and extension objects (PostGIS views…) are noise here.
+                let _ = schemaNode.tables.removeAll { $0.partitionOf != nil || $0.isExtensionOwned }
                 ERDView(
                     schema: schemaNode,
                     onOpenTable: { node in
@@ -495,6 +498,8 @@ struct ConnectionWindowContent: View {
         .onChange(of: service.workspace.selectedID) { _, _ in
             if let t = service.workspace.selectedTab?.tableNode {
                 sidebar.reveal(tableID: t.id)
+            } else {
+                sidebar.clearTableSelection()
             }
         }
         .alert("Name this workspace", isPresented: $showSaveWorkspaceDialog) {

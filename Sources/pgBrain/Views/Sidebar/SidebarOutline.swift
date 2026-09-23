@@ -372,6 +372,10 @@ final class SidebarController {
     }
 
     /// Select + scroll to the relation's row, expanding only its ancestors.
+    func clearTableSelection() {
+        coordinator?.clearTableSelection()
+    }
+
     func reveal(tableID: String) {
         coordinator?.reveal(tableID: tableID)
     }
@@ -604,6 +608,14 @@ struct SidebarOutlineView: NSViewRepresentable {
                   let node = outline.item(atRow: row) as? SidebarNode else { return }
             outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             activate(node, in: outline)
+        }
+
+        /// The active tab isn't a table any more (closed, or a scratchpad):
+        /// drop a table highlight, but keep a schema / function the user
+        /// selected themselves.
+        func clearTableSelection() {
+            guard let outline, selectedNode?.openableTable != nil else { return }
+            outline.deselectAll(nil)
         }
 
         func reveal(tableID: String) {

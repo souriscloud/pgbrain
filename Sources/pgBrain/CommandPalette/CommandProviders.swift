@@ -45,7 +45,8 @@ enum CommandProviders {
         var out: [CommandItem] = []
         for schema in service.schema.schemas {
             let isHidden = hidden.contains(schema.name)
-            for table in schema.tables {
+            // Partitions are reached through their parent, as in the sidebar.
+            for table in schema.tables where table.partitionOf == nil {
                 let captured = table
                 var bias = 0
                 if let r = recentRank[table.id] { bias += 40 + r * 4 }

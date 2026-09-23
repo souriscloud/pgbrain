@@ -7,8 +7,12 @@ private enum TestPaths {
     static func tempURL() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("pgbrain-test-\(UUID().uuidString).json")
     }
+    /// One reused suite, wiped on every call: a fresh UUID-named suite per
+    /// test left a plist in ~/Library/Preferences on every run.
     static func suite() -> UserDefaults {
-        UserDefaults(suiteName: "pgbrain.tests.\(UUID().uuidString)")!
+        let name = "pgbrain.tests"
+        UserDefaults.standard.removePersistentDomain(forName: name)
+        return UserDefaults(suiteName: name)!
     }
 }
 
@@ -304,7 +308,7 @@ final class ConnectionStoreTests: XCTestCase {
 @MainActor
 final class SchemaVisibilityTests: XCTestCase {
     func testHideShowToggleClearAndPrune() {
-        let suiteName = "pgbrain.tests.\(UUID().uuidString)"
+        let suiteName = "pgbrain.tests"
         let suite = UserDefaults(suiteName: suiteName)!
         defer { suite.removePersistentDomain(forName: suiteName) }
         let store = SchemaVisibility(testDefaults: suite)
@@ -329,7 +333,7 @@ final class SchemaVisibilityTests: XCTestCase {
     }
 
     func testPersistRoundTripViaSuite() {
-        let suiteName = "pgbrain.tests.\(UUID().uuidString)"
+        let suiteName = "pgbrain.tests"
         let suite = UserDefaults(suiteName: suiteName)!
         defer { suite.removePersistentDomain(forName: suiteName) }
         let c = UUID()

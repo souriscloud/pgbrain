@@ -81,31 +81,11 @@ enum CellFormat {
     private static var monoText: NSFont { .monospacedSystemFont(ofSize: baseSize, weight: .regular) }
     private static var body: NSFont { .systemFont(ofSize: baseSize) }
 
-    private static let intFormatter: NumberFormatter = {
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        f.usesGroupingSeparator = true
-        f.maximumFractionDigits = 0
-        return f
-    }()
-
-    private static let decimalFormatter: NumberFormatter = {
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        f.usesGroupingSeparator = true
-        f.minimumFractionDigits = 0
-        f.maximumFractionDigits = 6
-        return f
-    }()
-
+    /// Numbers are shown exactly as the server sent them, like psql: no
+    /// grouping (ids read as 6000, not 6,000) and no round-trip through
+    /// Double, which dropped a numeric's scale (14.50 → 14.5) and precision.
     private static func integer(_ raw: String, kind: ColumnTypeKind) -> Rendered {
-        let trimmed = raw.trimmingCharacters(in: .whitespaces)
-        let formatted: String
-        if let n = Int64(trimmed), let s = intFormatter.string(from: NSNumber(value: n)) {
-            formatted = s
-        } else {
-            formatted = trimmed
-        }
+        let formatted = raw.trimmingCharacters(in: .whitespaces)
         return Rendered(
             attributed: plain(formatted, color: .labelColor, font: mono),
             alignment: .right,
@@ -115,13 +95,7 @@ enum CellFormat {
     }
 
     private static func number(_ raw: String, kind: ColumnTypeKind) -> Rendered {
-        let trimmed = raw.trimmingCharacters(in: .whitespaces)
-        let formatted: String
-        if let d = Double(trimmed), let s = decimalFormatter.string(from: NSNumber(value: d)) {
-            formatted = s
-        } else {
-            formatted = trimmed
-        }
+        let formatted = raw.trimmingCharacters(in: .whitespaces)
         return Rendered(
             attributed: plain(formatted, color: .labelColor, font: mono),
             alignment: .right,
