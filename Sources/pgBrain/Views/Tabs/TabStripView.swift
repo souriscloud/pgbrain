@@ -80,6 +80,7 @@ struct TabStripView: View {
         )
         .onDrag {
             draggingID = tab.id
+            clearDraggingWhenMouseReleased(tab.id)
             return NSItemProvider(object: tab.id.uuidString as NSString)
         }
         .onDrop(
@@ -90,6 +91,19 @@ struct TabStripView: View {
                 draggingID: $draggingID
             )
         )
+    }
+
+    /// SwiftUI's `onDrag` has no end callback, and a drag dropped outside
+    /// the strip (or cancelled with Esc) never reaches `performDrop` — the
+    /// chip would stay styled as dragging. The drag session ends when the
+    /// mouse button comes up, so watch for that.
+    private func clearDraggingWhenMouseReleased(_ id: UUID) {
+        Task { @MainActor in
+            repeat {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            } while NSEvent.pressedMouseButtons & 1 != 0
+            if draggingID == id { draggingID = nil }
+        }
     }
 
     private func close(_ ids: [UUID]) {
