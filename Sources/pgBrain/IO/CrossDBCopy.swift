@@ -314,7 +314,7 @@ enum CrossDBCopy {
                         advanced = try await advanceSequences(targetConn, qualified: qualifiedTarget, columns: targetColumns)
                         _ = try await targetConn.query(PostgresQuery(unsafeSQL: "COMMIT"), logger: pgbrainQuietLogger)
                     } catch {
-                        _ = try? await targetConn.query(PostgresQuery(unsafeSQL: "ROLLBACK"), logger: pgbrainQuietLogger)
+                        await PooledTransaction.rollbackOrDiscard(targetConn)
                         throw error
                     }
                 }

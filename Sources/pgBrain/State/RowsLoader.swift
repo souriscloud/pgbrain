@@ -713,9 +713,15 @@ final class RowsLoader {
                 }
             }
         }
-        for (k, rowIndex) in b.insertRows.enumerated() where k < outcome.insertedRows.count && rowIndex < page.rows.count {
-            page.rows[rowIndex] = outcome.insertedRows[k]
-            if k < outcome.insertedLocators.count { page.setLocator(outcome.insertedLocators[k], at: rowIndex) }
+        // Per-draft results: a trigger-suppressed INSERT yields nil and must
+        // not shift later results onto the wrong draft rows.
+        for (k, rowIndex) in b.insertRows.enumerated()
+            where k < outcome.insertedRowsByDraft.count && rowIndex < page.rows.count {
+            guard let stored = outcome.insertedRowsByDraft[k] else { continue }
+            page.rows[rowIndex] = stored
+            if k < outcome.insertedLocatorsByDraft.count {
+                page.setLocator(outcome.insertedLocatorsByDraft[k], at: rowIndex)
+            }
             for col in page.columns.indices { highlights.insert(EditBuffer.CellKey(row: rowIndex, column: col)) }
         }
         editBuffer.settleApplied(submitted)

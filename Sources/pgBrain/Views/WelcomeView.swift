@@ -149,6 +149,14 @@ struct WelcomeView: View {
 
     private var connectionPane: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if let reason = store.saveBlockedReason {
+                Label(reason, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Tokens.Brand.danger)
+            }
             HStack {
                 Text("Connections")
                     .font(.title2.weight(.semibold))

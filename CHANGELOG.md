@@ -49,14 +49,17 @@ mangle data. Recommended for everyone.
   to edit, ⌫ sets NULL, ⌘Z / ⌘⇧Z undo and redo.
 - **Pending changes badge** with **Preview SQL**, Apply (⌘S) and Discard (⌘⎋).
 - **Your staged edits are safe:** paging, sorting, filtering, refreshing,
-  foreign-key jumps and closing a tab or window now ask Apply / Discard /
-  Cancel instead of throwing the edits away.
+  foreign-key jumps, closing a tab or window, and quitting now ask before
+  throwing edits away; edits made while a refresh is running are kept, and
+  renaming the table elsewhere keeps the tab and its edits.
 - **Apply shows what the server stored** (normalised numbers, booleans, JSON)
   and refuses to overwrite a row someone else changed or deleted meanwhile.
 - **Tables without a primary key can be edited**, with a clear warning.
 - Pages are ordered by primary key by default, so rows don't jump between
   pages after an edit; sorting a numeric column by its header sorts
   numerically.
+- **Paging moved to ⌃⌘← / ⌃⌘→** so ⌘⇧← / ⌘⇧→ select text again in the
+  filter fields and extend the grid selection.
 - ⌘-click follows multi-column foreign keys. The map view honours WHERE.
   Structure / DDL pane and grid / form / map mode are remembered per tab.
 - CSV / JSON import asks for encoding, delimiter and header options.
@@ -68,8 +71,10 @@ mangle data. Recommended for everyone.
 - **One server session per scratchpad:** `SET`, temp tables, `SET ROLE` and
   `BEGIN` carry over between runs.
 - **Transaction indicator** with Commit / Roll Back, an Auto / Manual commit
-  switch, and a prompt before closing a tab or window with an open
-  transaction.
+  switch, and a prompt before closing a tab or window — or quitting — with an
+  open transaction. If the server drops the connection mid-transaction, the
+  next statement is refused with a clear message instead of silently running
+  outside the transaction.
 - Stop (⌘.) cancels exactly your statement; a double ⌘↩ no longer runs it
   twice. Server NOTICEs show under results.
 - Explain is now ⌘⇧E (⌘E is "Use Selection for Find" again); keypad Enter
@@ -90,7 +95,8 @@ mangle data. Recommended for everyone.
   (Settings ▸ Connections).
 - **pg_dump / pg_restore** find PostgreSQL 18 (Postgres.app, Homebrew, EDB),
   pick the version that matches your server, work through SSH tunnels, and
-  can be cancelled.
+  can be cancelled. A failed dump no longer destroys an earlier dump at the
+  same path; dump files are created private to your user.
 - SSH tunnels are non-interactive, accept a new host key on first use, explain
   failures clearly, are shared between windows and stop when you quit.
 
@@ -109,6 +115,9 @@ mangle data. Recommended for everyone.
 - One unreadable entry could wipe the whole connection list; a failed Keychain
   write could lose a saved password.
 - Stopping a query could cancel a different query running on the same server.
+- An edit could update several rows when a child table repeated the parent's
+  key; row edits now refuse to touch more than one row.
+- Importing into a table could land in a same-named temporary table.
 - Statement splitting and the safety check misread E'…' strings, Windows line
   endings after `--` comments, and `$1` parameters.
 - CSV export wrote NULL and empty strings identically; JSON export could emit
@@ -126,12 +135,19 @@ mangle data. Recommended for everyone.
 - Closing a window while it was still connecting left an SSH process behind.
 - The "unsaved changes" dot vanished when you switched tabs.
 - The empty-window hint now says ⌘T (not ⌘N) opens a scratchpad.
+- Choosing the current database in the switcher no longer opens a duplicate
+  window; cross-DB copy and schema diff target the right database window.
+- ⇧ / ⌘ / ⌥⇧ with arrow keys in the SQL editor select text instead of jumping
+  between cells.
 
 ### Security
 - Saved passwords are readable only by pgBrain (the old "any app" Keychain
   access list is gone; items migrate on first use). Note: after updating,
   going back to 0.9.x means re-entering passwords.
 - Query history masks password literals and can be turned off or cleared.
+- The scratchpad's SCRAM login always verifies the server's signature.
+- If the connection list can't be read safely, pgBrain refuses to overwrite it
+  and says so on the Welcome window.
 - Exported connection files are private (0600); copied connection strings with
   passwords are hidden from clipboard managers.
 - pg_dump / pg_restore get the password via a private temporary file instead

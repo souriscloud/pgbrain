@@ -65,10 +65,10 @@ enum Explain {
                     let stream = try await conn.query(PostgresQuery(unsafeSQL: stmt), logger: pgbrainQuietLogger)
                     for try await row in stream.decode(String.self) { out.append(row) }
                 } catch {
-                    _ = try? await conn.query(PostgresQuery(unsafeSQL: "ROLLBACK"), logger: pgbrainQuietLogger)
+                    await PooledTransaction.rollbackOrDiscard(conn)
                     throw error
                 }
-                _ = try? await conn.query(PostgresQuery(unsafeSQL: "ROLLBACK"), logger: pgbrainQuietLogger)
+                await PooledTransaction.rollbackOrDiscard(conn)
                 return out
             }
         } else {
