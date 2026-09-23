@@ -12,6 +12,11 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.33.0"),
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.9.0"),
+        // Imported directly by the scratchpad wire client and the logging
+        // bridge; declared so they don't ride on PostgresNIO's transitive graph.
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.80.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.29.0"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
     ],
     targets: [
         .executableTarget(
@@ -19,6 +24,10 @@ let package = Package(
             dependencies: [
                 .product(name: "PostgresNIO", package: "postgres-nio"),
                 .product(name: "Sparkle", package: "Sparkle"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "Logging", package: "swift-log"),
             ],
             path: "Sources/pgBrain",
             swiftSettings: [
