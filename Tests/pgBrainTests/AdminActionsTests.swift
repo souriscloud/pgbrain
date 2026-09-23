@@ -323,8 +323,7 @@ final class AdminActionsTests: XCTestCase {
         let s = TestDB.uniqueTag(); await db.dropSchemas(s)
         // A throwaway non-owner role — the table owner always has every
         // privilege implicitly, so GRANT/REVOKE can only be observed on a
-        // distinct role. setPrivileges quotes the role, so PUBLIC can't be
-        // exercised through it (it would resolve to a literal role "PUBLIC").
+        // distinct role. (PUBLIC is covered in A_AdminActionsTests.)
         let role = "pgb_role_" + UUID().uuidString.prefix(8).lowercased()
         _ = try? await db.client.query(PostgresQuery(unsafeSQL: "DROP ROLE IF EXISTS \"\(role)\""))
         func dropRole() async { _ = try? await db.client.query(PostgresQuery(unsafeSQL: "DROP ROLE IF EXISTS \"\(role)\"")) }
