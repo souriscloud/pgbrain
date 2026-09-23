@@ -45,6 +45,9 @@ overhauls navigation. 1.0.0 comes after this settles.
       clobbering, window keying, …); all fixed with tests.
 - [ ] **Manual smoke pass** (RELEASE.md checklist + the new navigation / grid /
       scratchpad flows) — nobody has clicked through 0.10.0 yet.
+- [x] **Marketing screenshots.** `scripts/screenshots.sh` renders ten scenes
+      (light + dark) off-screen into `docs/screenshots/`; README uses them.
+      Findings from driving the UI are in the backlog below.
 - [ ] **Release v0.10.0** (`./scripts/release.sh minor`).
 
 How it was built: Phase 0 on `main`, then five parallel worktree agents
@@ -58,6 +61,14 @@ merged and wired centrally; then two review agents and two fix agents.
   encrypted client keys; `CellFormat` still reformats some scratchpad values
   on the pooled fallback path; LazyVStack for very long notebooks (blocked on
   focus moving to off-screen cells).
+
+- **Found while scripting the screenshots** (the partitioned-table "0 bytes"
+  header is already fixed): the ERD lists
+  partitions and extension-owned relations the sidebar hides; Go to Table
+  ranks every partition next to its parent; grid numerics drop their scale
+  (`numeric(8,2)` 14.50 shows as 14.5) and ids / PIDs get thousands
+  separators; the sidebar keeps a closed table selected; unit tests leave a
+  `pgbrain.tests.<uuid>.plist` behind in ~/Library/Preferences per suite.
 
 - **UI-level E2E (XCUITest)** — needs an Xcode UI-test bundle, which collides
   with the no-`.xcodeproj` rule. Tier-A headless AppKit tests

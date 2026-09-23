@@ -7,12 +7,54 @@
 > If JetBrains DataGrip and macOS had a kid that actually feels like a Mac app, you'd get pgBrain.
 
 <p align="center">
-  <img src="docs/pgbrain-demo.gif" alt="pgBrain — SQL notebook, PostGIS map, data grid, ERD, column profiler, and charts" width="820">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/01-hero-dark-framed.png">
+    <img src="docs/screenshots/01-hero-light-framed.png" alt="pgBrain — connection window with pinned and recent tables, breadcrumb, a range selection and staged edits in the data grid" width="860">
+  </picture>
 </p>
 
 ## Why
 
 JetBrains tools are powerful but feel like a Java app glued to your menu bar. The Postgres GUIs that *do* feel Mac-native are either toy projects or stuck circa 2017. pgBrain is the missing middle — DataGrip-density workflows in a SwiftUI/AppKit shell that respects your trackpad, your dark mode, and your battery.
+
+## A closer look
+
+<table>
+  <tr>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/02-scratchpad-dark-framed.png">
+        <img src="docs/screenshots/02-scratchpad-light-framed.png" alt="Notebook scratchpad with an open transaction, psql-exact types and an inline chart">
+      </picture>
+      <p align="center"><sub>Notebook scratchpad — one server session, a live transaction, psql-exact types, inline chart</sub></p>
+    </td>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/03-go-to-table-dark-framed.png">
+        <img src="docs/screenshots/03-go-to-table-light-framed.png" alt="Go to Table palette with fuzzy results for pub.ord">
+      </picture>
+      <p align="center"><sub>Go to Table (⌘O) — fuzzy <code>pub.ord</code>, recents first</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/04-preview-sql-dark-framed.png">
+        <img src="docs/screenshots/04-preview-sql-light-framed.png" alt="Preview SQL sheet for staged grid edits">
+      </picture>
+      <p align="center"><sub>Staged edits → Preview SQL → Apply in one transaction</sub></p>
+    </td>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/06-map-dark-framed.png">
+        <img src="docs/screenshots/06-map-light-framed.png" alt="PostGIS geometry column plotted on a map">
+      </picture>
+      <p align="center"><sub>PostGIS columns on a real map</sub></p>
+    </td>
+  </tr>
+</table>
+
+More in [docs/screenshots](docs/screenshots/) (ERD, EXPLAIN plans, structure, connection editor, activity), in light and dark.
 
 ## What's in the box
 

@@ -727,6 +727,11 @@ private struct ResultGridWithViews: View {
             Divider().opacity(0.3)
             content
         }
+        #if DEBUG
+        .onAppear {
+            if let forced = ShowcaseHooks.resultMode(for: sourceSQL).flatMap(Mode.init(rawValue:)) { mode = forced }
+        }
+        #endif
     }
 
     @ViewBuilder

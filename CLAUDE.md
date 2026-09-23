@@ -57,12 +57,16 @@ Sources/pgBrain/
 │                   AppSettings (UserDefaults), SessionState, AppTermination
 ├── CommandPalette/ ⌘K / ⌘O palette
 ├── Menu/           NSStatusItem menu
-└── Feedback/       GitHub issue link builder
+├── Feedback/       GitHub issue link builder
+└── Showcase/       DEBUG-only screenshot harness (PGBRAIN_SHOWCASE): scenes, off-screen
+                    renderer, map snapshots — compiled out of release builds
 Tests/pgBrainTests/ XCTest; pure tests + live-DB E2E (see Testing)
 Resources/          .app bundle resources: Info.plist, entitlements (release + dev),
                     AppIcon.icns (generated), dmg-background.png
 scripts/            bundle.sh, run.sh, clean.sh, release.sh, bump.sh, build-dmg.sh,
-                    sparkle-tools.sh, gen-icon.swift, gen-dmg-background.swift, .env.example
+                    sparkle-tools.sh, gen-icon.swift, gen-dmg-background.swift, .env.example,
+                    screenshots.sh + showcase/ (seed.sql, frame.swift)
+docs/screenshots/   generated marketing screenshots (scripts/screenshots.sh)
 appcast.xml         Sparkle feed (release.sh prepends items, keeps the newest 10)
 ```
 There is no SwiftPM resource bundle (`Bundle.module`): `bundle.sh` doesn't embed one, so don't add `resources:` to the target without also embedding it.
@@ -86,6 +90,9 @@ PGBRAIN_KEYCHAIN_TESTS=1 swift test                   # also the real-Keychain t
 - **Never touch the real Keychain by default**: every rebuilt test binary has a new signature and macOS prompts for the login password. Keychain tests are opt-in via `PGBRAIN_KEYCHAIN_TESTS=1`; everything else injects closures or uses random ids that don't exist.
 - Engines meant to be tested expose a **pure entrypoint** with no `ConnectionService`/UI dependency (e.g. `SchemaDuplicator.duplicate(client:…)`); the `@MainActor` UI wrapper adds operation tracking on top. Keep that split. Grid/navigation logic lives in pure types (`GridSelection`, `DirtyGuard`, `WorkspaceState`) for the same reason.
 - AppKit glue is tested headlessly by instantiating the view/coordinator and calling its overrides (`DataGridKeyEquivalentTests`, `CompletingTextFieldTests`). XCUITest is out (needs an Xcode UI-test bundle, which collides with the no-`.xcodeproj` rule).
+
+## Screenshots
+`scripts/screenshots.sh` seeds a throwaway `pgbrain_showcase` database, runs a debug build in showcase mode (one run per appearance) and frames the PNGs into `docs/screenshots/`. Showcase mode must stay invisible and side-effect free: activation policy *prohibited*, windows parked at (-30000, -30000) below the desktop level and rendered with `cacheDisplay` (never screen capture), no Keychain access (guarded in `Keychain`), its own `AppSupport` directory (`PGBRAIN_SUPPORT_DIR`) and defaults suite, no Sparkle / menu bar item / session restore. Scenes drive the app through model objects only. Hooks into app code are `#if DEBUG` and keyed off `ShowcaseEnvironment.isActive`.
 
 ## Window model (DataGrip-style)
 - **Welcome window** at launch and whenever no other window is open.

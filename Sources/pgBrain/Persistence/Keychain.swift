@@ -49,6 +49,9 @@ enum Keychain {
     /// Update in place, add only when missing. Never deletes first: a failed
     /// add after a delete would lose the password.
     static func setPassword(_ password: String, for connectionID: UUID) throws {
+        #if DEBUG
+        if ShowcaseEnvironment.isActive { return }
+        #endif
         let account = connectionID.uuidString
         try write(Data(password.utf8), service: service, account: account)
         // The new item is in place; a stale legacy copy would otherwise be
@@ -57,6 +60,9 @@ enum Keychain {
     }
 
     private static func write(_ data: Data, service: String, account: String) throws {
+        #if DEBUG
+        if ShowcaseEnvironment.isActive { return }
+        #endif
         let query = baseQuery(service: service, account: account)
         let update: [CFString: Any] = [kSecValueData: data]
         let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
@@ -75,6 +81,10 @@ enum Keychain {
     }
 
     private static func read(service: String, account: String) -> (OSStatus, Data?) {
+        #if DEBUG
+        // Screenshot runs use trust auth; any Keychain access could prompt.
+        if ShowcaseEnvironment.isActive { return (errSecItemNotFound, nil) }
+        #endif
         var query = baseQuery(service: service, account: account)
         query[kSecReturnData] = true
         query[kSecMatchLimit] = kSecMatchLimitOne
@@ -151,6 +161,9 @@ enum Keychain {
     }
 
     static func deletePassword(for connectionID: UUID) {
+        #if DEBUG
+        if ShowcaseEnvironment.isActive { return }
+        #endif
         let account = connectionID.uuidString
         _ = SecItemDelete(baseQuery(service: service, account: account) as CFDictionary)
         _ = SecItemDelete(baseQuery(service: legacyService, account: account) as CFDictionary)

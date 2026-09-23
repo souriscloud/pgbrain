@@ -375,7 +375,10 @@ final class RowsLoader {
     nonisolated static func fetchTableSize(table: TableNode, client: PostgresClient) async -> String? {
         guard table.kind != .view else { return nil }
         let qualified = SQLIdent.qualified(schema: table.schema, name: table.name)
-        let sql: PostgresQuery = "SELECT pg_size_pretty(pg_total_relation_size(\(qualified)::regclass))"
+        // A partitioned parent stores nothing itself; its size is its partitions'.
+        let sql: PostgresQuery = table.flavor == .partitioned
+            ? "SELECT pg_size_pretty(sum(pg_total_relation_size(relid))) FROM pg_partition_tree(\(qualified)::regclass)"
+            : "SELECT pg_size_pretty(pg_total_relation_size(\(qualified)::regclass))"
         do {
             let rows = try await client.query(sql)
             for try await s in rows.decode(String.self) { return s }

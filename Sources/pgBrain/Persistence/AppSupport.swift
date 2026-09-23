@@ -5,6 +5,13 @@ enum AppSupport {
     static let folderName = "pgBrain"
 
     static var directory: URL {
+        #if DEBUG
+        // Showcase / screenshot runs keep every store in a throwaway folder.
+        if let override = ShowcaseEnvironment.supportDirectory {
+            try? FileManager.default.createDirectory(at: override, withIntermediateDirectories: true)
+            return override
+        }
+        #endif
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
         let dir = base.appendingPathComponent(folderName, isDirectory: true)
