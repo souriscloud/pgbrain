@@ -32,6 +32,7 @@ final class NavigationHistoryStore {
     private init() {
         self.url = AppSupport.directory.appendingPathComponent("navigation.json")
         load()
+        AppTermination.register("NavigationHistoryStore") { [weak self] in self?.flush() }
     }
 
     #if DEBUG

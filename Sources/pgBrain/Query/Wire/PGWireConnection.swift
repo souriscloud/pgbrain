@@ -17,7 +17,12 @@ struct PGWireEndpoint: Sendable {
     var password: String?
     var database: String?
     var sslMode: Connection.SSLMode
-    var applicationName: String = "pgBrain"
+    /// Full client TLS setup (root CA, client certificate) when the endpoint
+    /// comes from a saved connection; nil derives verification from `sslMode`.
+    var tls: TLSConfiguration?
+    /// Session settings sent in the startup packet — the same ones the pool
+    /// sends (application_name, timeouts, read-only mode).
+    var startupParameters: [(String, String)] = [("application_name", "pgBrain")]
     var connectTimeoutSeconds: Int64 = 8
 }
 
@@ -87,11 +92,16 @@ enum PGWireTransport {
             case .require, .verifyCA, .verifyFull: throw PGWireError.sslRefused
             }
         }
-        var tls = TLSConfiguration.makeClientConfiguration()
-        switch endpoint.sslMode {
-        case .disable, .allow, .prefer, .require: tls.certificateVerification = .none
-        case .verifyCA: tls.certificateVerification = .noHostnameVerification
-        case .verifyFull: tls.certificateVerification = .fullVerification
+        var tls: TLSConfiguration
+        if let configured = endpoint.tls {
+            tls = configured
+        } else {
+            tls = TLSConfiguration.makeClientConfiguration()
+            switch endpoint.sslMode {
+            case .disable, .allow, .prefer, .require: tls.certificateVerification = .none
+            case .verifyCA: tls.certificateVerification = .noHostnameVerification
+            case .verifyFull: tls.certificateVerification = .fullVerification
+            }
         }
         let context = try NIOSSLContext(configuration: tls)
         let name = endpoint.tlsServerName ?? endpoint.host
@@ -153,7 +163,7 @@ struct PGWireIO {
     mutating func startup(_ endpoint: PGWireEndpoint) async throws {
         var params: [(String, String)] = [("user", endpoint.username)]
         if let db = endpoint.database, !db.isEmpty { params.append(("database", db)) }
-        params.append(("application_name", endpoint.applicationName))
+        params.append(contentsOf: endpoint.startupParameters)
         params.append(("client_encoding", "UTF8"))
         try await outbound.write(PGFrontend.startup(parameters: params))
 

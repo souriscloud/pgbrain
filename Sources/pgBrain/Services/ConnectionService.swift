@@ -227,7 +227,16 @@ final class ConnectionService {
         state = .closed
         health = .healthy
         releaseTunnel()
+        for tab in workspace.tabs {
+            if case .scratchpad(let pad) = tab.kind { pad.closeSession() }
+        }
+        Self.releaseEndpoint(for: connection, owner: scratchpadTunnelOwner)
     }
+
+    /// Tunnel owner shared by every scratchpad session in this window, so
+    /// their direct wire connections keep the SSH forward alive exactly as
+    /// long as the window.
+    var scratchpadTunnelOwner: String { "\(ownerID)#scratchpads" }
 
     private func releaseTunnel() {
         if let owner = tunnelOwner {

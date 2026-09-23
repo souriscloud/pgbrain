@@ -140,7 +140,7 @@ struct CrossDBCopyView: View {
            let liveClient = liveService.client {
             endpoint = .existing(liveClient)
         } else {
-            let pw = Keychain.password(for: targetConn.id) ?? ""
+            let pw = await Keychain.passwordAsync(for: targetConn.id) ?? ""
             endpoint = .transient(targetConn, password: pw)
         }
 

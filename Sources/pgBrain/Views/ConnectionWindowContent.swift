@@ -1224,6 +1224,7 @@ struct ConnectionWindowContent: View {
     }
 
     private var chromeStateColor: Color {
+        if case .connected = service.state, service.health != .healthy { return .orange }
         switch service.state {
         case .idle, .connecting: return .yellow
         case .connected: return .green
@@ -1233,6 +1234,7 @@ struct ConnectionWindowContent: View {
     }
 
     private var chromeStateText: String {
+        if case .connected = service.state, case .reconnecting = service.health { return "Reconnecting…" }
         switch service.state {
         case .idle: return "Idle"
         case .connecting: return "Connecting…"
@@ -1251,7 +1253,7 @@ struct ConnectionWindowContent: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         let conn = service.connection
-        let password = Keychain.password(for: conn.id) ?? ""
+        let serverVersionNum = service.serverVersionNum
         let op = service.operations.begin(
             kind: .export,
             summary: "pg_dump → \(url.lastPathComponent)"
@@ -1259,11 +1261,13 @@ struct ConnectionWindowContent: View {
         let tracker = service.operations
         Task {
             do {
+                let password = await Keychain.passwordAsync(for: conn.id) ?? ""
                 let result = try await PgDumpCLI.dump(
                     connection: conn,
                     password: password,
                     format: format,
-                    destination: url
+                    destination: url,
+                    serverVersionNum: serverVersionNum
                 )
                 op.summary += " · \(ByteCountFormatter.string(fromByteCount: Int64(result.bytesWritten), countStyle: .file))"
                 tracker.finish(op, status: .succeeded)
@@ -1373,6 +1377,12 @@ struct StatusFooter: View {
             statusDot
             Text(stateLabel)
                 .font(.caption.weight(.medium))
+            if showsReconnect {
+                Button("Reconnect") { service.reconnect() }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                    .help(healthDetail ?? "Reconnect to the server")
+            }
             Text("·")
                 .foregroundStyle(.tertiary)
             if service.connection.colorTag != .none {
@@ -1459,11 +1469,29 @@ struct StatusFooter: View {
         return "\(conn.username)@\(conn.host):\(conn.port) · \(db)"
     }
 
+    private var showsReconnect: Bool {
+        switch service.state {
+        case .error, .closed: return true
+        case .connected: return service.health != .healthy
+        case .idle, .connecting: return false
+        }
+    }
+
+    private var healthDetail: String? {
+        if case .lost(let why) = service.health { return why }
+        return nil
+    }
+
     private var stateLabel: String {
         switch service.state {
         case .idle: return "Idle"
         case .connecting: return "Connecting…"
-        case .connected: return "Connected"
+        case .connected:
+            switch service.health {
+            case .healthy: return "Connected"
+            case .reconnecting(let attempt): return "Connection lost · reconnecting (attempt \(attempt))…"
+            case .lost: return "Connection lost"
+            }
         case .error: return "Error"
         case .closed: return "Closed"
         }
@@ -1477,6 +1505,7 @@ struct StatusFooter: View {
     }
 
     private var statusColor: Color {
+        if case .connected = service.state, service.health != .healthy { return .orange }
         switch service.state {
         case .idle: return .gray
         case .connecting: return .yellow

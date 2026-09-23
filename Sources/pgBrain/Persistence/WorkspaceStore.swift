@@ -45,6 +45,7 @@ final class WorkspaceStore {
     private init() {
         self.url = AppSupport.directory.appendingPathComponent("workspaces.json")
         load()
+        AppTermination.register("WorkspaceStore") { [weak self] in self?.flush() }
     }
 
     #if DEBUG

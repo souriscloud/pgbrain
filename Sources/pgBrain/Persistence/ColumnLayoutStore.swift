@@ -17,6 +17,7 @@ final class ColumnLayoutStore {
     private init() {
         self.url = AppSupport.directory.appendingPathComponent("column_layout.json")
         load()
+        AppTermination.register("ColumnLayoutStore") { [weak self] in self?.flush() }
     }
 
     #if DEBUG

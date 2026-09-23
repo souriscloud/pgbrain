@@ -28,6 +28,7 @@ final class SnippetStore {
     private init() {
         self.url = AppSupport.directory.appendingPathComponent("snippets.json")
         load()
+        AppTermination.register("SnippetStore") { [weak self] in self?.flush() }
     }
 
     #if DEBUG

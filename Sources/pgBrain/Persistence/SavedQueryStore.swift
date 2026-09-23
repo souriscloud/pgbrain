@@ -28,6 +28,16 @@ final class SavedQueryStore {
     private init() {
         self.overrideURL = nil
         load()
+        AppTermination.register("SavedQueryStore") { [weak self] in self?.writeNow() }
+    }
+
+    /// Synchronous write for app termination; `persist()` hops to a
+    /// background queue that may not run before exit.
+    private func writeNow() {
+        try? AppSupport.ensureDirectoryExists()
+        if let data = try? JSONEncoder().encode(queries) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
     }
 
     #if DEBUG

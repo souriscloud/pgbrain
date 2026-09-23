@@ -475,30 +475,11 @@ enum CrossDBCopy {
         case .existing(let client):
             return try await body(client)
         case .transient(let connection, let password):
-            var host = connection.host
-            var port = connection.port
-            var startedTunnel = false
-            if connection.sshEnabled {
-                let alreadyUp = await MainActor.run {
-                    SSHTunnelManager.shared.tunnels[connection.id]?.process.isRunning ?? false
-                }
-                port = try await SSHTunnelManager.shared.startTunnel(for: connection)
-                host = "127.0.0.1"
-                startedTunnel = !alreadyUp
-            }
-            defer {
-                if startedTunnel {
-                    let id = connection.id
-                    Task { @MainActor in SSHTunnelManager.shared.stopTunnel(for: id) }
-                }
-            }
-            let config = PostgresClient.Configuration(
-                host: host,
-                port: port,
-                username: connection.username,
-                password: password.isEmpty ? nil : password,
-                database: connection.database.isEmpty ? nil : connection.database,
-                tls: try tlsConfig(for: connection.sslMode)
+            let owner = "copy-\(UUID().uuidString)"
+            let target = try await ConnectionService.openEndpoint(for: connection, owner: owner)
+            defer { Task { @MainActor in ConnectionService.releaseEndpoint(for: connection, owner: owner) } }
+            let config = try ConnectionService.clientConfiguration(
+                for: connection, password: password, endpoint: target, applicationName: "pgBrain · copy"
             )
             let client = PostgresClient(configuration: config)
             // Detached task drives the client's I/O loop. Cancelling on exit
@@ -508,27 +489,6 @@ enum CrossDBCopy {
             }
             defer { runTask.cancel() }
             return try await body(client)
-        }
-    }
-
-    /// Must stay identical to `ConnectionService.tls(for:)` (private there):
-    /// libpq semantics — prefer/require don't verify the certificate,
-    /// verify-ca checks the chain only, verify-full also the hostname.
-    static func tlsConfig(for mode: Connection.SSLMode) throws -> PostgresClient.Configuration.TLS {
-        guard let policy = tlsPolicy(for: mode) else { return .disable }
-        var config = TLSConfiguration.makeClientConfiguration()
-        config.certificateVerification = policy.verification
-        return policy.required ? .require(config) : .prefer(config)
-    }
-
-    /// `nil` = TLS off.
-    static func tlsPolicy(for mode: Connection.SSLMode) -> (required: Bool, verification: CertificateVerification)? {
-        switch mode {
-        case .disable: nil
-        case .allow, .prefer: (false, .none)
-        case .require: (true, .none)
-        case .verifyCA: (true, .noHostnameVerification)
-        case .verifyFull: (true, .fullVerification)
         }
     }
 }

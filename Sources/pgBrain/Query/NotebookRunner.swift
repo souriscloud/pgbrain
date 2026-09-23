@@ -437,23 +437,20 @@ enum NotebookRunner {
 
     static func endpoint(for service: ConnectionService) async throws -> PGWireEndpoint {
         let c = service.connection
-        var host = c.host
-        var port = c.port
-        if c.sshEnabled {
-            // Idempotent: returns the tunnel the pool is already using.
-            port = try await SSHTunnelManager.shared.startTunnel(for: c)
-            host = "127.0.0.1"
-        }
-        let password = Keychain.password(for: c.id)
-        return PGWireEndpoint(
-            host: host,
-            port: port,
-            tlsServerName: c.host,
+        let target = try await ConnectionService.openEndpoint(for: c, owner: service.scratchpadTunnelOwner)
+        let password = await Keychain.passwordAsync(for: c.id)
+        var endpoint = PGWireEndpoint(
+            host: target.host,
+            port: target.port,
+            tlsServerName: ConnectionService.tlsServerName(for: c),
             username: c.username,
             password: (password?.isEmpty ?? true) ? nil : password,
             database: c.database.isEmpty ? nil : c.database,
             sslMode: c.sslMode
         )
+        endpoint.tls = try ConnectionService.tlsConfiguration(for: c)
+        endpoint.startupParameters = c.startupParameters(applicationName: "pgBrain")
+        return endpoint
     }
 
     /// Bring the session's search_path in line with the picker, only when the

@@ -282,8 +282,7 @@ struct WelcomeView: View {
     /// the user picked the "include password" variant.
     private func copyConnection(_ connection: Connection, format: ConnectionExchange.Format, includePassword: Bool) {
         let text = ConnectionExchange.render(connection, format: format, includePassword: includePassword)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        ConnectionIO.copyText(text, containsSecret: includePassword)
     }
 }
 

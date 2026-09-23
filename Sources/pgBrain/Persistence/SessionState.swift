@@ -96,6 +96,18 @@ final class SessionStateStore {
 
     private init() {
         self.url = AppSupport.stateFileURL
+        AppTermination.register("SessionStateStore") { [weak self] in self?.flushNow() }
+    }
+
+    /// Write a pending debounced snapshot synchronously. Only when one is
+    /// pending: quitting mid-restore must not overwrite the saved session
+    /// with half-restored windows.
+    func flushNow() {
+        guard let task = debounceTask, !task.isCancelled else { return }
+        task.cancel()
+        debounceTask = nil
+        snapshotAndPersist()
+        writeQueue.sync {}
     }
 
     func load() -> SessionState? {
@@ -116,6 +128,7 @@ final class SessionStateStore {
         debounceTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             if Task.isCancelled { return }
+            self?.debounceTask = nil
             self?.snapshotAndPersist()
         }
     }

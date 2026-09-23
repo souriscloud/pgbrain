@@ -55,17 +55,6 @@ final class A_CrossDBCopyTests: XCTestCase {
         XCTAssertTrue(sql.hasPrefix("INSERT INTO \"s\".\"t\" (\"id\", \"v\") OVERRIDING SYSTEM VALUE SELECT"))
     }
 
-    func testTLSMatchesConnectionServiceSemantics() {
-        XCTAssertNil(CrossDBCopy.tlsPolicy(for: .disable))
-        XCTAssertEqual(CrossDBCopy.tlsPolicy(for: .allow)?.required, false)
-        XCTAssertEqual(CrossDBCopy.tlsPolicy(for: .prefer)?.required, false)
-        XCTAssertEqual(CrossDBCopy.tlsPolicy(for: .prefer)?.verification, CertificateVerification.none)
-        XCTAssertEqual(CrossDBCopy.tlsPolicy(for: .require)?.required, true)
-        XCTAssertEqual(CrossDBCopy.tlsPolicy(for: .require)?.verification, CertificateVerification.none)
-        XCTAssertEqual(CrossDBCopy.tlsPolicy(for: .verifyCA)?.verification, .noHostnameVerification)
-        XCTAssertEqual(CrossDBCopy.tlsPolicy(for: .verifyFull)?.verification, .fullVerification)
-    }
-
     // MARK: E2E
 
     func testUpsertWithoutConflictColumnsFailsFast() async throws {
