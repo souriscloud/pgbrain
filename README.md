@@ -66,7 +66,7 @@ JetBrains tools are powerful but feel like a Java app glued to your menu bar. Th
 - ↔️ **Cross-DB copy.** Stream a table between connections via `SELECT` → `COPY FROM STDIN`. Flat memory regardless of row count.
 - 📤📥 **Streaming export/import.** CSV/JSON/SQL export at any size; CSV/JSON import with header→column mapping; auto-discovering `pg_dump` wrapper.
 - 🔔 **Long-query notifications.** Background queries over 30s ping you when they finish.
-- ⚙️ **Sparkle auto-update.** Signed + notarized; updates land daily without a click.
+- ⚙️ **Sparkle auto-update.** Signed + notarized; pgBrain checks for new versions daily and on launch, and asks before installing.
 
 ## Download
 
@@ -94,9 +94,10 @@ git clone https://github.com/souriscloud/pgbrain.git
 cd pgbrain
 ./scripts/run.sh                # debug build + bundle + launch
 ./scripts/bundle.sh release     # release build → build/pgBrain.app
+swift test                      # needs a local Postgres db "pgbrain_demo", or PGBRAIN_TEST_DSN
 ```
 
-Pure SwiftPM. No Xcode project — though you can open the package in Xcode if you want a graphical debugger. See [CLAUDE.md](CLAUDE.md) for full architecture, conventions, and dependency tree. See [PLAN.md](PLAN.md) for the iteration-by-iteration changelog.
+Pure SwiftPM. No Xcode project — though you can open the package in Xcode if you want a graphical debugger. See [CLAUDE.md](CLAUDE.md) for architecture and conventions, [PLAN.md](PLAN.md) for what's in flight, and [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Releasing
 

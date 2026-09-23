@@ -12,3 +12,5 @@ Resources/AppIcon.icns
 .env
 .env.local
 releases/
+# Agent worktrees (Claude Code)
+.claude/worktrees/

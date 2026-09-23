@@ -6,6 +6,43 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
+## v0.9.7 — 2026-06-09
+
+### Fixed
+- The cell-edit popup now takes keyboard focus, so Tab and ⌘C act on the
+  editor instead of the grid behind it.
+
+## v0.9.6 — 2026-06-09
+
+### Fixed
+- **WHERE / ORDER BY filter** re-applies on every change. Before, switching one
+  non-empty filter straight to another didn't re-run the query.
+- **⌘C in the cell-edit popup** no longer copies the whole row.
+
+## v0.9.5 — 2026-06-04
+
+### Changed
+- Font zoom applies consistently everywhere; accessibility labels on icon-only
+  buttons; consistent button and label wording; Help lists every shortcut.
+- pgBrain is now published under the AGPL-3.0 licence.
+
+## v0.9.4 — 2026-06-04
+
+### Added
+- **`:var` query parameters** in the scratchpad — pgBrain asks for the values
+  and remembers them while the window is open.
+- **Restore Database…** (pg_restore) with clean / no-owner /
+  single-transaction / parallel-jobs options.
+- **Cross-database copy**: upsert mode (`ON CONFLICT … DO UPDATE / NOTHING`)
+  and automatic creation of the target table.
+- **Appearance** setting: System / Light / Dark.
+- **Default schema per connection**, used by new scratchpads.
+- Grid: ⌃⌘N sets a cell to NULL; hovering a long or JSON cell shows a preview.
+
+### Fixed
+- Saving edits to a row that someone else deleted or re-keyed now fails
+  clearly and rolls back, instead of silently updating nothing.
+
 ## v0.9.3 — 2026-06-01
 
 ### Added
