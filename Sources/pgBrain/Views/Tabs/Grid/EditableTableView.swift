@@ -1,118 +1,200 @@
 import AppKit
 
-/// NSTableView subclass that routes ⌘Z to the bound EditBuffer so the user
-/// can undo pending edits without involving the system undo manager, and
-/// delegates right-click context-menu construction to the coordinator.
-final class EditableTableView: NSTableView {
-    var editBufferProvider: (() -> EditBuffer?)?
-    /// `(row, col) → menu?` — the coordinator builds the menu lazily so it
-    /// can read the current page + edit buffer without us re-plumbing
-    /// state into this subclass.
-    var contextMenuProvider: ((Int, Int) -> NSMenu?)?
-    /// Keyboard navigation hook — called with (rowDelta, colDelta).
-    var onArrowMove: ((Int, Int) -> Void)?
-    /// Called when Return/Enter is pressed on the focused cell.
-    var onEnterKey: (() -> Void)?
-    /// Called to produce TSV for the current selection; result lands on
-    /// the system pasteboard.
-    var tsvCopyProvider: (() -> String?)?
-    /// ⌘-click navigation hook — fires when the user ⌘-clicks a
-    /// single cell. Caller resolves whether the cell is a foreign
-    /// key and routes to the parent table if so. `visibleRow` is the
-    /// row in the currently-filtered view; `dataCol` is 0-indexed
-    /// over data columns (not including the gutter).
-    var onCommandClick: ((Int, Int) -> Void)?
-    /// ⌘⌫ — stage the selected row(s) for deletion. The closure resolves
-    /// the current selection to source rows and calls the delete hook.
-    var onDeleteSelectedRows: (() -> Void)?
-    /// ⌃⌘N — stage an explicit NULL for the keyboard-focused cell.
-    var onSetNull: (() -> Void)?
-    /// `(visibleRow, dataCol) → preview text?`. The coordinator returns the
-    /// full (pretty-printed for JSON) value when the cell is worth a hover
-    /// popover, else nil. `dataCol` is 0-indexed over data columns.
-    var hoverPreviewProvider: ((Int, Int) -> String?)?
+/// What the grid's table view asks of its controller. Row indices are
+/// visible rows; `tableColumn` is the on-screen column index (0 = gutter
+/// unless the user dragged it, so the handler resolves it by identifier).
+@MainActor
+protocol EditableTableViewHandler: AnyObject {
+    func gridCopy() -> Bool
+    func gridPaste() -> Bool
+    func gridSelectAll()
+    func gridUndo() -> Bool
+    func gridRedo() -> Bool
+    var gridCanUndo: Bool { get }
+    var gridCanRedo: Bool { get }
+    var gridCanPaste: Bool { get }
+    var gridHasSelection: Bool { get }
+    /// Delete / Backspace / ⌃⌘N: stage NULL in the selected cells.
+    func gridSetNull()
+    /// ⌘⌫: stage the selected rows for deletion.
+    func gridDeleteRows()
+    func gridMove(rowDelta: Int, colDelta: Int, extend: Bool, wrap: Bool)
+    /// ⌘-arrows: jump to the first / last row or column.
+    func gridJump(rowEdge: Int, colEdge: Int, extend: Bool)
+    /// Return / F2 (seed nil) or a typed character (seed = that text).
+    func gridBeginEditing(seed: String?)
+    func gridEscape()
+    /// Returns false to let NSTableView handle the click itself.
+    func gridMouseDown(row: Int, tableColumn: Int, modifiers: NSEvent.ModifierFlags, clickCount: Int) -> Bool
+    func gridDrag(toRow row: Int, tableColumn: Int)
+    func gridContextMenu(row: Int, tableColumn: Int) -> NSMenu?
+    func gridHoverPreview(row: Int, tableColumn: Int) -> String?
+}
 
-    /// Hover-preview state. We arm a delayed `perform` on mouse-moved over a
-    /// previewable cell and show an `NSPopover` with the full value; moving
-    /// off the cell (or out of the table) cancels/closes it.
+/// NSTableView subclass that turns row-based AppKit input into
+/// spreadsheet-style cell navigation, editing and clipboard handling, all
+/// forwarded to an `EditableTableViewHandler`.
+///
+/// Key equivalents (⌘C, ⌘V, ⌘A, ⌘Z, ⌘⇧Z, ⌃⌘N) are only claimed while this
+/// view is the first responder of the key window. Without that gate the
+/// grid would answer ⌘C typed into the WHERE field, the find bar or a
+/// cell-editor popover (a separate key window) by copying grid cells.
+final class EditableTableView: NSTableView {
+    weak var handler: EditableTableViewHandler?
+
     private var hoverPopover: NSPopover?
     private var hoverRow: Int = -1
     private var hoverCol: Int = -1
     private var hoverTracking: NSTrackingArea?
 
+    /// True when keyboard input is actually aimed at this grid.
+    var ownsKeyboardFocus: Bool {
+        guard let window else { return false }
+        return window.isKeyWindow && window.firstResponder === self
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        // A cell-editor popover is open — it (and its text field) owns
-        // ⌘C / ⌘Z / typing. The popover is semitransient so this table's
-        // window stays key; without standing down we'd grab ⌘C and copy
-        // the whole row instead of the editor's selection.
-        if CellEditorPopover.isPresenting {
-            return super.performKeyEquivalent(with: event)
-        }
-        let chars = event.charactersIgnoringModifiers ?? ""
-        let cmd = event.modifierFlags.contains(.command)
-        let shift = event.modifierFlags.contains(.shift)
-        if cmd, !shift, chars == "z" {
-            if let buffer = editBufferProvider?(), buffer.canUndo {
-                _ = buffer.undo()
-                reloadData()
-                return true
-            }
-        }
-        // ⌃⌘N → stage an explicit NULL for the focused cell.
-        if cmd, event.modifierFlags.contains(.control), chars == "n" {
-            onSetNull?()
+        guard ownsKeyboardFocus, let handler else { return super.performKeyEquivalent(with: event) }
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        switch (flags, chars) {
+        case ([.command], "c"):
+            if handler.gridCopy() { return true }
+        case ([.command], "v"):
+            if handler.gridPaste() { return true }
+        case ([.command], "a"):
+            handler.gridSelectAll()
             return true
-        }
-        // ⌘C → TSV of the current selection (rows × visible data columns).
-        if cmd, !shift, chars == "c" {
-            if let tsv = tsvCopyProvider?(), !tsv.isEmpty {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(tsv, forType: .string)
-                return true
-            }
+        case ([.command], "z"):
+            if handler.gridUndo() { return true }
+        case ([.command, .shift], "z"):
+            if handler.gridRedo() { return true }
+        case ([.command, .control], "n"):
+            handler.gridSetNull()
+            return true
+        default:
+            break
         }
         return super.performKeyEquivalent(with: event)
     }
 
-    override func mouseDown(with event: NSEvent) {
-        // ⌘-click → fire the FK-navigation hook on the cell under
-        // the cursor. Falls through to NSTableView's normal click
-        // handling otherwise.
-        if event.modifierFlags.contains(.command), event.clickCount == 1,
-           let handler = onCommandClick {
-            let point = convert(event.locationInWindow, from: nil)
-            let row = self.row(at: point)
-            let tableCol = self.column(at: point)
-            // tableCol 0 is the gutter; anything past it is a data
-            // column index N → dataCol N-1.
-            if row >= 0, tableCol > 0 {
-                handler(row, tableCol - 1)
-                return
-            }
+    // Menu-driven equivalents (Edit ▸ Copy / Paste / Select All / Undo /
+    // Redo) arrive here through the responder chain.
+    @objc func copy(_ sender: Any?) { _ = handler?.gridCopy() }
+    @objc func paste(_ sender: Any?) { _ = handler?.gridPaste() }
+    override func selectAll(_ sender: Any?) { handler?.gridSelectAll() }
+    @objc func undo(_ sender: Any?) { _ = handler?.gridUndo() }
+    @objc func redo(_ sender: Any?) { _ = handler?.gridRedo() }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        guard let handler else { return super.validateUserInterfaceItem(item) }
+        switch item.action {
+        case #selector(copy(_:)): return handler.gridHasSelection
+        case #selector(paste(_:)): return handler.gridCanPaste
+        case #selector(undo(_:)): return handler.gridCanUndo
+        case #selector(redo(_:)): return handler.gridCanRedo
+        case #selector(selectAll(_:)): return true
+        default: return super.validateUserInterfaceItem(item)
         }
-        super.mouseDown(with: event)
     }
 
     override func keyDown(with event: NSEvent) {
-        // ⌘⌫ — stage the selected row(s) for deletion (committed on Apply).
-        if event.modifierFlags.contains(.command), event.keyCode == 51 {
-            onDeleteSelectedRows?()
-            return
-        }
-        // Arrow keys move the cell-focus; Enter opens the popover.
+        guard let handler else { return super.keyDown(with: event) }
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let shift = flags.contains(.shift)
+        let cmd = flags.contains(.command)
         switch event.keyCode {
-        case 123: onArrowMove?(0, -1); return  // ←
-        case 124: onArrowMove?(0, 1);  return  // →
-        case 125: onArrowMove?(1, 0);  return  // ↓
-        case 126: onArrowMove?(-1, 0); return  // ↑
-        case 36, 76:  // Return / numpad Enter
-            onEnterKey?(); return
-        default: break
+        case 123: cmd ? handler.gridJump(rowEdge: 0, colEdge: -1, extend: shift)
+                      : handler.gridMove(rowDelta: 0, colDelta: -1, extend: shift, wrap: false); return
+        case 124: cmd ? handler.gridJump(rowEdge: 0, colEdge: 1, extend: shift)
+                      : handler.gridMove(rowDelta: 0, colDelta: 1, extend: shift, wrap: false); return
+        case 125: cmd ? handler.gridJump(rowEdge: 1, colEdge: 0, extend: shift)
+                      : handler.gridMove(rowDelta: 1, colDelta: 0, extend: shift, wrap: false); return
+        case 126: cmd ? handler.gridJump(rowEdge: -1, colEdge: 0, extend: shift)
+                      : handler.gridMove(rowDelta: -1, colDelta: 0, extend: shift, wrap: false); return
+        case 48:  // Tab / ⇧Tab
+            handler.gridMove(rowDelta: 0, colDelta: shift ? -1 : 1, extend: false, wrap: true); return
+        case 36, 76:  // Return / Enter: edit; ⇧Return moves up
+            if shift { handler.gridMove(rowDelta: -1, colDelta: 0, extend: false, wrap: false) }
+            else if flags.isEmpty { handler.gridBeginEditing(seed: nil) }
+            return
+        case 120:  // F2
+            handler.gridBeginEditing(seed: nil); return
+        case 51, 117:  // Backspace / Forward Delete
+            if cmd { handler.gridDeleteRows() } else if flags.isEmpty { handler.gridSetNull() }
+            return
+        case 53:
+            handler.gridEscape(); return
+        case 115:  // Home
+            handler.gridJump(rowEdge: cmd ? -1 : 0, colEdge: -1, extend: shift); return
+        case 119:  // End
+            handler.gridJump(rowEdge: cmd ? 1 : 0, colEdge: 1, extend: shift); return
+        default:
+            break
+        }
+        if flags.subtracting(.shift).isEmpty, let chars = event.characters, Self.isPrintable(chars) {
+            handler.gridBeginEditing(seed: chars)
+            return
         }
         super.keyDown(with: event)
     }
 
-    override var acceptsFirstResponder: Bool { true }
+    /// Text a keystroke would type — excludes control characters and the
+    /// private-use range AppKit maps function / arrow keys into.
+    static func isPrintable(_ s: String) -> Bool {
+        guard !s.isEmpty else { return false }
+        return s.unicodeScalars.allSatisfy { scalar in
+            !CharacterSet.controlCharacters.contains(scalar)
+                && !(0xF700...0xF8FF).contains(scalar.value)
+        }
+    }
+
+    // MARK: - Mouse
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: point)
+        let col = self.column(at: point)
+        guard let handler, row >= 0, col >= 0 else { return super.mouseDown(with: event) }
+        window?.makeFirstResponder(self)
+        cancelHoverPreview()
+        guard handler.gridMouseDown(row: row, tableColumn: col, modifiers: event.modifierFlags, clickCount: event.clickCount)
+        else { return super.mouseDown(with: event) }
+        if event.clickCount == 1, !event.modifierFlags.contains(.command) {
+            trackDrag()
+        }
+    }
+
+    /// Drag-select: extend the range until the button comes up, scrolling
+    /// when the pointer leaves the visible area.
+    private func trackDrag() {
+        guard let window else { return }
+        var lastRow = -1, lastCol = -1
+        while let e = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            if e.type == .leftMouseUp { break }
+            autoscroll(with: e)
+            let p = convert(e.locationInWindow, from: nil)
+            let r = max(0, min(numberOfRows - 1, row(at: p) >= 0 ? row(at: p) : (p.y < visibleRect.midY ? 0 : numberOfRows - 1)))
+            var c = column(at: p)
+            if c < 0 { c = p.x < visibleRect.midX ? 0 : numberOfColumns - 1 }
+            if r != lastRow || c != lastCol {
+                handler?.gridDrag(toRow: r, tableColumn: c)
+                lastRow = r; lastCol = c
+            }
+        }
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: point)
+        let col = self.column(at: point)
+        if row >= 0, col >= 0, let menu = handler?.gridContextMenu(row: row, tableColumn: col) {
+            return menu
+        }
+        return super.menu(for: event)
+    }
 
     // MARK: - Hover preview
 
@@ -132,16 +214,14 @@ final class EditableTableView: NSTableView {
         super.mouseMoved(with: event)
         let point = convert(event.locationInWindow, from: nil)
         let row = self.row(at: point)
-        let tableCol = self.column(at: point)
-        let dataCol = tableCol - 1
-        // Same cell as last move: leave the armed/visible popover alone.
-        if row == hoverRow, dataCol == hoverCol { return }
+        let col = self.column(at: point)
+        if row == hoverRow, col == hoverCol { return }
         cancelHoverPreview()
         hoverRow = row
-        hoverCol = dataCol
-        guard row >= 0, dataCol >= 0 else { return }
-        // Arm a delayed show so the popover only appears on a genuine hover,
-        // not while the pointer sweeps across the grid.
+        hoverCol = col
+        guard row >= 0, col >= 0 else { return }
+        // Delay so the popover only appears on a genuine hover, not while the
+        // pointer sweeps across the grid.
         perform(#selector(showHoverPreview), with: nil, afterDelay: 0.6)
     }
 
@@ -160,11 +240,11 @@ final class EditableTableView: NSTableView {
 
     @objc private func showHoverPreview() {
         let row = hoverRow
-        let dataCol = hoverCol
-        guard row >= 0, dataCol >= 0,
-              let text = hoverPreviewProvider?(row, dataCol), !text.isEmpty
+        let col = hoverCol
+        guard row >= 0, col >= 0, row < numberOfRows, col < numberOfColumns,
+              let text = handler?.gridHoverPreview(row: row, tableColumn: col), !text.isEmpty
         else { return }
-        let rect = frameOfCell(atColumn: dataCol + 1, row: row)
+        let rect = frameOfCell(atColumn: col, row: row)
         guard rect != .zero else { return }
         let popover = NSPopover()
         popover.behavior = .transient
@@ -172,18 +252,6 @@ final class EditableTableView: NSTableView {
         popover.contentViewController = HoverPreviewController(text: text)
         hoverPopover = popover
         popover.show(relativeTo: rect, of: self, preferredEdge: .maxY)
-    }
-
-    override func menu(for event: NSEvent) -> NSMenu? {
-        let point = convert(event.locationInWindow, from: nil)
-        let row = self.row(at: point)
-        let col = self.column(at: point)
-        if row >= 0, col >= 0 {
-            // Select the right-clicked row for visual anchoring.
-            selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            return contextMenuProvider?(row, col)
-        }
-        return super.menu(for: event)
     }
 }
 
@@ -209,7 +277,6 @@ final class HoverPreviewController: NSViewController {
         textView.string = text
         textView.textColor = .labelColor
 
-        // Measure the content so short previews don't open a giant box.
         let maxSize = NSSize(width: 520, height: 360)
         textView.textContainer?.containerSize = NSSize(width: maxSize.width - 8,
                                                        height: .greatestFiniteMagnitude)

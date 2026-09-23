@@ -92,9 +92,7 @@ final class TypedHeaderView: NSTableHeaderView {
     override func menu(for event: NSEvent) -> NSMenu? {
         let point = convert(event.locationInWindow, from: nil)
         let tableCol = column(at: point)
-        // Column 0 is the synthetic row-number gutter; data columns follow.
-        let dataCol = tableCol - 1
-        if dataCol >= 0, let menu = coordinator?.columnHeaderMenu(forDataCol: dataCol) {
+        if tableCol >= 0, let menu = coordinator?.columnHeaderMenu(forTableColumn: tableCol) {
             return menu
         }
         return super.menu(for: event)

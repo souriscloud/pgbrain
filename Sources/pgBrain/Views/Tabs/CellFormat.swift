@@ -98,37 +98,6 @@ enum CellFormat {
         return f
     }()
 
-    /// Postgres ships timestamps as "YYYY-MM-DD HH:MM:SS[.ffffff][+TZ]".
-    /// Try a few common shapes; fall back to the raw string if none parse.
-    private static let timestampParsers: [DateFormatter] = {
-        let formats = [
-            "yyyy-MM-dd HH:mm:ssZ",
-            "yyyy-MM-dd HH:mm:ss",
-            "yyyy-MM-dd HH:mm:ss.SSSSSS",
-            "yyyy-MM-dd HH:mm:ss.SSSSSSZ",
-            "yyyy-MM-dd HH:mm:ss.SSS",
-            "yyyy-MM-dd HH:mm:ss.SSSZ",
-        ]
-        return formats.map {
-            let f = DateFormatter()
-            f.locale = Locale(identifier: "en_US_POSIX")
-            f.dateFormat = $0
-            return f
-        }
-    }()
-
-    private static let timestampDisplay: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        return f
-    }()
-
-    private static let dateDisplay: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
-
     private static func integer(_ raw: String, kind: ColumnTypeKind) -> Rendered {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         let formatted: String
@@ -187,15 +156,12 @@ enum CellFormat {
         )
     }
 
+    /// Dates and timestamps show the server's own text: re-parsing into a
+    /// `Date` would drop microseconds and shift zoned values into the Mac's
+    /// zone, so the grid would disagree with what an edit sends back.
     private static func dateOnly(_ raw: String) -> Rendered {
-        let str: String
-        if let d = parseDate(raw) {
-            str = dateDisplay.string(from: d)
-        } else {
-            str = raw
-        }
-        return Rendered(
-            attributed: plain(str, color: .labelColor, font: mono),
+        Rendered(
+            attributed: plain(raw, color: .labelColor, font: mono),
             alignment: .left,
             font: mono,
             rawForEditor: raw
@@ -203,26 +169,12 @@ enum CellFormat {
     }
 
     private static func timestamp(_ raw: String) -> Rendered {
-        let str: String
-        if let d = parseDate(raw) {
-            str = timestampDisplay.string(from: d)
-        } else {
-            str = raw
-        }
-        return Rendered(
-            attributed: plain(str, color: .labelColor, font: mono),
+        Rendered(
+            attributed: plain(raw, color: .labelColor, font: mono),
             alignment: .left,
             font: mono,
             rawForEditor: raw
         )
-    }
-
-    private static func parseDate(_ raw: String) -> Date? {
-        let trimmed = raw.trimmingCharacters(in: .whitespaces)
-        for f in timestampParsers {
-            if let d = f.date(from: trimmed) { return d }
-        }
-        return nil
     }
 
     private static func json(_ raw: String) -> Rendered {
@@ -285,6 +237,43 @@ enum CellFormat {
             font: body,
             rawForEditor: raw
         )
+    }
+
+    // MARK: - Staged non-literal values
+
+    /// A dim italic stand-in — "DEFAULT" on a draft row's untouched cell.
+    static func renderPlaceholder(_ text: String, column: ColumnNode) -> Rendered {
+        let kind = ColumnTypeKind.from(typeName: column.typeName)
+        return withParagraphStyle(Rendered(
+            attributed: NSAttributedString(string: text, attributes: [
+                .font: italicFont(),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+            ]),
+            alignment: alignment(for: kind),
+            font: italicFont(),
+            rawForEditor: ""
+        ))
+    }
+
+    /// A staged SQL expression or DEFAULT, tinted so it can't be mistaken
+    /// for a literal value.
+    static func renderExpression(_ text: String, column: ColumnNode) -> Rendered {
+        let kind = ColumnTypeKind.from(typeName: column.typeName)
+        let tint = NSColor(red: 0.42, green: 0.32, blue: 0.86, alpha: 1)
+        let attr = NSMutableAttributedString(string: "ƒ ", attributes: [
+            .font: italicFont(),
+            .foregroundColor: tint.withAlphaComponent(0.7),
+        ])
+        attr.append(NSAttributedString(string: text, attributes: [
+            .font: monoText,
+            .foregroundColor: tint,
+        ]))
+        return withParagraphStyle(Rendered(
+            attributed: attr,
+            alignment: alignment(for: kind),
+            font: monoText,
+            rawForEditor: text
+        ))
     }
 
     // MARK: - Helpers

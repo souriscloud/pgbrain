@@ -94,7 +94,7 @@ enum InputKind: Equatable, Sendable {
 
         // Strip a trailing type modifier "(...)" for keyword matching, but
         // keep the original around for enum lookup (enums never carry one).
-        let base = lower.contains("(") ? String(lower[..<lower.firstIndex(of: "(")!]) : lower
+        let base = lower.firstIndex(of: "(").map { String(lower[..<$0]) } ?? lower
         let baseTrimmed = base.trimmingCharacters(in: .whitespaces)
 
         switch baseTrimmed {

@@ -1,203 +1,222 @@
 import AppKit
 
 extension DataGridView.Coordinator {
-    /// Builds the right-click context menu for the cell under the
-    /// pointer. `visibleRow` is the index in the (possibly filtered)
-    /// view; `dataCol` is the index in `page.columns`. We translate
-    /// `visibleRow` to its source-row immediately so subsequent
-    /// actions target the underlying data row.
-    func contextMenu(forVisibleRow visibleRow: Int, dataCol: Int) -> NSMenu? {
-        guard visibleRow >= 0, dataCol >= 0, dataCol < page.columns.count, visibleRow < page.rows.count else { return nil }
-        let sourceRow = sourceIndex(forVisibleRow: visibleRow)
+    private struct CellLocator {
+        let sourceRow: Int
+        let visibleRow: Int
+        let dataCol: Int
+    }
+
+    private func item(_ title: String, _ action: Selector, _ represented: Any? = nil, key: String = "", modifiers: NSEvent.ModifierFlags = [.command]) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        if !key.isEmpty { item.keyEquivalentModifierMask = modifiers }
+        item.target = self
+        item.representedObject = represented
+        return item
+    }
+
+    // MARK: - Cell menu
+
+    /// Right-click menu for a cell. A click outside the current selection
+    /// first moves the selection there, like Finder / Numbers.
+    func gridContextMenu(row: Int, tableColumn: Int) -> NSMenu? {
+        if isGutter(tableColumn: tableColumn) {
+            if !selection.rows.contains(row) {
+                changeSelection(scroll: false) { $0.selectRows(from: row, to: row, cols: colCount) }
+            }
+            return rowMenu(clickedRow: row)
+        }
+        guard let d = displayCol(forTableColumn: tableColumn), let dataCol = dataCol(forDisplayCol: d),
+              row >= 0, row < rowCount, dataCol < page.columns.count
+        else { return nil }
+        let cell = GridSelection.Cell(row: row, col: d)
+        if !selection.contains(cell) {
+            changeSelection(scroll: false) { $0.select(cell) }
+        }
+        let source = sourceIndex(forVisibleRow: row)
         let column = page.columns[dataCol]
-        let original = page.rows[visibleRow][dataCol]
-        let displayed: String? = editBuffer?.value(row: sourceRow, column: dataCol).flatMap { $0 } ?? original
+        let displayed = effectiveValue(visibleRow: row, dataCol: dataCol)
+        let loc = CellLocator(sourceRow: source, visibleRow: row, dataCol: dataCol)
 
         let menu = NSMenu()
-        let copy = NSMenuItem(title: "Copy value", action: #selector(handleCopy(_:)), keyEquivalent: "")
-        copy.target = self
-        copy.representedObject = displayed ?? ""
-        menu.addItem(copy)
+        menu.addItem(item("Copy", #selector(handleCopySelection(_:)), key: "c"))
+        menu.addItem(item("Copy value", #selector(handleCopyString(_:)), displayed ?? ""))
+        menu.addItem(item("Copy column name", #selector(handleCopyString(_:)), column.name))
+        menu.addItem(copyRowsSubmenu(clickedRow: row))
+        if editBuffer != nil {
+            menu.addItem(item("Paste", #selector(handlePaste(_:)), key: "v"))
+        }
 
-        let copyName = NSMenuItem(title: "Copy column name", action: #selector(handleCopy(_:)), keyEquivalent: "")
-        copyName.target = self
-        copyName.representedObject = column.name
-        menu.addItem(copyName)
-
-        if onShowColumnDistinct != nil {
+        if foreignKeyColumns.contains(column.name), onNavigateForeignKey != nil {
             menu.addItem(.separator())
-            let item = NSMenuItem(
-                title: "Distinct values for \(column.name)…",
-                action: #selector(handleDistinctValues(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = column.name
-            menu.addItem(item)
+            menu.addItem(item("Go to referenced row  (⌘-click)", #selector(handleNavigateFK(_:)), loc))
         }
 
-        if makeProfilerController != nil {
-            if onShowColumnDistinct == nil { menu.addItem(.separator()) }
-            let item = NSMenuItem(
-                title: "Profile column \(column.name)…",
-                action: #selector(handleProfileColumn(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = column.name
-            menu.addItem(item)
-        }
+        addColumnInsightItems(to: menu, column: column)
 
-        // Filter-to-value bloc. Available regardless of edit
-        // buffer — these write to the WHERE strip, no PK needed.
         if onFilterEqualsCell != nil || onFilterColumn != nil {
             menu.addItem(.separator())
             if onFilterEqualsCell != nil {
-                let label: String = {
-                    guard let displayed else {
-                        return "Filter to NULL on \(column.name)"
-                    }
-                    let preview = displayed.count > 24
-                        ? String(displayed.prefix(22)) + "…"
-                        : displayed
-                    return "Filter to \"\(preview)\""
-                }()
-                let item = NSMenuItem(title: label, action: #selector(handleFilterToCell(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = CellLocator(row: sourceRow, col: dataCol)
-                menu.addItem(item)
+                let label: String
+                if let displayed {
+                    let preview = displayed.count > 24 ? String(displayed.prefix(22)) + "…" : displayed
+                    label = "Filter to \"\(preview)\""
+                } else {
+                    label = "Filter to NULL on \(column.name)"
+                }
+                menu.addItem(item(label, #selector(handleFilterToCell(_:)), loc))
             }
-            if onFilterColumn != nil {
-                let nullItem = NSMenuItem(title: "Filter: \(column.name) IS NULL", action: #selector(handleFilterIsNull(_:)), keyEquivalent: "")
-                nullItem.target = self
-                nullItem.representedObject = dataCol
-                menu.addItem(nullItem)
-                let notNullItem = NSMenuItem(title: "Filter: \(column.name) IS NOT NULL", action: #selector(handleFilterIsNotNull(_:)), keyEquivalent: "")
-                notNullItem.target = self
-                notNullItem.representedObject = dataCol
-                menu.addItem(notNullItem)
-            }
+            addNullFilterItems(to: menu, column: column, dataCol: dataCol)
         }
 
-        // Selection-export bloc. Only meaningful when at least one
-        // row is selected (or focused) — the receivers gate the
-        // pasteboard write themselves but no point cluttering
-        // the menu otherwise.
-        if onCopyAsMarkdown != nil || onCopyAsSlack != nil {
-            menu.addItem(.separator())
-            if onCopyAsMarkdown != nil {
-                let item = NSMenuItem(title: "Copy selection as Markdown table", action: #selector(handleCopyMarkdown(_:)), keyEquivalent: "")
-                item.target = self
-                menu.addItem(item)
-            }
-            if onCopyAsSlack != nil {
-                let item = NSMenuItem(title: "Copy selection as Slack code block", action: #selector(handleCopySlack(_:)), keyEquivalent: "")
-                item.target = self
-                menu.addItem(item)
-            }
-        }
-
-        // Row-level actions live on the same menu when the grid has
-        // a primary key + edit buffer (i.e. this is a real table).
         if editBuffer != nil {
             menu.addItem(.separator())
-            let asInsert = NSMenuItem(title: "Copy row as INSERT", action: #selector(handleRowInsert(_:)), keyEquivalent: "")
-            asInsert.target = self
-            asInsert.representedObject = sourceRow
-            menu.addItem(asInsert)
-            let asDelete = NSMenuItem(title: "Copy row as DELETE", action: #selector(handleRowDelete(_:)), keyEquivalent: "")
-            asDelete.target = self
-            asDelete.representedObject = sourceRow
-            menu.addItem(asDelete)
-            let dup = NSMenuItem(title: "Duplicate row (INSERT to clipboard)", action: #selector(handleRowDuplicate(_:)), keyEquivalent: "")
-            dup.target = self
-            dup.representedObject = sourceRow
-            menu.addItem(dup)
-            menu.addItem(.separator())
-            let edit = NSMenuItem(title: "Edit cell…", action: #selector(handleEditMenu(_:)), keyEquivalent: "")
-            edit.target = self
-            edit.representedObject = CellLocator(row: sourceRow, col: dataCol)
-            menu.addItem(edit)
+            menu.addItem(item("Edit cell…", #selector(handleEditCell(_:)), loc, key: "\r", modifiers: []))
             if column.nullable {
-                let setNull = NSMenuItem(title: "Set NULL", action: #selector(handleSetNull(_:)), keyEquivalent: "n")
-                setNull.keyEquivalentModifierMask = [.control, .command]
-                setNull.target = self
-                setNull.representedObject = CellLocator(row: sourceRow, col: dataCol)
-                menu.addItem(setNull)
+                menu.addItem(item("Set NULL", #selector(handleSetNull(_:)), key: "n", modifiers: [.control, .command]))
+            }
+            menu.addItem(item("Set DEFAULT", #selector(handleSetDefault(_:)), loc))
+        }
+        rowActionItems(clickedRow: row).forEach(menu.addItem)
+        return menu
+    }
+
+    private func copyRowsSubmenu(clickedRow: Int) -> NSMenuItem {
+        let rows = targetRows(including: clickedRow)
+        let parent = NSMenuItem(title: rows.count == 1 ? "Copy row as" : "Copy \(rows.count) rows as", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        for format in RowCopy.Format.allCases where !format.needsTable || copyTarget != nil {
+            if format == .insert { sub.addItem(.separator()) }
+            sub.addItem(item(format.label, #selector(handleCopyRowsAs(_:)), CopyRequest(format: format, rows: rows)))
+        }
+        parent.submenu = sub
+        return parent
+    }
+
+    private struct CopyRequest {
+        let format: RowCopy.Format
+        let rows: [Int]
+    }
+
+    /// Gutter menu: copy formats plus the row actions.
+    private func rowMenu(clickedRow row: Int) -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(item("Copy", #selector(handleCopySelection(_:)), key: "c"))
+        menu.addItem(copyRowsSubmenu(clickedRow: row))
+        rowActionItems(clickedRow: row).forEach(menu.addItem)
+        return menu
+    }
+
+    /// Add / duplicate / delete rows — editable grids only.
+    private func rowActionItems(clickedRow row: Int) -> [NSMenuItem] {
+        guard editBuffer != nil else { return [] }
+        let sources = targetRows(including: row).map(sourceIndex(forVisibleRow:))
+        var items: [NSMenuItem] = [.separator()]
+        if onAddRow != nil {
+            items.append(item("Add row", #selector(handleAddRow(_:))))
+        }
+        if onDuplicateRows != nil {
+            let existing = sources.filter { !insertRowIndices.contains($0) }
+            if !existing.isEmpty {
+                items.append(item(existing.count == 1 ? "Duplicate row" : "Duplicate \(existing.count) rows",
+                                  #selector(handleDuplicateRows(_:)), existing))
             }
         }
-
-        // Destructive: delete the right-clicked row, or the whole
-        // selection if the clicked row is part of a multi-row selection.
         if onDeleteRows != nil {
-            let selected = tableView?.selectedRowIndexes ?? []
-            let targetsVisible: [Int] = selected.contains(visibleRow) ? Array(selected) : [visibleRow]
-            let sourceRows = targetsVisible.map { sourceIndex(forVisibleRow: $0) }
+            let staged = !sources.isEmpty && sources.allSatisfy { deleteRowIndices.contains($0) }
+            let n = sources.count
+            let title = staged
+                ? (n == 1 ? "Keep row (don't delete)" : "Keep \(n) rows (don't delete)")
+                : (n == 1 ? "Delete row" : "Delete \(n) rows")
+            items.append(item(title, #selector(handleDeleteRows(_:)), sources, key: "\u{8}"))
+        }
+        return items.count > 1 ? items : []
+    }
+
+    private func addColumnInsightItems(to menu: NSMenu, column: ColumnNode) {
+        guard onShowColumnDistinct != nil || makeProfilerController != nil else { return }
+        menu.addItem(.separator())
+        if onShowColumnDistinct != nil {
+            menu.addItem(item("Distinct values for \(column.name)…", #selector(handleDistinctValues(_:)), column.name))
+        }
+        if makeProfilerController != nil {
+            menu.addItem(item("Profile column \(column.name)…", #selector(handleProfileColumn(_:)), column.name))
+        }
+    }
+
+    private func addNullFilterItems(to menu: NSMenu, column: ColumnNode, dataCol: Int) {
+        guard onFilterColumn != nil else { return }
+        menu.addItem(item("Filter: \(column.name) IS NULL", #selector(handleFilterIsNull(_:)), dataCol))
+        menu.addItem(item("Filter: \(column.name) IS NOT NULL", #selector(handleFilterIsNotNull(_:)), dataCol))
+    }
+
+    // MARK: - Header menu
+
+    /// Column-level menu for a header right-click — the column-relevant
+    /// subset of the cell menu.
+    func columnHeaderMenu(forTableColumn tableColumn: Int) -> NSMenu? {
+        guard let dataCol = dataCol(forTableColumn: tableColumn), dataCol < page.columns.count else { return nil }
+        let column = page.columns[dataCol]
+        let menu = NSMenu()
+        menu.addItem(item("Copy column name", #selector(handleCopyString(_:)), column.name))
+        if let d = dataToDisplayIndex(dataCol) {
+            menu.addItem(item("Select column", #selector(handleSelectColumn(_:)), d))
+        }
+        addColumnInsightItems(to: menu, column: column)
+        if onFilterColumn != nil {
             menu.addItem(.separator())
-            // Staged rows can be un-staged from the same menu; the actual
-            // DELETE happens on Apply, not here, so no "…" confirmation.
-            let allStaged = !sourceRows.isEmpty && sourceRows.allSatisfy { deleteRowIndices.contains($0) }
-            let n = sourceRows.count
-            let title: String
-            if allStaged {
-                title = n == 1 ? "Keep row (don't delete)" : "Keep \(n) rows (don't delete)"
-            } else {
-                title = n == 1 ? "Delete row" : "Delete \(n) rows"
-            }
-            let del = NSMenuItem(title: title, action: #selector(handleDeleteRows(_:)), keyEquivalent: "")
-            del.target = self
-            del.representedObject = sourceRows
-            menu.addItem(del)
+            addNullFilterItems(to: menu, column: column, dataCol: dataCol)
         }
         return menu
     }
 
-    private struct CellLocator {
-        let row: Int
-        let col: Int
+    private func dataToDisplayIndex(_ dataCol: Int) -> Int? {
+        displayToData.firstIndex(of: dataCol)
     }
 
-    @objc private func handleCopy(_ sender: NSMenuItem) {
+    // MARK: - Actions
+
+    @objc private func handleCopySelection(_ sender: NSMenuItem) { _ = gridCopy() }
+    @objc private func handlePaste(_ sender: NSMenuItem) { _ = gridPaste() }
+
+    @objc private func handleCopyString(_ sender: NSMenuItem) {
         guard let value = sender.representedObject as? String else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
     }
 
-    @objc private func handleEditMenu(_ sender: NSMenuItem) {
-        guard let loc = sender.representedObject as? CellLocator,
-              let buffer = editBuffer, let table = tableView else { return }
-        presentEditor(row: loc.row, col: loc.col, in: table, buffer: buffer)
+    @objc private func handleCopyRowsAs(_ sender: NSMenuItem) {
+        guard let req = sender.representedObject as? CopyRequest else { return }
+        let rows = RowCopy.Rows(
+            columns: page.columns,
+            effective: req.rows.map { v in page.columns.indices.map { effectiveValue(visibleRow: v, dataCol: $0) } },
+            original: req.rows.map { v in page.rows.indices.contains(v) ? page.rows[v] : [] },
+            locators: page.rowLocators.map { locs in req.rows.map { $0 < locs.count ? locs[$0] : nil } }
+        )
+        let n = RowCopy.copy(req.format, rows: rows, target: copyTarget)
+        if n > 0 { onMessage?("Copied \(n) row\(n == 1 ? "" : "s") as \(req.format.label)", false) }
     }
 
-    @objc private func handleSetNull(_ sender: NSMenuItem) {
-        guard let loc = sender.representedObject as? CellLocator,
-              let _ = editBuffer else { return }
-        // `loc.row` is already a source-row index — see contextMenu.
-        // Walk the visible rows to find the original cell value.
-        let visibleRow = sourceRowIndices.firstIndex(of: loc.row) ?? loc.row
-        let original = page.rows[visibleRow][loc.col]
-        commit(row: loc.row, col: loc.col, original: original, typed: .null)
-        tableView?.reloadData()
+    @objc private func handleEditCell(_ sender: NSMenuItem) {
+        guard let loc = sender.representedObject as? CellLocator else { return }
+        presentEditor(visibleRow: loc.visibleRow, dataCol: loc.dataCol, seed: nil, fromKeyboard: false)
     }
 
-    @objc private func handleRowInsert(_ sender: NSMenuItem) {
-        guard let r = sender.representedObject as? Int else { return }
-        onCopyRowAsInsert?(r)
+    @objc private func handleSetNull(_ sender: NSMenuItem) { gridSetNull() }
+
+    @objc private func handleSetDefault(_ sender: NSMenuItem) {
+        guard let loc = sender.representedObject as? CellLocator else { return }
+        commit(sourceRow: loc.sourceRow, dataCol: loc.dataCol, typed: .defaultKeyword)
     }
 
-    @objc private func handleRowDelete(_ sender: NSMenuItem) {
-        guard let r = sender.representedObject as? Int else { return }
-        onCopyRowAsDelete?(r)
-    }
-
-    @objc private func handleRowDuplicate(_ sender: NSMenuItem) {
-        guard let r = sender.representedObject as? Int else { return }
-        onDuplicateRow?(r)
+    @objc private func handleNavigateFK(_ sender: NSMenuItem) {
+        guard let loc = sender.representedObject as? CellLocator else { return }
+        onNavigateForeignKey?(loc.sourceRow, loc.dataCol)
     }
 
     @objc private func handleFilterToCell(_ sender: NSMenuItem) {
         guard let loc = sender.representedObject as? CellLocator else { return }
-        onFilterEqualsCell?(loc.row, loc.col)
+        onFilterEqualsCell?(loc.sourceRow, loc.dataCol)
     }
 
     @objc private func handleFilterIsNull(_ sender: NSMenuItem) {
@@ -210,9 +229,6 @@ extension DataGridView.Coordinator {
         onFilterColumn?(col, .isNotNull)
     }
 
-    @objc private func handleCopyMarkdown(_ sender: NSMenuItem) { onCopyAsMarkdown?() }
-    @objc private func handleCopySlack(_ sender: NSMenuItem) { onCopyAsSlack?() }
-
     @objc private func handleDistinctValues(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         onShowColumnDistinct?(name)
@@ -223,22 +239,36 @@ extension DataGridView.Coordinator {
         showProfiler(columnName: name)
     }
 
-    /// Presents the column profiler as an `NSPopover` anchored to the
-    /// column's header cell, so it points at the column regardless of
-    /// where the right-click happened (header or any cell in it).
+    @objc private func handleSelectColumn(_ sender: NSMenuItem) {
+        guard let d = sender.representedObject as? Int, rowCount > 0 else { return }
+        changeSelection(scroll: false) { sel in
+            sel.select(GridSelection.Cell(row: 0, col: d))
+            sel.extend(to: GridSelection.Cell(row: rowCount - 1, col: d))
+        }
+    }
+
+    @objc private func handleAddRow(_ sender: NSMenuItem) { onAddRow?() }
+
+    @objc private func handleDuplicateRows(_ sender: NSMenuItem) {
+        guard let rows = sender.representedObject as? [Int] else { return }
+        onDuplicateRows?(rows)
+    }
+
+    @objc private func handleDeleteRows(_ sender: NSMenuItem) {
+        guard let rows = sender.representedObject as? [Int] else { return }
+        onDeleteRows?(rows)
+    }
+
+    /// Presents the column profiler anchored to the column's header, so it
+    /// points at the column wherever the right-click happened.
     func showProfiler(columnName: String) {
         guard let table = tableView,
               let header = table.headerView,
               let factory = makeProfilerController,
               let vc = factory(columnName),
-              let dataCol = page.columns.firstIndex(where: { $0.name == columnName })
+              let dataCol = page.columns.firstIndex(where: { $0.name == columnName }),
+              let tableColIndex = tableColumnIndex(forDataCol: dataCol)
         else { return }
-        // Resolve the *visual* table-column index by identifier so the
-        // anchor is correct even after the user reorders columns.
-        let identifier = "\(dataCol)_\(columnName)"
-        guard let tableColIndex = table.tableColumns.firstIndex(where: {
-            $0.identifier.rawValue == identifier
-        }) else { return }
         let rect = header.headerRect(ofColumn: tableColIndex)
         let pop = NSPopover()
         pop.behavior = .transient
@@ -246,62 +276,5 @@ extension DataGridView.Coordinator {
         pop.contentViewController = vc
         profilerPopover = pop
         pop.show(relativeTo: rect, of: header, preferredEdge: .maxY)
-    }
-
-    /// Column-level menu for a header right-click — the column-relevant
-    /// subset of the cell menu (no cell-value items). `dataCol` indexes
-    /// `page.columns`.
-    func columnHeaderMenu(forDataCol dataCol: Int) -> NSMenu? {
-        guard dataCol >= 0, dataCol < page.columns.count else { return nil }
-        let column = page.columns[dataCol]
-        let menu = NSMenu()
-
-        let copyName = NSMenuItem(title: "Copy column name", action: #selector(handleCopy(_:)), keyEquivalent: "")
-        copyName.target = self
-        copyName.representedObject = column.name
-        menu.addItem(copyName)
-
-        if onShowColumnDistinct != nil {
-            menu.addItem(.separator())
-            let item = NSMenuItem(
-                title: "Distinct values for \(column.name)…",
-                action: #selector(handleDistinctValues(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = column.name
-            menu.addItem(item)
-        }
-
-        if makeProfilerController != nil {
-            if onShowColumnDistinct == nil { menu.addItem(.separator()) }
-            let item = NSMenuItem(
-                title: "Profile column \(column.name)…",
-                action: #selector(handleProfileColumn(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = column.name
-            menu.addItem(item)
-        }
-
-        if onFilterColumn != nil {
-            menu.addItem(.separator())
-            let nullItem = NSMenuItem(title: "Filter: \(column.name) IS NULL", action: #selector(handleFilterIsNull(_:)), keyEquivalent: "")
-            nullItem.target = self
-            nullItem.representedObject = dataCol
-            menu.addItem(nullItem)
-            let notNullItem = NSMenuItem(title: "Filter: \(column.name) IS NOT NULL", action: #selector(handleFilterIsNotNull(_:)), keyEquivalent: "")
-            notNullItem.target = self
-            notNullItem.representedObject = dataCol
-            menu.addItem(notNullItem)
-        }
-
-        return menu
-    }
-
-    @objc private func handleDeleteRows(_ sender: NSMenuItem) {
-        guard let rows = sender.representedObject as? [Int] else { return }
-        onDeleteRows?(rows)
     }
 }

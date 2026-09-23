@@ -20,6 +20,9 @@ struct SpatialMapView: View {
     /// search_path to apply before the fetch — needed when a scratchpad scopes
     /// itself to a specific schema and `fromSQL` uses unqualified table names.
     var searchPath: String? = nil
+    /// The table tab's active WHERE body, so the map plots the same rows the
+    /// grid shows. Empty = no filter.
+    var whereClause: String = ""
 
     @State private var features: [SpatialFeature] = []
     @State private var camera: MapCameraPosition = .automatic
@@ -53,7 +56,7 @@ struct SpatialMapView: View {
                 footer
             }
         }
-        .task(id: geometryColumn) { await load() }
+        .task(id: "\(geometryColumn)\u{1F}\(whereClause)") { await load() }
     }
 
     @MapContentBuilder
@@ -98,10 +101,12 @@ struct SpatialMapView: View {
         guard let client = service.client else { error = "Not connected."; loading = false; return }
         let geomQ = SQLIdent.quote(geometryColumn)
         let labelExpr = labelColumn.map { "\(SQLIdent.quote($0))::text" } ?? "NULL::text"
+        let isolated = RowsFetcher.isolatedWhere(whereClause)
+        let filterSQL = isolated.isEmpty ? "" : "\n  AND \(isolated)"
         let sql = """
         SELECT \(labelExpr) AS label, ST_AsGeoJSON(\(geomQ)) AS gj
         FROM \(fromSQL)
-        WHERE \(geomQ) IS NOT NULL
+        WHERE \(geomQ) IS NOT NULL\(filterSQL)
         LIMIT \(Self.fetchLimit + 1)
         """
         do {

@@ -102,7 +102,9 @@ struct JSONSyntaxEditor: NSViewRepresentable {
         textView.isAutomaticTextReplacementEnabled = false
         textView.string = text
         textView.textStorage?.delegate = JSONHighlighter.shared
-        JSONHighlighter.shared.highlight(textView.textStorage!, font: textView.font!)
+        if let storage = textView.textStorage, let font = textView.font {
+            JSONHighlighter.shared.highlight(storage, font: font)
+        }
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
         context.coordinator.textView = textView
@@ -114,7 +116,9 @@ struct JSONSyntaxEditor: NSViewRepresentable {
         if textView.string != text {
             let selected = textView.selectedRange()
             textView.string = text
-            JSONHighlighter.shared.highlight(textView.textStorage!, font: textView.font!)
+            if let storage = textView.textStorage, let font = textView.font {
+                JSONHighlighter.shared.highlight(storage, font: font)
+            }
             textView.setSelectedRange(NSRange(location: min(selected.location, (text as NSString).length), length: 0))
         }
     }

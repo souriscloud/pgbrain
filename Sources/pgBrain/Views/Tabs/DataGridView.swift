@@ -1,107 +1,77 @@
 import AppKit
 import SwiftUI
 
-/// `NSTableView` driven by a `RowsFetcher.Page`. Type-aware cells with
-/// alignment per column kind, monospaced for numeric/uuid/json/bytes,
-/// distinct NULL rendering ("NULL" italic + dimmed) and single-line JSON.
-///
-/// Editing (iter-5): when `editBuffer` is non-nil and the table has a primary
-/// key, columns become editable. Double-clicking a cell opens an inline
-/// `NSTextField`; commit on Enter/Tab/focus-loss, Esc reverts. Dirty cells
-/// get a tinted background and a yellow corner triangle.
-/// Quick-filter modes wired into the grid's cell context menu.
-/// Receivers compose the corresponding `col IS NULL` / `col IS NOT
-/// NULL` fragment and AND it onto the existing WHERE clause.
+/// Quick-filter modes wired into the grid's context menus. Receivers compose
+/// the corresponding `col IS NULL` / `col IS NOT NULL` fragment.
 enum ColumnFilterMode {
     case isNull, isNotNull
 }
 
+/// `NSTableView` driven by a `RowsFetcher.Page`: type-aware cells, a row
+/// gutter, spreadsheet-style cell/range selection, keyboard editing and
+/// TSV copy / paste.
+///
+/// Pass an `EditBuffer` to make it editable (a table tab); leave it nil for
+/// read-only result grids (scratchpad).
+///
+/// Row coordinates: *visible* rows index `page.rows` (which may be the
+/// find-filtered subset); `sourceRowIndices` maps them back to the loaded
+/// page, which is what the edit buffer, insert/delete sets and callbacks use.
 struct DataGridView: NSViewRepresentable {
     let page: RowsFetcher.Page
-    /// Pass nil to render the grid read-only (e.g. for SQL scratchpad
-    /// result blocks). Pass an `EditBuffer` to enable cell editing.
     var editBuffer: EditBuffer? = nil
-    /// Enum type → labels catalog (from the connection's schema snapshot),
-    /// so the cell editor can offer enum-column dropdowns.
+    /// `editBuffer.version`, read by the parent so SwiftUI re-renders the
+    /// grid on any buffer change (undo from the Edit menu, form edits…).
+    var editVersion: Int = 0
     var enums: [String: [String]] = [:]
-    /// Schema snapshot, so the cell editor's expression mode can offer
-    /// schema-aware completion (this table's columns + functions).
     var schema: SchemaSnapshot = .empty
-    /// `(row, column)` cells that were just successfully applied. Cell
-    /// rendering paints them with a fading green tint for a few seconds
-    /// so the user can see exactly what landed.
     var appliedHighlights: Set<EditBuffer.CellKey> = []
-    /// Source-row indices that are draft INSERTs — drawn with a green wash
-    /// and a ✦ in the gutter so a not-yet-committed row reads as new.
     var insertRowIndices: Set<Int> = []
-    /// Source-row indices staged for DELETE — drawn with a red wash until
-    /// the next Apply commits (or Revert clears) them.
     var deleteRowIndices: Set<Int> = []
-    /// Maps each visible grid row index back to its index in the
-    /// unfiltered loaded page — so edits + applies still target the
-    /// correct underlying row when a filter is active. Identity map
-    /// `[0,1,2…]` when no filter is applied.
     var sourceRowIndices: [Int] = []
-    /// Returns the desired arrow indicator for a header column based on
-    /// the parent's active `ORDER BY` clause. Passed as a function
-    /// (rather than a precomputed dict) so the parent can derive it
-    /// however it wants — a parser, a regex, or a per-column lookup.
+    /// Identity of the loaded page: a change means a new fetch (reset
+    /// selection, scroll to top, drop cached cells). Nil for callers that
+    /// don't track one; the grid then compares row contents instead.
+    var pageGeneration: Int? = nil
+    /// In-place row changes (apply splice-back, draft rows) — reload, keep
+    /// the selection.
+    var contentRevision: Int = 0
+    var focusRequest: RowsLoader.FocusRequest? = nil
+    /// Where the grid parks scroll offset / cursor across tab switches.
+    var viewState: TableTabViewState? = nil
+    /// Columns whose ⌘-click follows a foreign key instead of adding the
+    /// cell to the selection.
+    var foreignKeyColumns: Set<String> = []
+    /// Enables the INSERT / UPDATE / DELETE "Copy rows as" formats.
+    var copyTarget: RowCopy.Target? = nil
     var sortDirectionFor: ((String) -> TypedHeaderCell.SortDirection)? = nil
-    /// Header click handler — receives the column name and the next
-    /// desired direction (cycle is owned by the coordinator).
     var onHeaderClick: ((String, TypedHeaderCell.SortDirection) -> Void)? = nil
-    /// Row-level actions surfaced via the right-click menu. Receivers
-    /// produce SQL into the user's clipboard.
-    var onCopyRowAsInsert: ((Int) -> Void)? = nil
-    var onCopyRowAsDelete: ((Int) -> Void)? = nil
-    var onDuplicateRow: ((Int) -> Void)? = nil
-    /// "Filter to this value" actions — write a `colname = value`
-    /// fragment into the parent's WHERE strip and reload.
     var onFilterEqualsCell: ((Int /*sourceRow*/, Int /*dataCol*/) -> Void)? = nil
     var onFilterColumn: ((Int /*dataCol*/, ColumnFilterMode) -> Void)? = nil
-    /// Selection-export actions. Receivers serialize the current row
-    /// selection in the chosen format and put it on the pasteboard.
-    var onCopyAsMarkdown: (() -> Void)? = nil
-    var onCopyAsSlack: (() -> Void)? = nil
-    /// ⌘-click navigation. Receiver checks whether the cell is on
-    /// an FK column and opens the parent table if so.
-    var onCommandClickCell: ((Int /*sourceRow*/, Int /*dataCol*/) -> Void)? = nil
-    /// "Show distinct values" cell-menu action. Receiver runs
-    /// `SELECT col, COUNT(*) GROUP BY 1 ORDER BY 2 DESC` and pops a
-    /// list. Nil hides the menu entry (scratchpad result grids etc.).
     var onShowColumnDistinct: ((String) -> Void)? = nil
-    /// Profile a column (counts, nulls, distinct, min/max/avg). Returns the
-    /// popover content controller for a given column name, which the grid
-    /// presents as an `NSPopover` anchored to that column's header (so it
-    /// points at the column instead of floating off the grid bounds). Nil
-    /// hides the menu entry on grids without a backing table (scratchpad
-    /// results).
+    /// Column profiler popover content for a column name, presented
+    /// anchored to that column's header. Nil hides the menu entry.
     var makeProfilerController: ((String) -> NSViewController?)? = nil
-    /// Delete the given source-row indices. Nil hides the menu entry
-    /// (read-only grids — scratchpad results, no edit buffer).
     var onDeleteRows: (([Int]) -> Void)? = nil
-    /// `(connectionID, schema, table)` for the column-layout store
-    /// keying. Nil disables persisted widths (e.g. for scratchpad
-    /// result grids that don't have a stable table identity).
+    var onDuplicateRows: (([Int]) -> Void)? = nil
+    var onAddRow: (() -> Void)? = nil
+    var onNavigateForeignKey: ((Int /*sourceRow*/, Int /*dataCol*/) -> Void)? = nil
+    /// Short user-facing feedback (paste clipped, NOT NULL refused…).
+    var onMessage: ((String, Bool /*isError*/) -> Void)? = nil
+    /// `(connectionID, schema, table)` keying persisted column widths.
     var columnLayoutKey: (UUID, String, String)? = nil
 
     /// Row height derived from the editor font size so the grid breathes as
-    /// it zooms. Kept in one place so makeNSView and the live-zoom handler agree.
+    /// it zooms.
     static func gridRowHeight() -> CGFloat { (CellFormat.baseSize).rounded() + 10 }
 
     func makeCoordinator() -> Coordinator {
-        let c = Coordinator(page: page, editBuffer: editBuffer)
-        c.enums = enums
-        c.schema = schema
-        return c
+        Coordinator(page: page, editBuffer: editBuffer)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
+        let coordinator = context.coordinator
         let table = EditableTableView()
-        // Modern look: skip the system "alternating row backgrounds"
-        // (loud against dark mode, looks like a Tiger-era table) and
-        // turn off NSTableView's built-in solid-blue selection bar in
-        // favour of the soft tint our HoverableRowView paints itself.
         table.usesAlternatingRowBackgroundColors = false
         table.gridStyleMask = [.solidHorizontalGridLineMask]
         table.gridColor = NSColor.separatorColor.withAlphaComponent(0.18)
@@ -109,82 +79,34 @@ struct DataGridView: NSViewRepresentable {
         table.allowsColumnResizing = true
         table.columnAutoresizingStyle = .noColumnAutoresizing
         table.allowsMultipleSelection = true
-        // Keep `selectionHighlightStyle` at its default (`.regular`):
-        // forcing `.none` here disabled NSTableView's hit-test path
-        // on macOS 15, which silently broke double-click editing.
-        // `HoverableRowView` still overrides `drawSelection(in:)` to
-        // paint a soft accent wash instead of the system blue bar, so
-        // the visuals stay modern even though the selection model is
-        // the standard one.
-        // Small horizontal gap so column boundaries read as boundaries
-        // instead of letting cells touch and look like one mash.
+        table.allowsEmptySelection = true
         table.intercellSpacing = NSSize(width: 8, height: 0)
         table.rowSizeStyle = .custom
         table.style = .plain
         table.backgroundColor = .clear
-        let header = TypedHeaderView()
-        header.coordinator = context.coordinator
-        table.headerView = header
-        table.editBufferProvider = { [weak coord = context.coordinator] in coord?.editBuffer }
-        table.contextMenuProvider = { [weak coord = context.coordinator] visibleRow, tableCol in
-            // tableCol is in *table-column space* (gutter = 0); we want
-            // a data-column index. Empty area / gutter column returns nil.
-            let dataCol = tableCol - 1
-            guard dataCol >= 0 else { return nil }
-            return coord?.contextMenu(forVisibleRow: visibleRow, dataCol: dataCol)
-        }
-        table.onArrowMove = { [weak coord = context.coordinator] rdelta, cdelta in
-            coord?.moveFocus(rowDelta: rdelta, colDelta: cdelta)
-        }
-        table.onEnterKey = { [weak coord = context.coordinator] in
-            coord?.openEditorForFocus()
-        }
-        table.tsvCopyProvider = { [weak coord = context.coordinator] in
-            coord?.copyAsTSV()
-        }
-        table.onCommandClick = { [weak coord = context.coordinator] visibleRow, dataCol in
-            guard let coord else { return }
-            let sourceRow = coord.sourceIndex(forVisibleRow: visibleRow)
-            coord.onCommandClickCell?(sourceRow, dataCol)
-        }
-        table.onDeleteSelectedRows = { [weak coord = context.coordinator, weak table] in
-            guard let coord, let table, let onDelete = coord.onDeleteRows else { return }
-            let selected = table.selectedRowIndexes
-            guard !selected.isEmpty else { return }
-            onDelete(selected.map { coord.sourceIndex(forVisibleRow: $0) })
-        }
-        table.onSetNull = { [weak coord = context.coordinator] in coord?.setNullForFocusedCell() }
-        table.hoverPreviewProvider = { [weak coord = context.coordinator] visibleRow, dataCol in
-            coord?.hoverPreview(forVisibleRow: visibleRow, dataCol: dataCol)
-        }
-
-        applyColumns(to: table, coordinator: context.coordinator)
-        table.dataSource = context.coordinator
-        table.delegate = context.coordinator
-        table.target = context.coordinator
-        table.doubleAction = #selector(Coordinator.handleDoubleClick(_:))
-        context.coordinator.rebuildIndex()
-        context.coordinator.tableView = table
-        propagateState(to: context.coordinator)
-        // Persist column-width drags. The notification only fires on
-        // user-driven resize (not programmatic), so the initial
-        // applyColumns pass we just ran doesn't bounce-write.
-        NotificationCenter.default.addObserver(
-            context.coordinator,
-            selector: #selector(Coordinator.columnDidResize(_:)),
-            name: NSTableView.columnDidResizeNotification,
-            object: table
-        )
-        // Live ⌘+ / ⌘− zoom: re-render + re-height the grid when the editor
-        // font size changes. Selector-based observers auto-deregister on the
-        // coordinator's dealloc.
-        NotificationCenter.default.addObserver(
-            context.coordinator,
-            selector: #selector(Coordinator.editorFontDidChange),
-            name: .pgbrainEditorFontChanged,
-            object: nil
-        )
         table.rowHeight = Self.gridRowHeight()
+        let header = TypedHeaderView()
+        header.coordinator = coordinator
+        table.headerView = header
+
+        push(into: coordinator)
+        coordinator.pageGeneration = pageGeneration
+        coordinator.contentRevision = contentRevision
+        coordinator.tableView = table
+        table.handler = coordinator
+        applyColumns(to: table, coordinator: coordinator)
+        table.dataSource = coordinator
+        table.delegate = coordinator
+
+        NotificationCenter.default.addObserver(
+            coordinator, selector: #selector(Coordinator.columnDidResize(_:)),
+            name: NSTableView.columnDidResizeNotification, object: table)
+        NotificationCenter.default.addObserver(
+            coordinator, selector: #selector(Coordinator.columnDidMove(_:)),
+            name: NSTableView.columnDidMoveNotification, object: table)
+        NotificationCenter.default.addObserver(
+            coordinator, selector: #selector(Coordinator.editorFontDidChange),
+            name: .pgbrainEditorFontChanged, object: nil)
 
         let scroll = NSScrollView()
         scroll.documentView = table
@@ -192,128 +114,105 @@ struct DataGridView: NSViewRepresentable {
         scroll.hasHorizontalScroller = true
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            coordinator, selector: #selector(Coordinator.clipViewDidScroll(_:)),
+            name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+
+        table.reloadData()
+        coordinator.restoreViewState(in: scroll)
+        // A request left over from before a tab switch was already honoured
+        // by the previous grid; a remount shouldn't jump there again.
+        coordinator.markSeen(focusRequest)
         return scroll
     }
 
-    private func propagateState(to coordinator: Coordinator) {
-        coordinator.sourceRowIndices = sourceRowIndices
-        coordinator.sortDirectionFor = sortDirectionFor
-        coordinator.onHeaderClick = onHeaderClick
-        coordinator.onCopyRowAsInsert = onCopyRowAsInsert
-        coordinator.onCopyRowAsDelete = onCopyRowAsDelete
-        coordinator.onDuplicateRow = onDuplicateRow
-        coordinator.onFilterEqualsCell = onFilterEqualsCell
-        coordinator.onFilterColumn = onFilterColumn
-        coordinator.onCopyAsMarkdown = onCopyAsMarkdown
-        coordinator.onCopyAsSlack = onCopyAsSlack
-        coordinator.onCommandClickCell = onCommandClickCell
-        coordinator.onShowColumnDistinct = onShowColumnDistinct
-        coordinator.makeProfilerController = makeProfilerController
-        coordinator.onDeleteRows = onDeleteRows
-        coordinator.columnLayoutKey = columnLayoutKey
+    /// Copy the representable's inputs onto the coordinator.
+    private func push(into c: Coordinator) {
+        c.page = page
+        c.editBuffer = editBuffer
+        c.editVersion = editVersion
+        c.enums = enums
+        c.schema = schema
+        c.appliedHighlights = appliedHighlights
+        c.insertRowIndices = insertRowIndices
+        c.deleteRowIndices = deleteRowIndices
+        c.sourceRowIndices = effectiveSourceIndices
+        c.viewState = viewState
+        c.foreignKeyColumns = foreignKeyColumns
+        c.copyTarget = copyTarget
+        c.sortDirectionFor = sortDirectionFor
+        c.onHeaderClick = onHeaderClick
+        c.onFilterEqualsCell = onFilterEqualsCell
+        c.onFilterColumn = onFilterColumn
+        c.onShowColumnDistinct = onShowColumnDistinct
+        c.makeProfilerController = makeProfilerController
+        c.onDeleteRows = onDeleteRows
+        c.onDuplicateRows = onDuplicateRows
+        c.onAddRow = onAddRow
+        c.onNavigateForeignKey = onNavigateForeignKey
+        c.onMessage = onMessage
+        c.columnLayoutKey = columnLayoutKey
+        c.rebuildSourceLookup()
+    }
+
+    private var effectiveSourceIndices: [Int] {
+        sourceRowIndices.count == page.rows.count ? sourceRowIndices : Array(0..<page.rows.count)
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let table = scroll.documentView as? EditableTableView else { return }
-        let identityChanged = !columnsMatch(coordinator: context.coordinator, new: page.columns)
-        let editableChanged = (context.coordinator.editBuffer != nil) != (editBuffer != nil)
-        // Detect the meaningful change set BEFORE we mutate the coordinator
-        // — so we can decide whether to fire a full reloadData (slow)
-        // or partial updates (cheap, scroll-safe).
-        let rowCountChanged = context.coordinator.page.rows.count != page.rows.count
-            || context.coordinator.sourceRowIndices.count != sourceRowIndices.count
-        let appliedChanged = context.coordinator.appliedHighlights != appliedHighlights
-        let editBufferRefChanged = context.coordinator.editBuffer !== editBuffer
+        let c = context.coordinator
+        let columnsChanged = !columnsMatch(c.page.columns, page.columns)
+            || (c.editBuffer != nil) != (editBuffer != nil)
+        let generationChanged: Bool = {
+            if let pageGeneration { return pageGeneration != c.pageGeneration }
+            return c.page.rows.count != page.rows.count
+                || c.page.rows.first != page.rows.first
+                || c.page.rows.last != page.rows.last
+        }()
+        let sourcesChanged = effectiveSourceIndices != c.sourceRowIndices
+        let shapeChanged = contentRevision != c.contentRevision || c.page.rows.count != page.rows.count
+        let paintChanged = appliedHighlights != c.appliedHighlights
+            || insertRowIndices != c.insertRowIndices
+            || deleteRowIndices != c.deleteRowIndices
+            || editVersion != c.editVersion
+            || editBuffer !== c.editBuffer
 
-        // If the page identity changed (different columns or fresh
-        // fetch produced a different row count) the render cache no
-        // longer corresponds to what the user is looking at.
-        if identityChanged || rowCountChanged {
-            context.coordinator.invalidateRenderCache()
-        }
-        context.coordinator.page = page
-        context.coordinator.editBuffer = editBuffer
-        context.coordinator.enums = enums
-        context.coordinator.schema = schema
-        context.coordinator.appliedHighlights = appliedHighlights
-        context.coordinator.insertRowIndices = insertRowIndices
-        context.coordinator.deleteRowIndices = deleteRowIndices
-        context.coordinator.rebuildIndex()
-        propagateState(to: context.coordinator)
-        if identityChanged || sourceRowIndices.count != table.numberOfRows {
-            context.coordinator.focusedRow = nil
-            context.coordinator.focusedDataCol = nil
-        }
-        table.editBufferProvider = { [weak coord = context.coordinator] in coord?.editBuffer }
-        table.contextMenuProvider = { [weak coord = context.coordinator] visibleRow, tableCol in
-            let dataCol = tableCol - 1
-            guard dataCol >= 0 else { return nil }
-            return coord?.contextMenu(forVisibleRow: visibleRow, dataCol: dataCol)
-        }
-        table.onArrowMove = { [weak coord = context.coordinator] rdelta, cdelta in
-            coord?.moveFocus(rowDelta: rdelta, colDelta: cdelta)
-        }
-        table.onEnterKey = { [weak coord = context.coordinator] in
-            coord?.openEditorForFocus()
-        }
-        table.tsvCopyProvider = { [weak coord = context.coordinator] in
-            coord?.copyAsTSV()
-        }
-        table.onCommandClick = { [weak coord = context.coordinator] visibleRow, dataCol in
-            guard let coord else { return }
-            let sourceRow = coord.sourceIndex(forVisibleRow: visibleRow)
-            coord.onCommandClickCell?(sourceRow, dataCol)
-        }
-        table.onDeleteSelectedRows = { [weak coord = context.coordinator, weak table] in
-            guard let coord, let table, let onDelete = coord.onDeleteRows else { return }
-            let selected = table.selectedRowIndexes
-            guard !selected.isEmpty else { return }
-            onDelete(selected.map { coord.sourceIndex(forVisibleRow: $0) })
-        }
-        table.onSetNull = { [weak coord = context.coordinator] in coord?.setNullForFocusedCell() }
-        table.hoverPreviewProvider = { [weak coord = context.coordinator] visibleRow, dataCol in
-            coord?.hoverPreview(forVisibleRow: visibleRow, dataCol: dataCol)
-        }
-        if identityChanged || editableChanged {
+        push(into: c)
+        c.pageGeneration = pageGeneration
+        c.contentRevision = contentRevision
+
+        if columnsChanged {
             for col in table.tableColumns { table.removeTableColumn(col) }
-            applyColumns(to: table, coordinator: context.coordinator)
+            applyColumns(to: table, coordinator: c)
+            c.invalidateRenderCache()
+            c.resetSelection()
             table.reloadData()
-            return
-        }
-        // Cheap-path updates. SwiftUI calls updateNSView on *every*
-        // observable change in the parent (dirty count, isRefreshing,
-        // refreshError flicker, …) so the previous unconditional
-        // `reloadData()` was tearing down + rebuilding every visible
-        // row mid-scroll. Now we only reload when the data actually
-        // changed shape.
-        updateHeaderSortIndicators(table: table)
-        if rowCountChanged {
-            table.reloadData()
-        } else if appliedChanged || editBufferRefChanged {
-            // Repaint just the visible rows so the green-rail flash +
-            // dirty-rail flip without nuking scroll position.
-            let visible = table.rows(in: table.visibleRect)
-            if visible.length > 0 {
-                table.reloadData(
-                    forRowIndexes: IndexSet(integersIn: visible.location..<(visible.location + visible.length)),
-                    columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns)
-                )
+            if table.numberOfRows > 0 { table.scrollRowToVisible(0) }
+        } else {
+            updateHeaderSortIndicators(table: table)
+            if generationChanged {
+                c.invalidateRenderCache()
+                c.resetSelection()
+                table.reloadData()
+                if table.numberOfRows > 0 { table.scrollRowToVisible(0) }
+            } else if shapeChanged || sourcesChanged {
+                if sourcesChanged { c.resetSelection() } else { c.clampSelection() }
+                table.reloadData()
+                c.syncRowSelection()
+            } else if paintChanged {
+                c.reloadVisibleRows()
             }
         }
-        // Otherwise: no reload. Cells repaint themselves on their own
-        // bounds invalidations; per-cell edits already call
-        // `reloadRow(_:)` from the commit path.
+        c.handle(focusRequest)
     }
 
     private func updateHeaderSortIndicators(table: NSTableView) {
-        // Build a fresh TypedHeaderCell with the new sort direction
-        // baked in. We can't mutate the existing cell — it has no
-        // Swift fields by design (see the type's doc comment for the
-        // NSCell-copy crash this avoids).
-        for (i, tableCol) in table.tableColumns.enumerated() {
-            if tableCol.identifier.rawValue == Coordinator.gutterColumnID { continue }
-            let dataIdx = i - 1
-            guard dataIdx >= 0, dataIdx < page.columns.count else { continue }
+        // TypedHeaderCell keeps no Swift state (NSCell copies would crash),
+        // so a new sort arrow means a new cell.
+        for tableCol in table.tableColumns {
+            guard let dataIdx = Coordinator.dataIndex(of: tableCol), dataIdx < page.columns.count else { continue }
             let col = page.columns[dataIdx]
             let kind = ColumnTypeKind.from(typeName: col.typeName)
             tableCol.headerCell = TypedHeaderCell(
@@ -326,21 +225,12 @@ struct DataGridView: NSViewRepresentable {
         table.headerView?.needsDisplay = true
     }
 
-    private func nameForColumn(identifier: String) -> String {
-        if let underscore = identifier.firstIndex(of: "_") {
-            return String(identifier[identifier.index(after: underscore)...])
-        }
-        return identifier
-    }
-
-    private func columnsMatch(coordinator: Coordinator, new: [ColumnNode]) -> Bool {
-        guard coordinator.page.columns.count == new.count else { return false }
-        return zip(coordinator.page.columns, new).allSatisfy { $0.name == $1.name && $0.typeName == $1.typeName }
+    private func columnsMatch(_ old: [ColumnNode], _ new: [ColumnNode]) -> Bool {
+        guard old.count == new.count else { return false }
+        return zip(old, new).allSatisfy { $0.name == $1.name && $0.typeName == $1.typeName }
     }
 
     private func applyColumns(to table: NSTableView, coordinator: Coordinator) {
-        // Gutter first — fixed width, no resize, no reorder. The header
-        // cell is empty since this column isn't a data column.
         let gutter = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(Coordinator.gutterColumnID))
         gutter.minWidth = 48
         gutter.width = 48
@@ -350,45 +240,36 @@ struct DataGridView: NSViewRepresentable {
         gutter.resizingMask = []
         table.addTableColumn(gutter)
 
-        let editable = coordinator.editBuffer != nil
         for (i, col) in page.columns.enumerated() {
-            let identifier = NSUserInterfaceItemIdentifier("\(i)_\(col.name)")
-            let column = NSTableColumn(identifier: identifier)
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(Coordinator.identifier(forDataCol: i, name: col.name)))
             column.minWidth = 60
-            // Persisted user-set width wins over the type-driven
-            // default. Clamps to [minWidth, maxWidth] so a stale
-            // outsize value can't break the grid.
+            // A persisted user width beats the type-driven estimate; clamped
+            // so a stale outsize value can't break the grid.
             let saved = columnLayoutKey.flatMap { (id, sch, t) in
                 ColumnLayoutStore.shared.width(connectionID: id, schema: sch, table: t, column: col.name)
             }
-            let estimated = estimatedWidth(for: col)
-            column.width = max(60, min(saved ?? estimated, 800))
+            column.width = max(60, min(saved ?? estimatedWidth(for: col), 800))
             column.maxWidth = 800
-            column.isEditable = editable
+            column.isEditable = false
             let kind = ColumnTypeKind.from(typeName: col.typeName)
-            // Custom header cell: column name on top, PG type as small
-            // uppercase tag underneath, with an optional sort glyph.
-            // Sort direction is baked in at construction — NSCell
-            // copies don't carry Swift fields (see TypedHeaderCell).
-            let cell = TypedHeaderCell(
+            column.headerCell = TypedHeaderCell(
                 title: col.name,
                 typeLabel: col.typeName,
                 alignment: headerAlignment(for: kind),
                 sortDirection: sortDirectionFor?(col.name) ?? .none
             )
-            column.headerCell = cell
             table.addTableColumn(column)
         }
+        coordinator.rebuildColumnMap()
     }
 
     private func estimatedWidth(for col: ColumnNode) -> CGFloat {
-        let kind = ColumnTypeKind.from(typeName: col.typeName)
-        switch kind {
+        switch ColumnTypeKind.from(typeName: col.typeName) {
         case .bool: return 70
         case .integer: return 100
         case .number: return 120
         case .uuid: return 270
-        case .timestamp: return 200
+        case .timestamp: return 230
         case .date: return 130
         case .json: return 260
         default: return 180
