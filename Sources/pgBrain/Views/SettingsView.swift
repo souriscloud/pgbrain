@@ -24,6 +24,8 @@ struct SettingsView: View {
 
 private struct GeneralSettings: View {
     @Bindable var settings: AppSettings
+    @State private var historyStore = QueryHistoryStore.shared
+    @State private var confirmClearHistory = false
 
     var body: some View {
         Form {
@@ -54,8 +56,28 @@ private struct GeneralSettings: View {
                 Toggle("Verbose Postgres logging", isOn: $settings.verbosePostgresLogging)
                     .help("Pipe PostgresNIO's internal log stream to the system log. Off by default; useful when debugging weird wire-protocol behaviour.")
             }
+            Section {
+                Toggle("Save query history", isOn: $settings.saveQueryHistory)
+                    .help("Keep a local log of executed statements for the Query History browser.")
+                HStack {
+                    Button("Clear Query History…", role: .destructive) { confirmClearHistory = true }
+                        .disabled(historyStore.entries.isEmpty)
+                    Spacer()
+                    Text("\(historyStore.entries.count.formatted()) entries")
+                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                }
+            } header: {
+                Text("History")
+            } footer: {
+                Text("Stored only on this Mac. Password literals (ALTER ROLE … PASSWORD, conninfo password=, URL credentials) are masked before saving.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
+        .confirmationDialog("Clear the query history of every connection?",
+                            isPresented: $confirmClearHistory) {
+            Button("Clear History", role: .destructive) { historyStore.clearAll() }
+        }
     }
 }
 
@@ -134,11 +156,39 @@ private struct ConnectionsSettings: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            Section {
+                HStack {
+                    Button("Import ~/.pg_service.conf") { handle(ConnectionIO.importPgServiceFile(), what: "service") }
+                    Button("Fill Passwords from ~/.pgpass") { handle(ConnectionIO.fillPasswordsFromPgPass(), what: "pgpass") }
+                    Spacer()
+                }
+            } header: {
+                Text("libpq files")
+            } footer: {
+                Text("Each [service] becomes a connection. ~/.pgpass only fills connections that have no saved password yet; existing Keychain passwords are never overwritten.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             if let status {
                 Text(status).font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func handle(_ result: ConnectionIO.LibpqImportResult, what: String) {
+        switch result {
+        case .fileMissing(let path):
+            status = "Couldn't read \(path)."
+        case .nothingFound(let path):
+            status = "No usable entries in \(path)."
+        case .done(let added, let skipped):
+            if what == "pgpass" {
+                status = added == 0 ? "No connection without a password matched ~/.pgpass." : "Filled \(added) password\(added == 1 ? "" : "s") from ~/.pgpass."
+            } else {
+                status = "Imported \(added) service\(added == 1 ? "" : "s")" + (skipped > 0 ? " (\(skipped) already present)." : ".")
+            }
+        }
     }
 
     private func handle(_ result: ConnectionIO.ImportResult) {
@@ -165,7 +215,7 @@ private struct BinariesSettings: View {
             } header: {
                 Text("External binaries")
             } footer: {
-                Text("Leave blank to auto-detect from Postgres.app, Homebrew, EnterpriseDB installers, or /usr/bin.")
+                Text("Leave blank to auto-detect from Postgres.app, Homebrew, EnterpriseDB installers, or /usr/bin. Auto-detect picks the newest installed version, which must be at least the server's major version.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -193,8 +243,12 @@ private struct BinaryPathRow: View {
         }
         .help(discovered.map { "Auto-discovered: \($0)" } ?? "")
         .task {
-            // Best-effort discovery preview.
-            discovered = try? PgDumpCLI.locateBinary(named: defaultName).path
+            // Best-effort discovery preview; probes `--version` off-main.
+            do {
+                discovered = try await PgDumpCLI.findBinary(named: defaultName).path
+            } catch {
+                discovered = nil
+            }
         }
     }
 

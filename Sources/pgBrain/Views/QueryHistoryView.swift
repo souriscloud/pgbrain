@@ -39,6 +39,11 @@ struct QueryHistoryView: View {
             Text("(\(filtered.count) of \(store.entries(for: connectionID).count))")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
+            if !AppSettings.shared.saveQueryHistory {
+                Label("Recording off", systemImage: "pause.circle")
+                    .font(.caption).foregroundStyle(.orange)
+                    .help("Turn on \"Save query history\" in Settings → General to record new statements.")
+            }
             Spacer()
             TextField("Search SQL", text: $search)
                 .textFieldStyle(.roundedBorder)
