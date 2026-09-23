@@ -433,7 +433,7 @@ enum CrossDBCopy {
             let sql = PostgresQuery(unsafeSQL: """
             SELECT setval($1::regclass, x.m, true) FROM (SELECT max(\(SQLIdent.quote(column)))::bigint AS m FROM \(qualified)) x
             WHERE x.m IS NOT NULL AND x.m > COALESCE(pg_sequence_last_value($1::regclass), 0)
-            """, binds: try binds(seq))
+            """, binds: binds(seq))
             let rows = try await c.query(sql, logger: pgbrainQuietLogger)
             for try await _ in rows { advanced += 1 }
         }
@@ -447,9 +447,9 @@ enum CrossDBCopy {
         """)
     }
 
-    private static func binds(_ values: String...) throws -> PostgresBindings {
+    private static func binds(_ values: String...) -> PostgresBindings {
         var b = PostgresBindings()
-        for v in values { try b.append(v, context: .default) }
+        for v in values { b.append(v, context: .default) }
         return b
     }
 
