@@ -17,24 +17,25 @@ JetBrains tools are powerful but feel like a Java app glued to your menu bar. Th
 ## What's in the box
 
 ### Windows, tabs & navigation
-- 🪟 **One window per connection.** Connection windows, multi-tab workspaces, JetBrains-style tab strip with drag-reorder, renameable + colour-taggable tabs.
-- 🗂️ **Schema sidebar.** Tree of database → schemas → tables → columns → functions. Trie-indexed filter that holds up on 10k+ tables. Per-connection schema-visibility toggles.
-- ⌨️ **Command palette (⌘K).** Fuzzy-ranked across connections, tabs, tables, functions, schemas, ERDs, and every action.
-- 🧭 **IDE keyboard model.** ⌘T new scratchpad, ⌘1–9 tab jump, ⌃1–9 window jump, ⌘B sidebar, ⌘R reload, ⌘F find — the muscle memory you already have.
+- 🪟 **One window per database.** Switch databases from the title bar; each opens in its own window. Multi-tab workspaces with preview tabs (single-click), pinned tabs, Close Others / to the Right, overflow menu, drag-reorder, rename + colour tags.
+- 🗂️ **Schema sidebar that stays put.** Remembers what you expanded, focuses on the schemas you pick, hides extension clutter, nests partitions, and has Pinned + Recent tables on top. Fuzzy filter (`pub.us` → `public.users`) that holds up on 10k+ tables.
+- 🧭 **Go anywhere fast.** ⌘O Go to Table (recents first), ⌘K for everything, ⌘[ / ⌘] back and forward (including FK jumps), and a `database ▸ schema ▸ table` breadcrumb with sibling menus.
+- ⌨️ **IDE keyboard model.** ⌘T new scratchpad in the selected schema, ⌘1–9 tab jump, ⌃1–9 window jump, ⌘B sidebar, ⌘R reload, ⌘F find, Return/Space in the tree — the muscle memory you already have.
 - 💾 **Saved workspaces + state restoration.** Snapshot a tab set, or just quit and relaunch to find every window and tab where you left it.
 
 ### Reading & editing data
-- 📋 **Editable data grid.** Double-click any cell with a PK, edit, Apply — one transaction with server-side type casts. ⌘Z undo, type-aware editors (date pickers, bool toggles, JSON), per-column width memory.
+- 📋 **Spreadsheet-grade grid.** Cell and range selection, ⌘C / ⌘V as TSV, Tab/Return navigation, type to edit, ⌫ for NULL, ⌘Z / ⌘⇧Z. Every change is staged: preview the exact SQL, Apply (⌘S) in one transaction, and pgBrain refuses to overwrite a row someone else changed. Tables without a primary key are editable too.
 - 📇 **Row form view.** Flip any grid to a single-row vertical form with ←/→ stepping — edits share the grid's dirty set.
 - 🔎 **Filter, sort, paginate.** WHERE/ORDER BY strip with autocomplete, sortable headers, keyset-friendly paging, filter-to-cell, distinct-values popover per column, FK ⌘-click navigation.
 - 📊 **Pivot & chart.** Pivot any result (row/col/value + agg) or chart it (bar/line/point) without leaving the result block.
 - 🪄 **Generate test data.** Per-column strategies → one `INSERT … SELECT generate_series` with a live SQL preview.
 - 🧮 **Column profiler.** Right-click any column → rows / nulls (with a populated bar) / distinct / min·max·avg, scoped to your active filter.
-- 🗑️ **Delete rows — staged, not instant.** Right-click one or a multi-selection → rows get a red wash and commit on **Apply**, in the *same transaction* as your edits and inserts (or Revert to undo). Refuses tables without a PK.
+- 🗑️ **Delete rows — staged, not instant.** Right-click one or a multi-selection → rows get a red wash and commit on **Apply**, in the *same transaction* as your edits and inserts (or Discard to undo). Paging, sorting or closing the tab asks before dropping anything.
 - 📑 **Copy as…** Markdown, JSON, TSV (paste into spreadsheets), or CSV — from any result block or the table grid.
 
 ### The notebook scratchpad
-- 📝 **Inline results.** SQL and result widgets in one flowing document. Cmd+⏎ runs the statement under your caret; the result inlines right after it. JetBrains feel, Jupyter ergonomics.
+- 📝 **Inline results.** SQL and result widgets in one flowing document. Cmd+⏎ runs the statement under your caret; the result inlines right after it. Every type renders exactly as psql prints it.
+- 🔗 **A real session per scratchpad.** `SET`, temp tables and `BEGIN` persist between runs; a transaction indicator with Commit / Roll Back and an Auto / Manual commit switch.
 - 🐘 **psql slash commands.** `\dt`, `\d table`, `\df`, `\du`, `\l`, `\dn`, `\dx` … translated to catalog queries inline.
 - 🔁 **Run-as-transaction.** Wrap a multi-statement run in BEGIN/COMMIT — any error rolls the whole batch back.
 - ✨ **Editor niceties.** Syntax highlighting, schema-aware autocomplete + hover, bracket/quote auto-pairing, auto-indent, Format SQL, `EXPLAIN`/`EXPLAIN ANALYZE` plan viewer, find/replace, snippets with `$cursor$` placeholders, open/save `.sql`.
@@ -61,10 +62,13 @@ JetBrains tools are powerful but feel like a Java app glued to your menu bar. Th
 
 ### Safety, transport & ops
 - 🛑 **Production guardrails.** Mark a connection PROD → red chrome everywhere; unscoped `DELETE`/`UPDATE`/`TRUNCATE`/DDL prompts before it runs.
-- 🔒 **SSH tunnels.** Per-connection local-forward via the system `ssh` (agent or key-file auth).
-- ⏯️ **Real cancellation.** Cancel actually stops the server-side query via a sister-connection `pg_cancel_backend(pid)` — same trick `psql` uses on `^C`.
+- 🧷 **Read-only connections & timeouts.** Per-connection read-only mode, statement and idle-in-transaction timeouts, applied to every session.
+- 🔒 **SSH tunnels & TLS.** Local-forward via the system `ssh` (agent or key file), supervised and restarted if it drops; custom root CA and client certificates; verify-full works through tunnels.
+- 🔄 **Survives sleep.** Connections notice a dead link after sleep or a network change and reconnect on their own.
+- 📥 **Bring your connections.** Paste a `postgres://` URL, import `~/.pg_service.conf`, fill passwords from `~/.pgpass`.
+- ⏯️ **Real cancellation.** Stop sends the protocol's own cancel request for exactly your statement — the same thing `psql` does on `^C`.
 - ↔️ **Cross-DB copy.** Stream a table between connections via `SELECT` → `COPY FROM STDIN`. Flat memory regardless of row count.
-- 📤📥 **Streaming export/import.** CSV/JSON/SQL export at any size; CSV/JSON import with header→column mapping; auto-discovering `pg_dump` wrapper.
+- 📤📥 **Streaming export/import.** CSV/JSON/SQL export at any size; CSV/JSON import with header→column mapping, encoding and delimiter options; `pg_dump` / `pg_restore` that pick the right PostgreSQL version (up to 18) automatically.
 - 🔔 **Long-query notifications.** Background queries over 30s ping you when they finish.
 - ⚙️ **Sparkle auto-update.** Signed + notarized; pgBrain checks for new versions daily and on launch, and asks before installing.
 
