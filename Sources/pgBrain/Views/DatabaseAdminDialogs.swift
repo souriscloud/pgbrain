@@ -5,6 +5,9 @@ import SwiftUI
 struct CreateDatabaseSheet: View {
     let service: ConnectionService
     let onClose: () -> Void
+    /// Called with the new database's name after a successful CREATE, so
+    /// the window can offer to open it.
+    var onCreated: ((String) -> Void)? = nil
 
     @State private var name: String = ""
     @State private var owner: String = ""
@@ -79,7 +82,10 @@ struct CreateDatabaseSheet: View {
             )
             saving = false
             switch result {
-            case .success: onClose()
+            case .success:
+                let created = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                onClose()
+                onCreated?(created)
             case .failure(let err): error = err.localizedDescription
             }
         }

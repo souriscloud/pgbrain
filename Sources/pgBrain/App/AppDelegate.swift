@@ -45,7 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let state = SessionStateStore.shared.load(), !state.windows.isEmpty else { return false }
         var opened = 0
         for snapshot in state.windows {
-            guard let conn = ConnectionStore.shared.connections.first(where: { $0.id == snapshot.connectionID }) else { continue }
+            guard var conn = ConnectionStore.shared.connections.first(where: { $0.id == snapshot.connectionID }) else { continue }
+            if let db = snapshot.database, !db.isEmpty { conn.database = db }
             openConnection(conn, restoring: snapshot)
             opened += 1
         }
@@ -137,7 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `restoring` to repopulate the window's frame + tab list + scratchpad
     /// text from a `SessionState` snapshot.
     func openConnection(_ connection: Connection, restoring snapshot: SessionState.Window? = nil) {
-        if let existing = windowManager.window(for: connection.id) {
+        if let existing = windowManager.window(for: connection.id, database: connection.database) {
             NSApp.activate(ignoringOtherApps: true)
             existing.makeKeyAndOrderFront(nil)
             return
@@ -155,11 +156,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let snapshot {
             result.window.setFrame(snapshot.frame.ns, display: true)
+            let workspace = result.service.workspace
+            workspace.sidebarVisible = snapshot.sidebarVisible ?? true
+            workspace.sidebarFilter = snapshot.sidebarFilter ?? ""
+            workspace.sidebarIncludeColumns = snapshot.sidebarIncludeColumns ?? false
+            workspace.expandedSidebarNodes = snapshot.expandedSidebarNodes.map(Set.init)
             // Defer tab restoration until the schema loads so tables can be
             // resolved to live TableNode instances.
             restoreTabs(into: result.service, from: snapshot)
         } else {
             result.window.center()
+            // A sibling database window cascades off the one it came
+            // from instead of stacking exactly on top of it.
+            if let sibling = windowManager.entries.first(where: {
+                $0.connectionID == connection.id && $0.window !== result.window
+            }) {
+                let origin = sibling.window.frame.origin
+                result.window.setFrameOrigin(NSPoint(x: origin.x + 28, y: origin.y - 28))
+            }
         }
 
         NSApp.activate(ignoringOtherApps: true)
@@ -167,6 +181,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SessionStateStore.shared.scheduleSnapshot()
 
         welcomeWindow?.orderOut(nil)
+    }
+
+    /// Open (or focus) a window for `connection` on a different database —
+    /// the database switcher's entry point. The saved connection is left
+    /// untouched; only this window's copy has `database` replaced.
+    func openConnection(_ connection: Connection, database: String) {
+        var copy = connection
+        copy.database = database
+        openConnection(copy)
     }
 
     /// Wait for the connection's schema to load, then replay each persisted
@@ -210,6 +233,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             opened.tableOrderByClause = persisted.tableOrderByClause ?? ""
                             opened.color = persisted.colorTag.flatMap { Connection.ColorTag(rawValue: $0) }
                             if let custom = persisted.tabTitle { opened.title = custom }
+                            opened.isPinned = persisted.isPinned ?? false
+                            opened.isPreview = persisted.isPreview ?? false
                         }
                     case .scratchpad:
                         let pad = workspace.openScratchpad()
@@ -232,12 +257,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             } else if let scratchTitle = persisted.scratchpadTitle {
                                 opened.title = scratchTitle
                             }
+                            opened.isPinned = persisted.isPinned ?? false
                         }
                     }
                     if snapshot.selectedTabIndex == idx, let last = workspace.tabs.last {
                         workspace.selectedID = last.id
                     }
                 }
+                workspace.clearHistory()
                 SessionStateStore.shared.scheduleSnapshot()
             }
         }

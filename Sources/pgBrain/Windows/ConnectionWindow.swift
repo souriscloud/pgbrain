@@ -10,6 +10,10 @@ enum ConnectionWindowFactory {
 
     static func make(connection: Connection, onClose: @escaping @MainActor (NSWindow) -> Void) -> Result {
         let service = ConnectionService(connection: connection)
+        let scope = NavigationHistoryStore.Scope(connectionID: connection.id, database: connection.database)
+        service.workspace.onTableOpened = { table in
+            NavigationHistoryStore.shared.recordOpen(table.id, scope: scope)
+        }
         let content = ConnectionWindowContent(service: service)
         let hosting = NSHostingController(rootView: content)
         let window = NSWindow(contentViewController: hosting)
@@ -75,6 +79,20 @@ final class ConnectionWindowCloseObserver: NSObject, NSWindowDelegate {
     func windowDidExitFullScreen(_ notification: Notification) { rehideTitle(notification) }
     func windowDidEnterFullScreen(_ notification: Notification) { rehideTitle(notification) }
 
+    /// Closing the window drops every tab, so unapplied grid edits get the
+    /// same Discard/Cancel prompt a single tab close would.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        MainActor.assumeIsolated {
+            let workspace = service.workspace
+            let dirty = workspace.dirtyTabs(among: workspace.tabs.map(\.id))
+            guard !dirty.isEmpty else { return true }
+            TabCloseGuard.confirmDiscard(dirty.map { workspace.displayTitle(for: $0) }, window: sender) { discard in
+                if discard { sender.close() }
+            }
+            return false
+        }
+    }
+
     func windowWillClose(_ notification: Notification) {
         MainActor.assumeIsolated {
             service.shutdown()
@@ -110,10 +128,12 @@ final class WindowTitleSync {
         guard let window else { return }
         // Title text is hidden in the titlebar, but still used by the Window
         // menu / Mission Control / window switcher — keep it descriptive.
+        let db = service.connection.database
+        let base = db.isEmpty ? service.connection.name : "\(service.connection.name) · \(db)"
         if case .connected = service.state, let tab = service.workspace.selectedTab {
-            window.title = "\(service.connection.name) — \(tab.title)"
+            window.title = "\(base) — \(service.workspace.displayTitle(for: tab))"
         } else {
-            window.title = service.connection.name
+            window.title = base
         }
         // Assigning `title` flips `titleVisibility` back to `.visible`, which
         // would draw the native title over the custom chrome bar. Re-hide it
