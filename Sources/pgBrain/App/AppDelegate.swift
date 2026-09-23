@@ -235,6 +235,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             if let custom = persisted.tabTitle { opened.title = custom }
                             opened.isPinned = persisted.isPinned ?? false
                             opened.isPreview = persisted.isPreview ?? false
+                            if let pane = persisted.tablePane.flatMap(WorkspaceState.TablePane.init(rawValue:)) {
+                                opened.tableViewState.pane = pane
+                            }
+                            if let mode = persisted.tableRowViewMode.flatMap(TableRowViewMode.init(rawValue:)) {
+                                opened.tableViewState.rowViewMode = mode
+                            }
                         }
                     case .scratchpad:
                         let pad = workspace.openScratchpad()

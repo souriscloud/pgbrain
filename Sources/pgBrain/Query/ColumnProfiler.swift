@@ -34,7 +34,7 @@ enum ColumnProfiler {
         let col = SQLIdent.quote(column.name)
         let whereClause = extraWhere.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? ""
-            : " WHERE \(extraWhere)"
+            : "\nWHERE \(RowsFetcher.isolatedWhere(extraWhere))"
 
         let kind = ColumnTypeKind.from(typeName: column.typeName)
         // json/jsonb have no ordering operator, and Postgres has no

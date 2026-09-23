@@ -66,14 +66,10 @@ extension TableTabView {
             let refTypes = Dictionary(refTable.columns.map { ($0.name, $0.typeName) }, uniquingKeysWith: { a, _ in a })
             let clause = ForeignKeyResolver.whereClause(for: key, values: values, refTypes: refTypes)
 
-            service.workspace.openTable(refTable)
-            let target = service.workspace.tabs.first {
-                if case .table(let t) = $0.kind { return t.id == refTable.id }
-                return false
-            }
-            target?.tableWhereClause = clause
-            target?.tableOrderByClause = ""
-            target?.requestedFilterReload = true
+            // Through the navigation history so ⌘[ comes back here, with
+            // this tab's filter restored.
+            let target = service.workspace.navigate(toTable: refTable, where: clause)
+            target.tableOrderByClause = ""
         }
     }
 
@@ -136,7 +132,12 @@ extension TableTabView {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
+        let accessory = ImportOptionsAccessory(json: json)
+        panel.accessoryView = accessory.view
+        panel.isAccessoryViewDisclosed = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        let csvOptions = accessory.csvOptions
+        let encoding = accessory.encoding
         let op = service.operations.begin(
             kind: .importJob,
             summary: "Import \(url.lastPathComponent) → \(table.qualifiedName)"
@@ -147,8 +148,10 @@ extension TableTabView {
         Task {
             do {
                 let stats = json
-                    ? try await Importer.importJSON(into: table, from: url, client: client, tracker: tracker, operationID: opID)
-                    : try await Importer.importCSV(into: table, from: url, client: client, tracker: tracker, operationID: opID)
+                    ? try await Importer.importJSON(into: table, from: url, client: client, encoding: encoding,
+                                                    tracker: tracker, operationID: opID)
+                    : try await Importer.importCSV(into: table, from: url, client: client, options: csvOptions,
+                                                   tracker: tracker, operationID: opID)
                 op.summary += " · \(rowsLabel(stats.rowsImported))"
                 tracker.finish(op, status: .succeeded)
                 await loader.load()

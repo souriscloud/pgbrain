@@ -53,6 +53,10 @@ struct SessionState: Codable {
         var tabTitle: String?
         var isPreview: Bool?
         var isPinned: Bool?
+        /// `.table` tabs: Data / Structure / DDL, and grid / form / map.
+        /// Nil = the defaults (Data, grid).
+        var tablePane: String?
+        var tableRowViewMode: String?
     }
 
     struct CodableRect: Codable {
@@ -162,7 +166,10 @@ final class SessionStateStore {
                         colorTag: tab.color?.rawValue,
                         tabTitle: tab.title == t.qualifiedName ? nil : tab.title,
                         isPreview: tab.isPreview ? true : nil,
-                        isPinned: tab.isPinned ? true : nil
+                        isPinned: tab.isPinned ? true : nil,
+                        tablePane: tab.tableViewState.pane == .data ? nil : tab.tableViewState.pane.rawValue,
+                        tableRowViewMode: tab.tableViewState.rowViewMode == .grid
+                            ? nil : tab.tableViewState.rowViewMode.rawValue
                     )
                 case .scratchpad(let pad):
                     return SessionState.Tab(

@@ -454,7 +454,7 @@ private struct TableTabLifecycle: ViewModifier {
             .onChange(of: tab.requestedFilterReload) { _, _ in view.consumeFilterReload() }
             .onChange(of: view.viewState.pane) { _, _ in view.loadInspectorIfNeeded() }
             .onReceive(NotificationCenter.default.publisher(for: .pgbrainSetTableViewMode)) { notif in
-                guard notif.object as? UUID == service.connection.id,
+                guard service.owns(notif),
                       service.workspace.selectedID == tab.id,
                       let mode = notif.userInfo?["mode"] as? String else { return }
                 switch mode {
@@ -468,14 +468,14 @@ private struct TableTabLifecycle: ViewModifier {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .pgbrainExportTable)) { notif in
-                guard notif.object as? UUID == service.connection.id,
+                guard service.owns(notif),
                       service.workspace.selectedID == tab.id,
                       let raw = notif.userInfo?["format"] as? String,
                       let format = Exporter.Format(rawValue: raw) else { return }
                 view.exportFullTable(as: format)
             }
             .onReceive(NotificationCenter.default.publisher(for: .pgbrainImportTable)) { notif in
-                guard notif.object as? UUID == service.connection.id,
+                guard service.owns(notif),
                       service.workspace.selectedID == tab.id,
                       let kind = notif.userInfo?["kind"] as? String else { return }
                 if kind == "json" { view.importJSON() } else { view.importCSV() }

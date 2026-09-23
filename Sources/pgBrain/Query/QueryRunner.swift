@@ -115,6 +115,9 @@ enum QueryRunner {
         while core.hasSuffix(";") {
             core = String(core.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        // Never cap anything that writes: a LIMIT on a data-modifying CTE or
+        // SELECT … INTO would silently cut the write short.
+        guard SQLSafety.classify(core) == .readOnly else { return sql }
         let toks = SQLSafety.tokens(in: core).map { $0.lowercased() }
         guard let first = toks.first, ["select", "with", "values"].contains(first) else { return sql }
         // Already self-limiting (top-level or in a subquery) — leave it alone.

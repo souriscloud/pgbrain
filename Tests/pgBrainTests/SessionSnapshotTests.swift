@@ -59,6 +59,19 @@ final class SessionSnapshotTests: XCTestCase {
         XCTAssertNil(s.tabTitle, "un-renamed scratchpad tab carries no override title")
     }
 
+    func testTableViewStateIsCapturedOnlyWhenNonDefault() {
+        let ws = WorkspaceState()
+        ws.openTable(table("public", "users"))
+        ws.openTable(table("public", "orders"))
+        ws.tabs[0].tableViewState.pane = .structure
+        ws.tabs[0].tableViewState.rowViewMode = .form
+        let tabs = SessionStateStore.makeSnapshot(windows: [input(ws)]).windows[0].tabs
+        XCTAssertEqual(tabs[0].tablePane, "structure")
+        XCTAssertEqual(tabs[0].tableRowViewMode, "form")
+        XCTAssertNil(tabs[1].tablePane)
+        XCTAssertNil(tabs[1].tableRowViewMode)
+    }
+
     func testEmptyClausesCollapseToNil() {
         let ws = WorkspaceState()
         ws.openTable(table("public", "t"))   // no WHERE / ORDER BY set

@@ -415,25 +415,62 @@ private struct HelpShortcuts: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Tokens.Spacing.lg) {
             HelpHeader(icon: "keyboard", title: "Keyboard Shortcuts")
-            VStack(alignment: .leading, spacing: 10) {
-                ShortcutRow(keys: ["⌘", "K"], label: "Command Palette")
-                ShortcutRow(keys: ["⌘", "N"], label: "New connection")
-                ShortcutRow(keys: ["⌘", "T"], label: "New SQL scratchpad")
+            ShortcutGroup(title: "Navigate") {
+                ShortcutRow(keys: ["⌘", "O"], label: "Go to table, view or function")
+                ShortcutRow(keys: ["⌘", "K"], label: "Command Palette (everything)")
+                ShortcutRow(keys: ["⌘", "["], label: "Back")
+                ShortcutRow(keys: ["⌘", "]"], label: "Forward")
+                ShortcutRow(keys: ["⌥", "⌘", "F"], label: "Filter the sidebar")
+                ShortcutRow(keys: ["⌘", "⇧", "J"], label: "Reveal the active tab in the sidebar")
+                ShortcutRow(keys: ["⌘", "D"], label: "Pin / unpin the active table")
+                ShortcutRow(keys: ["↵"], label: "Sidebar: open the selected table (Space previews)")
+                ShortcutRow(keys: ["⌘", "1…9"], label: "Switch to tab 1–9")
+                ShortcutRow(keys: ["⌃", "1…9"], label: "Switch connection window")
+                ShortcutRow(keys: ["⌘", "B"], label: "Show / hide the sidebar")
+                ShortcutRow(keys: ["⌘", "⇧", "R"], label: "Refresh the schema")
+            }
+            ShortcutGroup(title: "Scratchpad") {
+                ShortcutRow(keys: ["⌘", "T"], label: "New scratchpad (in the selected schema)")
                 ShortcutRow(keys: ["⌘", "↵"], label: "Run statement under caret / selection")
+                ShortcutRow(keys: ["⌘", "."], label: "Stop the running statement")
+                ShortcutRow(keys: ["⌘", "⇧", "E"], label: "Explain the statement")
                 ShortcutRow(keys: ["⌥", "Esc"], label: "Trigger autocomplete")
+                ShortcutRow(keys: ["⌥", "⌘", "O"], label: "Open a .sql file")
+            }
+            ShortcutGroup(title: "Data grid") {
+                ShortcutRow(keys: ["↵"], label: "Edit the cell (or just start typing)")
+                ShortcutRow(keys: ["⇥"], label: "Next cell (⇧⇥ previous)")
+                ShortcutRow(keys: ["⇧", "↓"], label: "Extend the selection")
+                ShortcutRow(keys: ["⌘", "C"], label: "Copy selected cells")
+                ShortcutRow(keys: ["⌘", "V"], label: "Paste into the selection")
+                ShortcutRow(keys: ["⌫"], label: "Set selected cells to NULL")
                 ShortcutRow(keys: ["⌘", "⌫"], label: "Stage selected row(s) for delete")
-                ShortcutRow(keys: ["⌃", "⌘", "N"], label: "Set the focused cell to NULL")
-                ShortcutRow(keys: ["⌘", "Z"], label: "Undo a pending cell edit")
-                ShortcutRow(keys: ["⌘", "+"], label: "Increase editor font size")
-                ShortcutRow(keys: ["⌘", "−"], label: "Decrease editor font size")
-                ShortcutRow(keys: ["⌘", "0"], label: "Reset editor font size")
+                ShortcutRow(keys: ["⌘", "Z"], label: "Undo a pending edit (⌘⇧Z redo)")
+                ShortcutRow(keys: ["⌘", "S"], label: "Apply pending changes")
+                ShortcutRow(keys: ["⌘", "Esc"], label: "Discard pending changes")
                 ShortcutRow(keys: ["⌘", "F"], label: "Find in the grid / editor")
-                ShortcutRow(keys: ["⌘", "⇧", "←"], label: "Previous page of rows")
-                ShortcutRow(keys: ["⌘", "⇧", "→"], label: "Next page of rows")
+                ShortcutRow(keys: ["⌘", "⇧", "←"], label: "Previous page (⌘⇧→ next)")
+                ShortcutRow(keys: ["⌘", "R"], label: "Reload rows")
+            }
+            ShortcutGroup(title: "App") {
+                ShortcutRow(keys: ["⌘", "N"], label: "New connection")
+                ShortcutRow(keys: ["⌘", "+"], label: "Bigger font (⌘− smaller, ⌘0 reset)")
                 ShortcutRow(keys: ["⌘", ","], label: "Settings")
                 ShortcutRow(keys: ["⌘", "W"], label: "Close tab / window")
                 ShortcutRow(keys: ["⌘", "?"], label: "Show this help")
             }
+        }
+    }
+}
+
+private struct ShortcutGroup<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.headline)
+            content
         }
     }
 }
