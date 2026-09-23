@@ -195,7 +195,7 @@ struct NotebookView: View {
 
             Menu {
                 Button("Open .sql…") { openSQLFile() }
-                    .keyboardShortcut("o", modifiers: .command)
+                    .keyboardShortcut("o", modifiers: [.command, .option])
                 Button("Save as .sql…") { saveSQLFile() }
                     .keyboardShortcut("s", modifiers: [.command, .shift])
                 Divider()

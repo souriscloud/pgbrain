@@ -1,13 +1,14 @@
 import AppKit
 
-/// Confirms closing tabs that hold unapplied grid edits. Applying edits
-/// lives inside the table tab (its Apply button runs the UPDATE batch), so
-/// from the strip or the window chrome the honest choices are Discard or
-/// Cancel.
+/// Confirms closing tabs that hold unapplied grid edits or an open
+/// scratchpad transaction. Applying edits lives inside the table tab (its
+/// Apply button runs the UPDATE batch), so from the strip or the window
+/// chrome the honest choices are Discard or Cancel.
 @MainActor
 enum TabCloseGuard {
     /// Close `ids` in `workspace`, asking first when any of them is dirty.
     static func close(_ ids: [UUID], in workspace: WorkspaceState, window: NSWindow? = NSApp.keyWindow) {
+        let ids = resolveTransactions(ids, in: workspace)
         let dirty = workspace.dirtyTabs(among: ids)
         guard !dirty.isEmpty else {
             workspace.closeTabs(ids)
@@ -15,6 +16,17 @@ enum TabCloseGuard {
         }
         confirmDiscard(dirty.map { workspace.displayTitle(for: $0) }, window: window) { discard in
             if discard { workspace.closeTabs(ids) }
+        }
+    }
+
+    /// Asks about every scratchpad among `ids` that has an open transaction
+    /// (Commit / Roll Back / Cancel) and returns the ids that may close.
+    /// Scratchpads without a transaction just release their session.
+    static func resolveTransactions(_ ids: [UUID], in workspace: WorkspaceState) -> [UUID] {
+        ids.filter { id in
+            guard let tab = workspace.tabs.first(where: { $0.id == id }),
+                  case .scratchpad(let pad) = tab.kind else { return true }
+            return pad.confirmCloseWithOpenTransaction()
         }
     }
 
