@@ -33,10 +33,12 @@ enum Explain {
     enum ExplainError: Error, LocalizedError {
         case invalidJSON
         case empty
+        case transactionAborted
         var errorDescription: String? {
             switch self {
             case .invalidJSON: "Couldn't parse EXPLAIN output"
             case .empty:       "EXPLAIN returned no rows"
+            case .transactionAborted: "The scratchpad's transaction has failed — roll it back before running EXPLAIN"
             }
         }
     }
@@ -75,6 +77,49 @@ enum Explain {
             for try await row in stream.decode(String.self) { out.append(row) }
             rows = out
         }
+        return try plan(fromJSONRows: rows)
+    }
+
+    /// EXPLAIN on the scratchpad's own session, so temp tables, `SET`
+    /// and the session's `search_path` apply exactly as they do for a run.
+    /// ANALYZE executes the statement, so it runs inside a transaction (or a
+    /// savepoint when the user already has one open) that is always rolled
+    /// back.
+    static func run(sql: String, analyze: Bool, session: ScratchpadSession) async throws -> ExplainNode {
+        let stmt = "EXPLAIN \(analyze ? "(FORMAT JSON, ANALYZE)" : "(FORMAT JSON)") \(sql)"
+        guard analyze else {
+            let r = try await session.run(stmt, rowLimit: 1)
+            return try plan(fromJSONRows: r.result.page.rows.compactMap { $0.first ?? nil })
+        }
+        switch session.transactionStatus {
+        case .failed:
+            throw ExplainError.transactionAborted
+        case .active:
+            _ = try await session.run("SAVEPOINT pgbrain_explain", rowLimit: 1)
+            do {
+                let r = try await session.run(stmt, rowLimit: 1)
+                _ = try await session.run("ROLLBACK TO SAVEPOINT pgbrain_explain", rowLimit: 1)
+                _ = try? await session.run("RELEASE SAVEPOINT pgbrain_explain", rowLimit: 1)
+                return try plan(fromJSONRows: r.result.page.rows.compactMap { $0.first ?? nil })
+            } catch {
+                _ = try? await session.run("ROLLBACK TO SAVEPOINT pgbrain_explain", rowLimit: 1)
+                _ = try? await session.run("RELEASE SAVEPOINT pgbrain_explain", rowLimit: 1)
+                throw error
+            }
+        case .idle:
+            _ = try await session.run("BEGIN", rowLimit: 1)
+            do {
+                let r = try await session.run(stmt, rowLimit: 1)
+                _ = try? await session.run("ROLLBACK", rowLimit: 1)
+                return try plan(fromJSONRows: r.result.page.rows.compactMap { $0.first ?? nil })
+            } catch {
+                _ = try? await session.run("ROLLBACK", rowLimit: 1)
+                throw error
+            }
+        }
+    }
+
+    private static func plan(fromJSONRows rows: [String]) throws -> ExplainNode {
         guard let json = rows.first,
               let data = json.data(using: .utf8),
               let top = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
