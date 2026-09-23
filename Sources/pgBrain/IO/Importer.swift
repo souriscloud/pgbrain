@@ -200,52 +200,36 @@ enum Importer {
         return s
     }
 
-    /// BEGIN; SET LOCAL search_path; COPY …; COMMIT — with pg_cancel_backend
-    /// wiring and ROLLBACK on any failure.
+    /// BEGIN; SET LOCAL search_path; COPY …; COMMIT — with gated
+    /// pg_cancel_backend wiring and ROLLBACK (or discard) on any failure.
     private static func withCopy(
         into table: TableNode, columns: [String], client: PostgresClient,
         tracker: OperationsCenter?, operationID: UUID?,
         _ body: (PostgresCopyFromWriter) async throws -> Void
     ) async throws {
-        try await client.withConnection { connection in
-            if let opID = operationID, let tracker {
-                let pid = try await OperationsHelpers.fetchBackendPID(connection, logger: pgbrainQuietLogger)
-                let cancel: @Sendable () async -> Void = { [weak client] in
-                    guard let client else { return }
-                    _ = try? await client.withConnection { sister in
-                        _ = try await sister.query(
-                            PostgresQuery(unsafeSQL: "SELECT pg_cancel_backend(\(pid))"),
-                            logger: pgbrainQuietLogger
-                        )
-                    }
-                }
-                Task { @MainActor in
-                    tracker.attachCancellation(toOperationID: opID, pid: pid, handler: cancel)
-                }
-            }
-
+        try await PooledTransaction.run(client: client, operationID: operationID, tracker: tracker) { connection in
             // PostgresNIO's `copyFrom(table:)` wraps the bare `table` in
             // double quotes — to address a schema-qualified target we set the
             // search_path, scoped to this transaction by SET LOCAL.
-            _ = try await connection.query(PostgresQuery(unsafeSQL: "BEGIN"), logger: pgbrainQuietLogger)
-            do {
-                _ = try await connection.query(
-                    PostgresQuery(unsafeSQL: "SET LOCAL search_path = \(SQLIdent.quote(table.schema))"),
-                    logger: pgbrainQuietLogger
-                )
-                try await connection.copyFrom(
-                    table: table.name,
-                    columns: columns,
-                    format: .text(.init()),
-                    logger: pgbrainQuietLogger,
-                    writeData: body
-                )
-                _ = try await connection.query(PostgresQuery(unsafeSQL: "COMMIT"), logger: pgbrainQuietLogger)
-            } catch {
-                _ = try? await connection.query(PostgresQuery(unsafeSQL: "ROLLBACK"), logger: pgbrainQuietLogger)
-                throw error
-            }
+            _ = try await connection.query(
+                PostgresQuery(unsafeSQL: copySearchPath(schema: table.schema)),
+                logger: pgbrainQuietLogger
+            )
+            try await connection.copyFrom(
+                table: table.name,
+                columns: columns,
+                format: .text(.init()),
+                logger: pgbrainQuietLogger,
+                writeData: body
+            )
         }
+    }
+
+    /// pg_temp is implicitly searched *first* unless it's named, and
+    /// pg_catalog first unless named — either would let a same-named temp
+    /// or catalog table receive the import instead of the chosen one.
+    static func copySearchPath(schema: String) -> String {
+        "SET LOCAL search_path = \(SQLIdent.quote(schema)), pg_catalog, pg_temp"
     }
 
     /// Postgres COPY TEXT format escapes backslash, tab, newline, carriage

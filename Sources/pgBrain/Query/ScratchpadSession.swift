@@ -193,6 +193,8 @@ final class ScratchpadSession: Sendable {
             await pending?.value
         }
 
+        var transactionStatus: TransactionStatus { state.withLock { $0.transaction } }
+
         func connected(pid: Int32, secret: ByteBuffer) {
             state.withLock { $0.pid = pid; $0.secret = secret }
         }
@@ -200,6 +202,17 @@ final class ScratchpadSession: Sendable {
         func disconnected() {
             state.withLock { $0.pid = nil; $0.secret = nil; $0.inFlight = nil; $0.transaction = .idle }
         }
+    }
+
+    enum IdleLossAction: Sendable, Equatable {
+        case carryOver
+        case failTransactionLost
+    }
+
+    /// What to do with a request that finds the connection already dead
+    /// before anything was sent, given the status of the last ReadyForQuery.
+    static func idleLossAction(lastStatus: TransactionStatus) -> IdleLossAction {
+        lastStatus == .idle ? .carryOver : .failTransactionLost
     }
 
     private struct TypeKey: Hashable {
@@ -263,13 +276,23 @@ final class ScratchpadSession: Sendable {
                                 next.continuation.resume(throwing: PGWireError.cancelled)
                                 continue
                             }
-                            // The server may have dropped us while idle (restart,
-                            // idle timeout). Nothing was sent yet, so it's safe
-                            // to carry the request over to a fresh connection.
+                            // The server may have dropped us between statements
+                            // (restart, idle timeout). Nothing was sent yet, so
+                            // the request can move to a fresh connection — but
+                            // only if no transaction was open: otherwise it would
+                            // silently autocommit outside the transaction the
+                            // user believes they are in.
                             if !channel.channel.isActive {
-                                carried = next
                                 lostConnection = true
-                                await shared.end()
+                                switch Self.idleLossAction(lastStatus: shared.transactionStatus) {
+                                case .carryOver:
+                                    carried = next
+                                    await shared.end()
+                                case .failTransactionLost:
+                                    shared.disconnected()
+                                    await shared.end()
+                                    next.continuation.resume(throwing: PGWireError.transactionLost)
+                                }
                                 return
                             }
                             job = next

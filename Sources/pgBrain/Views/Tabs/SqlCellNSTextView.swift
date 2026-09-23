@@ -75,28 +75,40 @@ final class SqlCellNSTextView: NSTextView {
             explainStatement(nil)
             return
         }
-        // ⌥↓ / ⌥↑ → unconditional jump to next/previous SQL cell,
-        // regardless of caret position. Overrides AppKit's default
-        // "move to end/start of paragraph" which is rarely useful here.
-        if event.modifierFlags.contains(.option), event.keyCode == 125 {
-            onJumpToAdjacent?(+1)
-            return
-        }
-        if event.modifierFlags.contains(.option), event.keyCode == 126 {
-            onJumpToAdjacent?(-1)
-            return
-        }
-        // Plain ↓ on the visually-last line → jump to next SQL cell.
-        if event.keyCode == 125, isCaretOnLastLine() {
-            onJumpToAdjacent?(+1)
-            return
-        }
-        // Plain ↑ on the visually-first line → jump to previous SQL cell.
-        if event.keyCode == 126, isCaretOnFirstLine() {
-            onJumpToAdjacent?(-1)
+        if let direction = Self.cellJump(
+            keyCode: event.keyCode, modifiers: event.modifierFlags,
+            onFirstLine: self.isCaretOnFirstLine(), onLastLine: self.isCaretOnLastLine()
+        ) {
+            onJumpToAdjacent?(direction)
             return
         }
         super.keyDown(with: event)
+    }
+
+    /// Which adjacent SQL cell an arrow key jumps to, if any. Only exact
+    /// modifier sets count — ⌥⇧↑ (select to paragraph start), ⇧↓ (extend
+    /// the selection) and ⌘↓ (end of document) must keep their text-editing
+    /// meaning:
+    /// - ⌥↓ / ⌥↑ jump regardless of caret position (AppKit's "move to end
+    ///   of paragraph" is rarely useful here);
+    /// - plain ↓ on the visually-last line / ↑ on the first line jump.
+    static func cellJump(
+        keyCode: UInt16, modifiers: NSEvent.ModifierFlags,
+        onFirstLine: @autoclosure () -> Bool, onLastLine: @autoclosure () -> Bool
+    ) -> Int? {
+        let direction: Int
+        switch keyCode {
+        case 125: direction = +1
+        case 126: direction = -1
+        default: return nil
+        }
+        // Arrow keys also carry .numericPad / .function; only the user-held
+        // modifiers matter.
+        let held = modifiers.intersection([.command, .option, .control, .shift])
+        if held == .option { return direction }
+        guard held.isEmpty else { return nil }
+        let atEdge = direction > 0 ? onLastLine() : onFirstLine()
+        return atEdge ? direction : nil
     }
 
     override func becomeFirstResponder() -> Bool {

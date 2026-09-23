@@ -173,7 +173,9 @@ struct PGWireIO {
             case .authentication(let code, var data):
                 switch code {
                 case 0:
-                    break
+                    guard Self.acceptsAuthenticationOk(scram: scram) else {
+                        throw PGWireError.authenticationFailed("server skipped SCRAM verification")
+                    }
                 case 3:
                     try await outbound.write(PGFrontend.password(try requirePassword(endpoint)))
                 case 5:
@@ -200,9 +202,13 @@ struct PGWireIO {
                     try await outbound.write(PGFrontend.saslResponse(Array(final.utf8)))
                 case 12:
                     let serverFinal = data.readString(length: data.readableBytes) ?? ""
-                    guard let client = scram, client.verify(serverFinal: serverFinal) else {
+                    guard var client = scram, client.hasSentFinal else {
+                        throw PGWireError.protocolViolation("unexpected SASLFinal")
+                    }
+                    guard client.verify(serverFinal: serverFinal) else {
                         throw PGWireError.authenticationFailed("server signature mismatch")
                     }
+                    scram = client
                 case 7, 8: throw PGWireError.unsupportedAuthentication("GSSAPI")
                 case 9: throw PGWireError.unsupportedAuthentication("SSPI")
                 case 2: throw PGWireError.unsupportedAuthentication("Kerberos V5")
@@ -224,6 +230,14 @@ struct PGWireIO {
                 continue
             }
         }
+    }
+
+    /// Once SCRAM has started, AuthenticationOk is only trusted after the
+    /// server proved it knows the password (a verified SASLFinal) — otherwise
+    /// an impostor could stop the exchange after SASLContinue.
+    static func acceptsAuthenticationOk(scram: PGScramSHA256?) -> Bool {
+        guard let scram else { return true }
+        return scram.serverVerified
     }
 
     private func requirePassword(_ endpoint: PGWireEndpoint) throws -> String {

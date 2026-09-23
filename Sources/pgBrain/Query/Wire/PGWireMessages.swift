@@ -52,6 +52,7 @@ struct PGServerError: Error, Sendable, LocalizedError, Equatable {
 enum PGWireError: Error, LocalizedError, Sendable, Equatable {
     case protocolViolation(String)
     case connectionClosed
+    case transactionLost
     case sslRefused
     case unsupportedAuthentication(String)
     case authenticationFailed(String)
@@ -62,6 +63,7 @@ enum PGWireError: Error, LocalizedError, Sendable, Equatable {
         switch self {
         case .protocolViolation(let what): return "Protocol error: \(what)"
         case .connectionClosed: return "The session's connection was lost. The next run opens a fresh session (any open transaction was rolled back by the server)."
+        case .transactionLost: return "Connection lost — the open transaction was rolled back by the server. The statement was not sent; the next run opens a fresh session."
         case .sslRefused: return "The server does not accept SSL connections, but the connection's SSL mode requires it."
         case .unsupportedAuthentication(let method): return "Unsupported authentication method: \(method)"
         case .authenticationFailed(let why): return "Authentication failed: \(why)"

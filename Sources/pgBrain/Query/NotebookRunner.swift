@@ -177,6 +177,7 @@ enum NotebookRunner {
                 return
             }
             fail(results, message: describe(error))
+            if isSessionLoss(error) { weak.value?.appliedSearchPath = .none }
             weak.value?.syncTransaction(session.transactionStatus)
             return
         }
@@ -293,7 +294,7 @@ enum NotebookRunner {
                 return .unsupported
             }
             let message = describe(error)
-            if case PGWireError.connectionClosed = error {
+            if isSessionLoss(error) {
                 weak.value?.syncTransaction(.idle)
                 weak.value?.appliedSearchPath = .none
             }
@@ -368,38 +369,43 @@ enum NotebookRunner {
         var failedAt = plans.count
         do {
             try await client.withConnection { conn in
-                _ = try await conn.query(PostgresQuery(unsafeSQL: "BEGIN"), logger: pgbrainQuietLogger)
-                if let sp = searchPath {
-                    _ = try await conn.query(
-                        PostgresQuery(unsafeSQL: "SET LOCAL search_path TO \(SQLIdent.quote(sp))"),
-                        logger: pgbrainQuietLogger
-                    )
-                }
-                for (i, (sql, result)) in zip(plans, results).enumerated() {
-                    let started = Date()
-                    do {
-                        let qr = try await QueryRunner.runOnConnection(sql, on: conn)
-                        await MainActor.run {
-                            result.status = .success(qr)
-                            result.finishedAt = Date()
-                        }
-                        record(sql, started: started, service: service, success: true, error: nil, rows: qr.rowsAffected)
-                    } catch {
-                        let msg = PostgresErrorMessage.describe(error)
-                        failureMessage = msg
-                        failedAt = i
-                        await MainActor.run {
-                            result.status = .failure(msg)
-                            result.finishedAt = Date()
-                        }
-                        record(sql, started: started, service: service, success: false, error: msg, rows: nil)
-                        break
+                do {
+                    _ = try await conn.query(PostgresQuery(unsafeSQL: "BEGIN"), logger: pgbrainQuietLogger)
+                    if let sp = searchPath {
+                        _ = try await conn.query(
+                            PostgresQuery(unsafeSQL: "SET LOCAL search_path TO \(SQLIdent.quote(sp))"),
+                            logger: pgbrainQuietLogger
+                        )
                     }
-                }
-                if failureMessage == nil {
-                    _ = try await conn.query(PostgresQuery(unsafeSQL: "COMMIT"), logger: pgbrainQuietLogger)
-                } else {
-                    _ = try? await conn.query(PostgresQuery(unsafeSQL: "ROLLBACK"), logger: pgbrainQuietLogger)
+                    for (i, (sql, result)) in zip(plans, results).enumerated() {
+                        let started = Date()
+                        do {
+                            let qr = try await QueryRunner.runOnConnection(sql, on: conn)
+                            await MainActor.run {
+                                result.status = .success(qr)
+                                result.finishedAt = Date()
+                            }
+                            record(sql, started: started, service: service, success: true, error: nil, rows: qr.rowsAffected)
+                        } catch {
+                            let msg = PostgresErrorMessage.describe(error)
+                            failureMessage = msg
+                            failedAt = i
+                            await MainActor.run {
+                                result.status = .failure(msg)
+                                result.finishedAt = Date()
+                            }
+                            record(sql, started: started, service: service, success: false, error: msg, rows: nil)
+                            break
+                        }
+                    }
+                    if failureMessage == nil {
+                        _ = try await conn.query(PostgresQuery(unsafeSQL: "COMMIT"), logger: pgbrainQuietLogger)
+                    } else {
+                        await PooledTransaction.rollbackOrDiscard(conn)
+                    }
+                } catch {
+                    await PooledTransaction.rollbackOrDiscard(conn)
+                    throw error
                 }
             }
             for r in results.dropFirst(failedAt + 1) {
@@ -427,12 +433,33 @@ enum NotebookRunner {
     /// has fallen back to pooled execution.
     private static func usableSession(_ weak: WeakNotebook, service: ConnectionService) async throws -> ScratchpadSession? {
         guard let reason = weak.value.map({ $0.sessionUnavailableReason }), reason == nil else { return nil }
-        if let existing = weak.value?.session, !existing.isClosed { return existing }
+        if let existing = weak.value?.session, !existing.isClosed {
+            guard service.connection.sshEnabled else { return existing }
+            // A restarted ssh tunnel listens on a new local port; the session
+            // captured the old one and would get "connection refused" forever.
+            let target = try await ConnectionService.openEndpoint(for: service.connection, owner: service.scratchpadTunnelOwner)
+            if !endpointMoved(existing.endpoint, to: target) { return existing }
+            Log.connection.notice("SSH tunnel moved to port \(target.port, privacy: .public); rebuilding the scratchpad session")
+            let wasInTransaction = existing.transactionStatus != .idle
+            let endpoint = try await endpoint(for: service)
+            guard let notebook = weak.value else { return nil }
+            let session = ScratchpadSession(endpoint: endpoint)
+            notebook.attach(session: session)
+            notebook.syncTransaction(.idle)
+            notebook.sessionNotice = wasInTransaction
+                ? "Reconnected through a restarted SSH tunnel — the open transaction was rolled back by the server, and temp tables and settings are gone."
+                : "Reconnected through a restarted SSH tunnel — temp tables and session settings are gone."
+            return session
+        }
         let endpoint = try await endpoint(for: service)
         guard let notebook = weak.value else { return nil }
         let session = ScratchpadSession(endpoint: endpoint)
         notebook.attach(session: session)
         return session
+    }
+
+    static func endpointMoved(_ current: PGWireEndpoint, to target: ConnectionService.Endpoint) -> Bool {
+        current.host != target.host || current.port != target.port
     }
 
     static func endpoint(for service: ConnectionService) async throws -> PGWireEndpoint {
@@ -489,6 +516,11 @@ enum NotebookRunner {
         ]
         if control.contains(first) { return false }
         return SQLSafety.classify(sql) != .readOnly
+    }
+
+    private static func isSessionLoss(_ error: any Error) -> Bool {
+        guard let wire = error as? PGWireError else { return false }
+        return wire == .connectionClosed || wire == .transactionLost
     }
 
     private static func isCancellation(_ error: any Error) -> Bool {

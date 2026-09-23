@@ -75,6 +75,7 @@ enum UpdateApplier {
         case notEditable
         case unknownPrimaryKeyColumn(String)
         case staleRow(String)
+        case ambiguousRow(String, Int)
         case missingRowLocator(Int)
 
         var errorDescription: String? {
@@ -85,6 +86,8 @@ enum UpdateApplier {
                 return "Primary-key column \"\(name)\" isn't in the loaded result set."
             case .staleRow(let row):
                 return "The row \(row) was changed or deleted by someone else since this grid loaded. Nothing was saved — reload to see the current data, then re-apply."
+            case .ambiguousRow(let row, let count):
+                return "The row \(row) matches \(count) rows (inherited child tables can repeat a key). Nothing was saved."
             case .missingRowLocator(let index):
                 return "Row \(index + 1) has no physical locator; reload the grid and try again."
             }
@@ -108,9 +111,23 @@ enum UpdateApplier {
     struct Outcome: Sendable, Equatable {
         var updatedRows: [Int: [String?]] = [:]
         var updatedLocators: [Int: String] = [:]
-        var insertedRows: [[String?]] = []
-        var insertedLocators: [String?] = []
+        /// One entry per planned insert, in draft order; nil when the server
+        /// stored no row (a BEFORE trigger returned NULL, e.g. routing it
+        /// into a child table).
+        var insertedRowsByDraft: [[String?]?] = []
+        var insertedLocatorsByDraft: [String?] = []
         var deletedRows: [Int] = []
+
+        /// Positional view for callers that splice by index: only the
+        /// leading drafts that each got a row back, so a suppressed insert
+        /// can never shift a later result onto the wrong draft.
+        var insertedRows: [[String?]] {
+            Array(insertedRowsByDraft.prefix(while: { $0 != nil }).compactMap { $0 })
+        }
+
+        var insertedLocators: [String?] {
+            Array(insertedLocatorsByDraft.prefix(insertedRows.count))
+        }
     }
 
     // MARK: - Planning
@@ -242,7 +259,17 @@ enum UpdateApplier {
             guard del.rowIndex >= 0, del.rowIndex < originalRows.count else { continue }
             var binds: [String?] = []
             let (whereIdentity, label) = try locate(del.rowIndex, binds: &binds)
-            let sql = "DELETE FROM \(qualified)\nWHERE \(whereIdentity)"
+            var pieces = [whereIdentity]
+            // A ctid can be reused by a different row after VACUUM; only
+            // delete if the row still holds everything the grid showed.
+            if identity == .physical {
+                let row = originalRows[del.rowIndex]
+                for (idx, column) in table.columns.enumerated() where idx < row.count {
+                    binds.append(row[idx])
+                    pieces.append("\(RowsFetcher.columnExpression(column, spatial: spatial)) IS NOT DISTINCT FROM $\(binds.count)::text")
+                }
+            }
+            let sql = "DELETE FROM \(qualified)\nWHERE \(pieces.joined(separator: "\n  AND "))"
             out.append(Statement(kind: .delete(rowIndex: del.rowIndex), sql: sql, binds: binds, rowLabel: label))
         }
         return out
@@ -336,56 +363,44 @@ enum UpdateApplier {
         let physical = RowsFetcher.RowIdentity.resolve(for: table) == .physical
         let logger = pgbrainQuietLogger
 
-        do {
-            return try await client.withTransaction(logger: logger) { connection in
-                if let opID = operationID, let tracker {
-                    let pid = try await OperationsHelpers.fetchBackendPID(connection, logger: logger)
-                    let cancelHandler: @Sendable () async -> Void = { [weak client] in
-                        guard let client else { return }
-                        _ = try? await client.withConnection { sister in
-                            _ = try await sister.query(
-                                PostgresQuery(unsafeSQL: "SELECT pg_cancel_backend(\(pid))"),
-                                logger: logger
-                            )
-                        }
-                    }
-                    Task { @MainActor in
-                        tracker.attachCancellation(toOperationID: opID, pid: pid, handler: cancelHandler)
-                    }
+        return try await PooledTransaction.run(client: client, operationID: operationID, tracker: tracker) { connection in
+            var outcome = Outcome()
+            for statement in statements {
+                var binds = PostgresBindings()
+                for b in statement.binds {
+                    if let b { binds.append(b) } else { binds.appendNull() }
                 }
-                var outcome = Outcome()
-                for statement in statements {
-                    var binds = PostgresBindings()
-                    for b in statement.binds {
-                        if let b { binds.append(b) } else { binds.appendNull() }
+                let result = try await connection.query(
+                    PostgresQuery(unsafeSQL: statement.sql, binds: binds), logger: logger
+                ).get()
+                switch statement.kind {
+                case .update(let rowIndex):
+                    guard let row = result.rows.first else { throw Failure.staleRow(statement.rowLabel) }
+                    guard result.rows.count == 1 else {
+                        throw Failure.ambiguousRow(statement.rowLabel, result.rows.count)
                     }
-                    let result = try await connection.query(
-                        PostgresQuery(unsafeSQL: statement.sql, binds: binds), logger: logger
-                    ).get()
-                    switch statement.kind {
-                    case .update(let rowIndex):
-                        guard let row = result.rows.first else { throw Failure.staleRow(statement.rowLabel) }
-                        let random = PostgresRandomAccessRow(row)
-                        outcome.updatedRows[rowIndex] = RowsFetcher.decodeText(random, count: columnCount)
-                        if physical, let loc = RowsFetcher.decodeText(random, at: columnCount) {
-                            outcome.updatedLocators[rowIndex] = loc
-                        }
-                    case .insert:
-                        guard let row = result.rows.first else { continue }
-                        let random = PostgresRandomAccessRow(row)
-                        outcome.insertedRows.append(RowsFetcher.decodeText(random, count: columnCount))
-                        outcome.insertedLocators.append(physical ? RowsFetcher.decodeText(random, at: columnCount) : nil)
-                    case .delete(let rowIndex):
-                        if (result.metadata.rows ?? 0) != 1 { throw Failure.staleRow(statement.rowLabel) }
-                        outcome.deletedRows.append(rowIndex)
+                    let random = PostgresRandomAccessRow(row)
+                    outcome.updatedRows[rowIndex] = RowsFetcher.decodeText(random, count: columnCount)
+                    if physical, let loc = RowsFetcher.decodeText(random, at: columnCount) {
+                        outcome.updatedLocators[rowIndex] = loc
                     }
+                case .insert:
+                    guard let row = result.rows.first else {
+                        outcome.insertedRowsByDraft.append(nil)
+                        outcome.insertedLocatorsByDraft.append(nil)
+                        continue
+                    }
+                    let random = PostgresRandomAccessRow(row)
+                    outcome.insertedRowsByDraft.append(RowsFetcher.decodeText(random, count: columnCount))
+                    outcome.insertedLocatorsByDraft.append(physical ? RowsFetcher.decodeText(random, at: columnCount) : nil)
+                case .delete(let rowIndex):
+                    let affected = result.metadata.rows ?? 0
+                    if affected == 0 { throw Failure.staleRow(statement.rowLabel) }
+                    if affected != 1 { throw Failure.ambiguousRow(statement.rowLabel, affected) }
+                    outcome.deletedRows.append(rowIndex)
                 }
-                return outcome
             }
-        } catch let txError as PostgresTransactionError {
-            // withTransaction wraps a thrown closure error; surface the real
-            // cause (our Failure / the server's PSQLError).
-            throw txError.closureError ?? txError
+            return outcome
         }
     }
 }

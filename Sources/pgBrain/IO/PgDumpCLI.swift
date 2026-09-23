@@ -349,12 +349,85 @@ enum PgDumpCLI {
         let started = Date()
         let knownVersion = await resolvedServerVersion(serverVersionNum, connection)
         let binary = try await findBinary(named: "pg_dump", serverVersionNum: knownVersion)
-        var args = dumpArguments(connection: connection, format: format,
-                                 destinationPath: destination.path, extraArgs: extraArgs)
         return try await withTunnel(for: connection) { tunnelPort in
-            if tunnelPort != nil { args.removeAll { $0.hasPrefix("--port=") } }
-            return try await runTool(binary: binary, args: args, connection: connection, password: password,
-                                     tunnelPort: tunnelPort, output: destination, started: started)
+            try await dumpAtomically(binary: binary, connection: connection, password: password, format: format,
+                                     destination: destination, extraArgs: extraArgs,
+                                     tunnelPort: tunnelPort, started: started)
+        }
+    }
+
+    /// Runs pg_dump into a private sibling of `destination` and only swaps it
+    /// into place on success, so a failed or cancelled dump never destroys a
+    /// previous good dump at that path.
+    static func dumpAtomically(
+        binary: URL, connection: Connection, password: String, format: Format,
+        destination: URL, extraArgs: [String], tunnelPort: Int?, started: Date
+    ) async throws -> Result {
+        let staging = try AtomicOutput(destination: destination, isDirectory: format == .directory)
+        var args = dumpArguments(connection: connection, format: format,
+                                 destinationPath: staging.temporary.path, extraArgs: extraArgs)
+        if tunnelPort != nil { args.removeAll { $0.hasPrefix("--port=") } }
+        do {
+            let result = try await runTool(binary: binary, args: args, connection: connection, password: password,
+                                           tunnelPort: tunnelPort, output: staging.temporary, started: started)
+            try Task.checkCancellation()
+            try staging.commit()
+            return result
+        } catch {
+            staging.discard()
+            throw error
+        }
+    }
+
+    /// A temporary sibling of the final output path (same directory, so the
+    /// final rename stays on one volume and is atomic).
+    struct AtomicOutput {
+        let destination: URL
+        let temporary: URL
+        let isDirectory: Bool
+
+        init(destination: URL, isDirectory: Bool) throws {
+            self.destination = destination
+            self.isDirectory = isDirectory
+            let name = ".\(destination.lastPathComponent).pgbrain-\(UUID().uuidString.prefix(8)).partial"
+            temporary = destination.deletingLastPathComponent().appendingPathComponent(name)
+            // pg_dump -Fd insists on creating the directory itself (with 0700);
+            // for single-file formats pre-create the file 0600 so the dump is
+            // never world-readable while it's being written.
+            if !isDirectory {
+                try AppSupport.createPrivateFile(at: temporary, contents: Data())
+            }
+        }
+
+        func commit() throws {
+            let fm = FileManager.default
+            if !isDirectory {
+                guard rename(temporary.path, destination.path) == 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                return
+            }
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: destination.path, isDirectory: &isDir) else {
+                try fm.moveItem(at: temporary, to: destination)
+                return
+            }
+            // A directory can't be renamed over a non-empty one; park the old
+            // dump beside it and only delete it once the new one is in place.
+            let parked = destination.deletingLastPathComponent()
+                .appendingPathComponent(".\(destination.lastPathComponent).pgbrain-\(UUID().uuidString.prefix(8)).old")
+            try fm.moveItem(at: destination, to: parked)
+            do {
+                try fm.moveItem(at: temporary, to: destination)
+            } catch {
+                try? fm.moveItem(at: parked, to: destination)
+                throw error
+            }
+            try? fm.removeItem(at: parked)
+        }
+
+        func discard() {
+            try? FileManager.default.removeItem(at: temporary)
         }
     }
 
