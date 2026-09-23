@@ -490,6 +490,7 @@ extension DataGridView {
             let rect = t.frameOfCell(atColumn: tableCol, row: visibleRow)
             let cols = page.columns
             let schema = self.schema
+            let openedGeneration = pageGeneration
             let completions: (String, String, Int) -> [CompletionItem] = { partial, _, _ in
                 SQLCompletionProvider.items(for: partial, in: schema, context: .expression(columns: cols))
             }
@@ -507,11 +508,21 @@ extension DataGridView {
                 }
             ) { [weak self] typed in
                 guard let self else { return }
+                // A page load while the popover was open re-indexes the rows;
+                // `source` would now name a different row.
+                guard Self.editorCommitIsCurrent(opened: openedGeneration, now: self.pageGeneration) else {
+                    self.onMessage?("The page reloaded while the editor was open — that edit wasn't applied.", true)
+                    return
+                }
                 self.commit(sourceRow: source, dataCol: dataCol, typed: typed)
                 if fromKeyboard {
                     self.gridMove(rowDelta: 1, colDelta: 0, extend: false, wrap: false)
                 }
             }
+        }
+
+        nonisolated static func editorCommitIsCurrent(opened: Int?, now: Int?) -> Bool {
+            opened == now
         }
 
         /// Stage a value. Editing a cell back to its server value un-stages
