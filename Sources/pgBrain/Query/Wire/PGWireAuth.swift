@@ -26,6 +26,8 @@ struct PGScramSHA256 {
     let username: String
     private(set) var authMessage = ""
     private(set) var saltedPassword: [UInt8] = []
+    private(set) var hasSentFinal = false
+    private(set) var serverVerified = false
 
     init(password: String, clientNonce: String? = nil, username: String = "") {
         self.password = password
@@ -44,26 +46,30 @@ struct PGScramSHA256 {
 
     mutating func clientFinalMessage(serverFirst: String) throws -> String {
         let attrs = Self.attributes(serverFirst)
-        guard let nonce = attrs["r"], nonce.hasPrefix(clientNonce),
+        guard let nonce = attrs["r"], nonce.hasPrefix(clientNonce), nonce.count > clientNonce.count,
               let saltB64 = attrs["s"], let salt = Data(base64Encoded: saltB64),
               let iterText = attrs["i"], let iterations = Int(iterText), iterations > 0
         else { throw PGWireError.authenticationFailed("malformed SCRAM server-first message") }
         saltedPassword = Self.pbkdf2(password: Array(password.utf8), salt: Array(salt), rounds: iterations)
+        guard !saltedPassword.isEmpty else { throw PGWireError.authenticationFailed("SCRAM key derivation failed") }
         let clientFinalWithoutProof = "c=biws,r=\(nonce)"
         authMessage = clientFirstBare + "," + serverFirst + "," + clientFinalWithoutProof
         let clientKey = Self.hmac(key: saltedPassword, Array("Client Key".utf8))
         let storedKey = Array(SHA256.hash(data: clientKey))
         let signature = Self.hmac(key: storedKey, Array(authMessage.utf8))
         let proof = zip(clientKey, signature).map { $0 ^ $1 }
+        hasSentFinal = true
         return clientFinalWithoutProof + ",p=" + Data(proof).base64EncodedString()
     }
 
-    func verify(serverFinal: String) -> Bool {
+    mutating func verify(serverFinal: String) -> Bool {
+        guard hasSentFinal, !saltedPassword.isEmpty else { return false }
         let attrs = Self.attributes(serverFinal)
         guard let v = attrs["v"], let expected = Data(base64Encoded: v) else { return false }
         let serverKey = Self.hmac(key: saltedPassword, Array("Server Key".utf8))
         let signature = Self.hmac(key: serverKey, Array(authMessage.utf8))
-        return Array(expected) == signature
+        serverVerified = Array(expected) == signature
+        return serverVerified
     }
 
     private static func attributes(_ message: String) -> [String: String] {
