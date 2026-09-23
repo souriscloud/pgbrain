@@ -84,6 +84,9 @@ final class WorkspaceState {
         var isPinned: Bool = false
         /// The table behind this tab vanished on the last schema reload.
         var isStale: Bool = false
+        /// Pane, grid/form/map mode, form row and grid scroll/cursor for
+        /// `.table` tabs, kept here so switching tabs doesn't reset them.
+        let tableViewState = TableTabViewState()
 
         init(kind: TabKind, title: String) {
             self.kind = kind

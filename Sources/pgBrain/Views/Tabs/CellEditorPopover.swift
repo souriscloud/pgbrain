@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+/// Associated-object key tying a popover to its close observer (the
+/// delegate property is weak).
+nonisolated(unsafe) private var closeObserverKey: UInt8 = 0
+
 /// Popover-based cell editor. Thin host around the app-wide
 /// `TypedValueEditor`, so a grid cell edits through the exact same typed
 /// control family as every dialog and form — date/time pickers, enum
@@ -11,30 +15,15 @@ import SwiftUI
 /// edit buffer.
 @MainActor
 enum CellEditorPopover {
-    /// True while a cell-edit popover is on screen. The data grid reads
-    /// this so its key-equivalent handler (⌘C / ⌘Z / ⌃⌘N) stands down
-    /// while a cell is being edited — otherwise ⌘C inside the popover is
-    /// grabbed by the table and copies the whole row instead of the
-    /// editor's selection. The popover is `.semitransient`, so the parent
-    /// table window stays key and would otherwise win the key equivalent.
-    static private(set) var isPresenting = false
-
-    /// Strongly held so the popover's weak `delegate` survives; flips
-    /// `isPresenting` back off on any close path (Save / Cancel / Esc /
-    /// click-away).
+    /// Keeps the popover delegate alive and reports every close path
+    /// (Save / Cancel / Esc / click-away) so the grid can take focus back.
     private final class CloseObserver: NSObject, NSPopoverDelegate {
+        let onClose: @MainActor () -> Void
+        init(onClose: @escaping @MainActor () -> Void) { self.onClose = onClose }
         func popoverDidClose(_ notification: Notification) {
-            CellEditorPopover.isPresenting = false
+            MainActor.assumeIsolated { onClose() }
         }
     }
-    private static let closeObserver = CloseObserver()
-
-    #if DEBUG
-    /// Test seam: drive the presenting flag without spinning up a real
-    /// popover + window, so the grid's key-equivalent gating can be
-    /// exercised headlessly under `swift test`.
-    static func _setPresentingForTesting(_ value: Bool) { isPresenting = value }
-    #endif
 
     static func show(
         for column: ColumnNode,
@@ -43,6 +32,8 @@ enum CellEditorPopover {
         completions: ((String, String, Int) -> [CompletionItem])? = nil,
         relativeTo rect: NSRect,
         of view: NSView,
+        caretAtEnd: Bool = false,
+        onClose: @escaping @MainActor () -> Void = {},
         onCommit: @escaping (TypedInputValue) -> Void
     ) {
         let popover = NSPopover()
@@ -71,8 +62,9 @@ enum CellEditorPopover {
         default:              host.preferredContentSize = NSSize(width: 380, height: 190)
         }
         popover.contentViewController = host
-        popover.delegate = closeObserver
-        isPresenting = true
+        let observer = CloseObserver(onClose: onClose)
+        popover.delegate = observer
+        objc_setAssociatedObject(popover, &closeObserverKey, observer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         popover.show(relativeTo: rect, of: view, preferredEdge: .maxY)
 
         // Hand the popover its own key focus. Popovers don't take key on
@@ -86,6 +78,14 @@ enum CellEditorPopover {
             window.makeKey()
             window.recalculateKeyViewLoop()
             window.selectNextKeyView(nil)
+            if caretAtEnd {
+                // Typing into a grid cell seeds the editor with that first
+                // character; keep it instead of leaving it selected, where
+                // the next keystroke would replace it.
+                DispatchQueue.main.async {
+                    (window.firstResponder as? NSTextView)?.moveToEndOfDocument(nil)
+                }
+            }
         }
     }
 }

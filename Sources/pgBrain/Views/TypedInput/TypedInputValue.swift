@@ -39,7 +39,7 @@ enum TypedInputValue: Equatable, Sendable {
         case .defaultKeyword:     return "DEFAULT"
         case .expression(let e):  return e
         case .literal(let s):
-            let quoted = "'" + s.replacingOccurrences(of: "'", with: "''") + "'"
+            let quoted = UpdateApplier.quoteLiteral(s)
             return cast ? "\(quoted)::\(typeName)" : quoted
         }
     }
@@ -94,7 +94,7 @@ enum InputKind: Equatable, Sendable {
 
         // Strip a trailing type modifier "(...)" for keyword matching, but
         // keep the original around for enum lookup (enums never carry one).
-        let base = lower.contains("(") ? String(lower[..<lower.firstIndex(of: "(")!]) : lower
+        let base = lower.firstIndex(of: "(").map { String(lower[..<$0]) } ?? lower
         let baseTrimmed = base.trimmingCharacters(in: .whitespaces)
 
         switch baseTrimmed {
