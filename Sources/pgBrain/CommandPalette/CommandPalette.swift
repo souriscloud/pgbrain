@@ -35,6 +35,12 @@ struct CommandItem: Identifiable {
     let category: Category
     let shortcut: String?      // visual hint only — e.g. "⌘N"
     let action: () -> Void
+    /// Schema for schema-qualified matching: with a qualifier set, a query
+    /// like `pub.us` matches `pub` against it and `us` against the title.
+    var qualifier: String? = nil
+    /// Added to the match score (and used as the tiebreak for an empty
+    /// query) so recents float up and hidden-schema objects sink.
+    var rankBias: Int = 0
 }
 
 /// Scoring + filtering for the palette. Pure & main-actor-agnostic so
@@ -54,6 +60,7 @@ enum CommandMatcher {
                     if a.category.sortOrder != b.category.sortOrder {
                         return a.category.sortOrder < b.category.sortOrder
                     }
+                    if a.rankBias != b.rankBias { return a.rankBias > b.rankBias }
                     return a.title.localizedCaseInsensitiveCompare(b.title) == .orderedAscending
                 }
                 .prefix(limit)
@@ -62,7 +69,14 @@ enum CommandMatcher {
 
         var scored: [(item: CommandItem, score: Int)] = []
         scored.reserveCapacity(items.count)
+        let qualified = q.contains(".") ? SchemaIndex.parse(q) : nil
         for item in items {
+            if let qualified, let qualifier = item.qualifier {
+                if let s = qualifiedScore(qualified, qualifier: qualifier, title: item.title) {
+                    scored.append((item, s + item.rankBias))
+                }
+                continue
+            }
             let hay = item.title + " " + (item.subtitle ?? "") + " " + item.category.rawValue
             // Strict subsequence first, then peel trailing chars off
             // the needle so over-typed queries like "connections" still
@@ -81,7 +95,7 @@ enum CommandMatcher {
                 attempt.removeLast()
                 penalty += 8
             }
-            if let s = matched { scored.append((item, s)) }
+            if let s = matched { scored.append((item, s + item.rankBias)) }
         }
         return scored
             .sorted { a, b in
@@ -94,6 +108,72 @@ enum CommandMatcher {
             }
             .prefix(limit)
             .map { $0.item }
+    }
+
+    private static func qualifiedScore(_ q: SchemaIndex.ParsedQuery, qualifier: String, title: String) -> Int? {
+        var total = 0
+        if let schemaNeedle = q.schema {
+            guard let s = fuzzyScore(needle: schemaNeedle, haystack: SchemaIndex.lowered(qualifier)) else { return nil }
+            total += s / 2
+        }
+        guard !q.name.isEmpty else { return total }
+        guard let s = fuzzyScore(needle: q.name, haystack: SchemaIndex.lowered(title)) else { return nil }
+        return total + s
+    }
+
+    /// Byte-level fuzzy scorer shared by the palette and the sidebar
+    /// filter's `SchemaIndex`. Both inputs must already be lower-cased.
+    /// Returns nil when `needle` isn't a subsequence of `haystack`.
+    /// Contiguous substring hits dominate (prefix best), then word-boundary
+    /// and run-length bonuses for scattered subsequence hits.
+    static func fuzzyScore(needle n: [UInt8], haystack h: [UInt8]) -> Int? {
+        guard !n.isEmpty else { return 0 }
+        guard n.count <= h.count else { return nil }
+        if let pos = substringIndex(of: n, in: h) {
+            if pos == 0 { return 300 - min(h.count - n.count, 100) }
+            let boundary = isBoundary(h[pos - 1])
+            return (boundary ? 200 : 140) - min(pos, 40) - min(h.count - n.count, 40)
+        }
+        var s = 0
+        var hi = 0
+        var run = 0
+        for c in n {
+            var found = false
+            while hi < h.count {
+                let hc = h[hi]
+                hi += 1
+                if hc == c {
+                    run += 1
+                    s += 2 + min(run, 5)
+                    if hi == 1 || isBoundary(h[hi - 2]) { s += 8 }
+                    found = true
+                    break
+                }
+                run = 0
+            }
+            if !found { return nil }
+        }
+        return s - h.count / 8
+    }
+
+    static func substringIndex(of needle: [UInt8], in hay: [UInt8]) -> Int? {
+        guard !needle.isEmpty, needle.count <= hay.count else { return needle.isEmpty ? 0 : nil }
+        let first = needle[0]
+        var i = 0
+        let last = hay.count - needle.count
+        while i <= last {
+            if hay[i] == first {
+                var j = 1
+                while j < needle.count, hay[i + j] == needle[j] { j += 1 }
+                if j == needle.count { return i }
+            }
+            i += 1
+        }
+        return nil
+    }
+
+    private static func isBoundary(_ b: UInt8) -> Bool {
+        b == UInt8(ascii: "_") || b == UInt8(ascii: " ") || b == UInt8(ascii: ".") || b == UInt8(ascii: "-")
     }
 
     /// Returns nil if `needle` is not a subsequence of `haystack`.
@@ -154,19 +234,30 @@ enum CommandMatcher {
     /// Returns (lowerBound, upperBound) index ranges in `title` where
     /// the needle's characters matched, suitable for highlight rendering.
     static func matchedRanges(in title: String, needle: String) -> [Range<String.Index>] {
-        let q = needle.trimmingCharacters(in: .whitespaces).lowercased()
+        var q = needle.trimmingCharacters(in: .whitespaces).lowercased()
+        if let dot = q.lastIndex(of: ".") { q = String(q[q.index(after: dot)...]) }
         guard !q.isEmpty else { return [] }
         let lower = title.lowercased()
+        // Only safe when lower-casing kept the character count stable —
+        // otherwise the indices below would not line up with `title`.
+        guard lower.count == title.count else { return [] }
+        if let r = lower.range(of: q) {
+            let lo = title.index(title.startIndex, offsetBy: lower.distance(from: lower.startIndex, to: r.lowerBound))
+            let hi = title.index(lo, offsetBy: q.count)
+            return [lo..<hi]
+        }
         var ranges: [Range<String.Index>] = []
-        var titleIdx = lower.startIndex
+        var titleIdx = title.startIndex
+        var lowerIdx = lower.startIndex
         var qi = q.startIndex
-        while qi < q.endIndex, titleIdx < lower.endIndex {
-            if lower[titleIdx] == q[qi] {
-                let next = lower.index(after: titleIdx)
-                ranges.append(titleIdx..<next)
+        while qi < q.endIndex, lowerIdx < lower.endIndex {
+            let nextTitle = title.index(after: titleIdx)
+            if lower[lowerIdx] == q[qi] {
+                ranges.append(titleIdx..<nextTitle)
                 qi = q.index(after: qi)
             }
-            titleIdx = lower.index(after: titleIdx)
+            titleIdx = nextTitle
+            lowerIdx = lower.index(after: lowerIdx)
         }
         return qi == q.endIndex ? ranges : []
     }

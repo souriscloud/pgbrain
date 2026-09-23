@@ -61,7 +61,7 @@ final class CommandMatcherTests: XCTestCase {
 
     func testMatchedRanges() {
         let ranges = CommandMatcher.matchedRanges(in: "users", needle: "us")
-        XCTAssertEqual(ranges.count, 2)
+        XCTAssertEqual(ranges.count, 1, "contiguous hits highlight as one run")
         let title = "users"
         XCTAssertEqual(ranges.map { title[$0] }.joined(), "us")
         // No subsequence → no ranges; empty needle → no ranges.
@@ -102,6 +102,7 @@ final class CommandProvidersTests: XCTestCase {
             || id == "schemaadmin.showall"
             || id == "action.checkForUpdates"
             || id == "action.settings"
+            || id == "action.goToTable"
     }
 
     private func runSafeActions(_ items: [CommandItem]) {

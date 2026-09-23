@@ -57,6 +57,17 @@ final class SchemaVisibility {
         save()
     }
 
+    /// Replace the whole hidden set in one write (schema picker "show only",
+    /// the manager popover's bulk buttons).
+    func setHidden(_ schemas: Set<String>, connectionID: UUID) {
+        if schemas.isEmpty {
+            hidden.removeValue(forKey: connectionID)
+        } else {
+            hidden[connectionID] = schemas
+        }
+        save()
+    }
+
     func toggle(schema: String, connectionID: UUID) {
         setHidden(!isHidden(schema, connectionID: connectionID),
                   schema: schema, connectionID: connectionID)
