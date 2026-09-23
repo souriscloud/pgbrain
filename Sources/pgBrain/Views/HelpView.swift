@@ -227,6 +227,8 @@ private struct HelpWelcome: View {
                           body_: "Each database gets its own window with a schema sidebar, table tabs, and SQL notebooks.")
                 HelpPoint(icon: "command", lead: "Command Palette",
                           body_: "Press ⌘K for fuzzy access to tables, views, functions, ERDs, view modes, and every action.")
+                HelpPoint(icon: "hand.wave", lead: "Guided tour",
+                          body_: "Help ▸ Show Tour walks through a connection window step by step — sidebar, tabs, grid, staged changes and scratchpads.")
                 HelpPoint(icon: "bolt.fill", lead: "Fast by default",
                           body_: "Streaming queries, an auto-LIMIT safety net on bare SELECTs, and type-aware cell rendering.")
             }

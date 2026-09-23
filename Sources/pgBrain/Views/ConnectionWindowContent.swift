@@ -182,6 +182,7 @@ struct ConnectionWindowContent: View {
                 .overlay { ToastOverlay(center: service.toasts) }
             Divider()
             StatusFooter(service: service)
+                .onboardingAnchor(.statusFooter)
         }
         // Let the chrome bar draw up into the titlebar region (under the
         // traffic lights) instead of being pushed below it.
@@ -189,8 +190,28 @@ struct ConnectionWindowContent: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
+    /// The first window that finishes loading a schema shows the tour once.
+    /// Only the key window, so restoring several windows doesn't start
+    /// several tours at the same time.
+    private func offerTourIfFirstRun() {
+        guard !OnboardingTour.hasBeenSeen else { return }
+        #if DEBUG
+        if ShowcaseEnvironment.isActive { return }
+        #endif
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            guard !OnboardingTour.hasBeenSeen,
+                  AppDelegate.shared?.windowManager.keyService === service,
+                  service.workspace.onboardingStep == nil else { return }
+            OnboardingTour.start(in: service)
+        }
+    }
+
     private var withSchemaSheets: some View {
         chromeStack
+        .overlayPreferenceValue(OnboardingAnchorKey.self) { anchors in
+            OnboardingOverlay(service: service, anchors: anchors)
+        }
         .sheet(item: $copySource) { source in
             CrossDBCopyView(source: source, sourceService: service)
         }
@@ -490,9 +511,11 @@ struct ConnectionWindowContent: View {
         }
         .onChange(of: service.schemaState) { _, state in
             if state == .loaded {
+                let firstLoad = !hasLoadedSchema
                 hasLoadedSchema = true
                 reconcileTabs(with: service.schema)
                 if databases.isEmpty { refreshDatabases() }
+                if firstLoad { offerTourIfFirstRun() }
             }
         }
         .onChange(of: service.workspace.selectedID) { _, _ in
@@ -534,6 +557,7 @@ struct ConnectionWindowContent: View {
             if service.workspace.sidebarVisible {
                 sidebarPane
                     .frame(width: CGFloat(sidebarWidth))
+                    .onboardingAnchor(.sidebar)
                     .transition(.move(edge: .leading).combined(with: .opacity))
                 sidebarResizeHandle
             }
@@ -835,6 +859,7 @@ struct ConnectionWindowContent: View {
                     onSetHidden: { SchemaVisibility.shared.setHidden($0, connectionID: service.connection.id) },
                     onCollapseAll: { sidebar.collapseAll() }
                 )
+                .onboardingAnchor(.schemaPicker)
                 sidebarSearchField
                 sidebarOutline
                     .opacity(service.schemaState == .loading ? 0.55 : 1)
@@ -1104,6 +1129,7 @@ struct ConnectionWindowContent: View {
                     onRefresh: { refreshDatabases() },
                     onNewDatabase: { showCreateDatabase = true }
                 )
+                .onboardingAnchor(.database)
                 if let info = service.serverInfo {
                     Text("·").opacity(0.5)
                     Text(info.databaseSize).contentTransition(.numericText())
@@ -1286,14 +1312,17 @@ struct ConnectionWindowContent: View {
     @ViewBuilder
     private var workspacePane: some View {
         VStack(spacing: 0) {
-            TabStripView(workspace: service.workspace, appearance: appearance,
-                         onReveal: { revealInSidebar($0) })
-            Divider()
-            if service.workspace.selectedTab != nil {
-                BreadcrumbBar(service: service, workspace: service.workspace, databases: databases,
-                              onGoToTable: { CommandPaletteWindow.shared.present(mode: .goToTable) })
-                Divider().opacity(0.5)
+            VStack(spacing: 0) {
+                TabStripView(workspace: service.workspace, appearance: appearance,
+                             onReveal: { revealInSidebar($0) })
+                Divider()
+                if service.workspace.selectedTab != nil {
+                    BreadcrumbBar(service: service, workspace: service.workspace, databases: databases,
+                                  onGoToTable: { CommandPaletteWindow.shared.present(mode: .goToTable) })
+                    Divider().opacity(0.5)
+                }
             }
+            .onboardingAnchor(.tabs)
             if let selected = service.workspace.selectedTab {
                 switch selected.kind {
                 case .table(let table):

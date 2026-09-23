@@ -96,6 +96,16 @@ struct pgBrainApp: App {
                     AppDelegate.shared?.showHelp()
                 }
                 .keyboardShortcut("?", modifiers: [.command])
+                Button("Show Tour") {
+                    if let service = AppDelegate.shared?.windowManager.keyService {
+                        OnboardingTour.start(in: service)
+                    } else {
+                        let alert = NSAlert()
+                        alert.messageText = "Open a connection to take the tour"
+                        alert.informativeText = "The tour walks through a connection window. Open one from the Welcome window, then choose Help ▸ Show Tour."
+                        alert.runModal()
+                    }
+                }
                 Divider()
                 Button("Send Feedback…") {
                     AppDelegate.shared?.showFeedback()

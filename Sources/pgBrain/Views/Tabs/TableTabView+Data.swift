@@ -83,6 +83,7 @@ extension TableTabView {
             )
         } else {
             grid(visible: visible, sourceIndices: sourceIndices)
+                .onboardingAnchor(.grid)
         }
     }
 

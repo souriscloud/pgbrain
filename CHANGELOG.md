@@ -13,6 +13,13 @@ database, a spreadsheet-grade grid, real scratchpad sessions, sturdier
 connections, and a long list of fixes for bugs that could silently lose or
 mangle data. Recommended for everyone.
 
+### Welcome tour
+- **A guided tour of the connection window** the first time you connect:
+  nine short steps that spotlight the sidebar, schema picker, tabs and
+  breadcrumbs, Go to Table, the grid, staged changes, scratchpads and the
+  database switcher, with the shortcuts worth learning. Arrow keys to move,
+  Esc to skip; Help ▸ Show Tour replays it any time.
+
 ### Navigation
 - **The sidebar stays how you left it.** Expanded and collapsed schemas,
   selection and scroll position survive refreshes, tab switches and relaunch;

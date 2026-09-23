@@ -144,6 +144,8 @@ final class WorkspaceState {
     // MARK: Sidebar UI state (per window, persisted by SessionState)
 
     var sidebarVisible: Bool = true
+    /// Index into `OnboardingTour.steps` while the tour is showing.
+    var onboardingStep: Int?
     var sidebarFilter: String = ""
     var sidebarIncludeColumns: Bool = false
     /// Stable sidebar node ids the user has expanded. nil = never set,

@@ -191,6 +191,10 @@ struct TableTabView: View {
     }
 
     private var header: some View {
+        headerContent.onboardingAnchor(.tableHeader)
+    }
+
+    private var headerContent: some View {
         HStack(spacing: Tokens.Spacing.sm) {
             Image(systemName: "tablecells")
                 .foregroundStyle(.secondary)

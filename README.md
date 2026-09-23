@@ -62,6 +62,7 @@ More in [docs/screenshots](docs/screenshots/) (ERD, EXPLAIN plans, structure, co
 - 🪟 **One window per database.** Switch databases from the title bar; each opens in its own window. Multi-tab workspaces with preview tabs (single-click), pinned tabs, Close Others / to the Right, overflow menu, drag-reorder, rename + colour tags.
 - 🗂️ **Schema sidebar that stays put.** Remembers what you expanded, focuses on the schemas you pick, hides extension clutter, nests partitions, and has Pinned + Recent tables on top. Fuzzy filter (`pub.us` → `public.users`) that holds up on 10k+ tables.
 - 🧭 **Go anywhere fast.** ⌘O Go to Table (recents first), ⌘K for everything, ⌘[ / ⌘] back and forward (including FK jumps), and a `database ▸ schema ▸ table` breadcrumb with sibling menus.
+- 🧭 **Guided first-run tour.** A one-minute spotlight tour of the window and its shortcuts the first time you connect; Help ▸ Show Tour replays it.
 - ⌨️ **IDE keyboard model.** ⌘T new scratchpad in the selected schema, ⌘1–9 tab jump, ⌃1–9 window jump, ⌘B sidebar, ⌘R reload, ⌘F find, Return/Space in the tree — the muscle memory you already have.
 - 💾 **Saved workspaces + state restoration.** Snapshot a tab set, or just quit and relaunch to find every window and tab where you left it.
 

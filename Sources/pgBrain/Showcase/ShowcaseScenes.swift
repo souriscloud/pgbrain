@@ -60,6 +60,8 @@ final class ShowcaseScenes {
             ("08-structure", structure),
             ("10-activity", activity),
             ("09-connection-editor", connectionEditor),
+            ("11-tour", tour),
+            ("12-tour-sidebar", tourSidebar),
         ]
         for (name, scene) in scenes where only.isEmpty || only.contains(name) {
             ShowcaseLog.write("scene \(name)")
@@ -180,6 +182,21 @@ final class ShowcaseScenes {
         }
         window.makeFirstResponder(grid)
         try await capture("01-hero")
+    }
+
+    /// The first-run tour on the grid step, over the hero state.
+    private func tour() async throws {
+        if heroLoader == nil { try await hero() }
+        service.workspace.onboardingStep = 5
+        try await capture("11-tour")
+        service.workspace.onboardingStep = nil
+    }
+
+    private func tourSidebar() async throws {
+        if heroLoader == nil { try await hero() }
+        service.workspace.onboardingStep = 1
+        try await capture("12-tour-sidebar")
+        service.workspace.onboardingStep = nil
     }
 
     private func previewSQL() async throws {

@@ -56,6 +56,7 @@ struct TabStripView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .onboardingAnchor(.newTab)
             // ⌘N belongs to the menu's "New Connection…" item; the
             // tab-creation shortcut is ⌘T, owned by
             // ConnectionWindowContent's keyboardShortcuts block.
