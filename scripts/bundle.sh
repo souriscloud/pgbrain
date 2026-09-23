@@ -78,11 +78,11 @@ for target in \
     "${APP_DIR}/Contents/Frameworks/Sparkle.framework"
 do
     [[ -e "$target" ]] || continue
-    codesign --force --sign - --timestamp=none "$target" >/dev/null 2>&1 || true
+    codesign --force --sign - --timestamp=none "$target" >/dev/null 2>&1 || echo "  ! ad-hoc sign failed: $target" >&2
 done
 
 codesign --force --sign - \
-    --entitlements Resources/pgBrain.entitlements \
+    --entitlements Resources/pgBrain-dev.entitlements \
     --options runtime \
     --timestamp=none \
     "${APP_DIR}" >/dev/null 2>&1 || {

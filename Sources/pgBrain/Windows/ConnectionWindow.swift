@@ -51,6 +51,7 @@ enum ConnectionWindowFactory {
     }
 }
 
+@MainActor
 final class ConnectionWindowCloseObserver: NSObject, NSWindowDelegate {
     nonisolated(unsafe) static var assocKey: UInt8 = 0
     private weak var window: NSWindow?

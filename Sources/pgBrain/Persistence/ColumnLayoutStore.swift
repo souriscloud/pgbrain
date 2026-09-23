@@ -57,7 +57,7 @@ final class ColumnLayoutStore {
             let data = try JSONEncoder().encode(widths)
             try data.write(to: url, options: .atomic)
         } catch {
-            NSLog("pgBrain: ColumnLayoutStore.flush failed: \(error)")
+            Log.persistence.error("ColumnLayoutStore.flush failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 

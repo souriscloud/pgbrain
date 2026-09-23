@@ -69,7 +69,7 @@ final class AppSettings {
 
     /// Verbose Postgres logging. When false (default) we use the no-op
     /// logger to keep latency down; when true ConnectionService passes a
-    /// console-printing logger instead.
+    /// unified-logging logger (see `Log.postgresClientLogger`).
     var verbosePostgresLogging: Bool {
         didSet { defaults.set(verbosePostgresLogging, forKey: keyPrefix + "verbosePostgresLogging") }
     }
@@ -89,11 +89,6 @@ final class AppSettings {
     /// Nudge the editor font by `delta`, clamped. Used by ⌘+ / ⌘-.
     func bumpFontSize(by delta: Double) {
         editorFontSize = min(max(editorFontSize + delta, Self.fontRange.lowerBound), Self.fontRange.upperBound)
-    }
-
-    /// Sparkle update channel (used by iter-12).
-    var sparkleChannel: String {
-        didSet { defaults.set(sparkleChannel, forKey: keyPrefix + "sparkleChannel") }
     }
 
     /// Whole-app light/dark override. Persists the raw value; a change
@@ -131,7 +126,7 @@ final class AppSettings {
         self.psqlPath = d.string(forKey: "pgbrain.binaryOverride.psql") ?? ""
         self.verbosePostgresLogging = d.bool(forKey: "pgbrain.settings.verbosePostgresLogging")
         self.editorFontSize = (d.object(forKey: "pgbrain.settings.editorFontSize") as? Double) ?? 12
-        self.sparkleChannel = d.string(forKey: "pgbrain.settings.sparkleChannel") ?? "stable"
+        d.removeObject(forKey: "pgbrain.settings.sparkleChannel")
         self.appearance = (d.string(forKey: "pgbrain.settings.appearance")
             .flatMap(AppAppearance.init(rawValue:))) ?? .system
     }

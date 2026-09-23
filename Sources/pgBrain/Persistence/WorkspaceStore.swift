@@ -112,7 +112,7 @@ final class WorkspaceStore {
             let data = try JSONEncoder().encode(encoded)
             try data.write(to: url, options: .atomic)
         } catch {
-            NSLog("pgBrain: WorkspaceStore.flush failed: \(error)")
+            Log.persistence.error("WorkspaceStore.flush failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 

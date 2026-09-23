@@ -39,7 +39,7 @@ final class ConnectionStore {
             let data = try encoder.encode(connections)
             try data.write(to: url, options: [.atomic])
         } catch {
-            NSLog("pgBrain: failed to save connections: \(error)")
+            Log.persistence.error("failed to save connections: \(error.localizedDescription, privacy: .public)")
         }
     }
 

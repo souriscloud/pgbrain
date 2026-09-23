@@ -215,7 +215,7 @@ enum SQLScope {
         // We need a `.` immediately preceding the partial's start.
         guard i > 0, ns.character(at: i - 1) == 0x2E /* '.' */ else { return nil }
         // The identifier sitting in front of the `.`.
-        var j = i - 1
+        let j = i - 1
         var start = j
         while start > 0 {
             let c = ns.character(at: start - 1)

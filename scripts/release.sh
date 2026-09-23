@@ -3,7 +3,7 @@
 # pgBrain release pipeline.
 #
 # Steps:
-#   1. Preflight (gh, cert, notary, sparkle key, clean tree, tag free)
+#   1. Preflight (gh, cert, notary, sparkle key, tests, clean tree, CHANGELOG)
 #   2. Bump Info.plist version (scripts/bump.sh)
 #   3. swift build -c release + bundle the .app (scripts/bundle.sh release)
 #   4. codesign with Developer ID (env CODESIGN_IDENTITY)
@@ -11,8 +11,9 @@
 #   6. Build branded DMG (scripts/build-dmg.sh)
 #   7. codesign + notarize + staple the DMG
 #   8. sign_update against the DMG → EdDSA signature
-#   9. Append item to appcast.xml
+#   9. Prepend item to appcast.xml (keeps the newest $APPCAST_KEEP items)
 #  10. Commit Info.plist + appcast.xml, push, gh release create with DMG
+#      (release notes = the version's CHANGELOG.md section)
 #
 # Required: scripts/.env (see scripts/.env.example) — TEAM_ID,
 # CODESIGN_IDENTITY, NOTARYTOOL_PROFILE, GITHUB_REPO.
@@ -22,7 +23,9 @@
 #   scripts/release.sh minor         # 0.0.1 → 0.1.0
 #   scripts/release.sh major         # 0.0.1 → 1.0.0
 #   scripts/release.sh 1.2.3         # explicit
-#   scripts/release.sh patch --skip-notarize   # dry-run without Apple creds
+#   scripts/release.sh patch --skip-notarize   # dry run: builds + signs the DMG
+#                                              # ad-hoc, then stops — no appcast,
+#                                              # commit, tag, push or upload
 #   scripts/release.sh patch --skip-upload     # skip GitHub release publish
 
 set -euo pipefail
@@ -47,13 +50,20 @@ for var in TEAM_ID CODESIGN_IDENTITY NOTARYTOOL_PROFILE GITHUB_REPO; do
 done
 
 # --- Args ---
-BUMP_KIND="${1:-patch}"
+BUMP_KIND=""
 SKIP_NOTARIZE=0
 SKIP_UPLOAD=0
 for arg in "$@"; do
-    [[ "$arg" == "--skip-notarize" ]] && SKIP_NOTARIZE=1
-    [[ "$arg" == "--skip-upload" ]] && SKIP_UPLOAD=1
+    case "$arg" in
+        --skip-notarize) SKIP_NOTARIZE=1 ;;
+        --skip-upload) SKIP_UPLOAD=1 ;;
+        --*) echo "ERROR: unknown flag $arg" >&2; exit 1 ;;
+        *) [[ -z "$BUMP_KIND" ]] || { echo "ERROR: more than one version argument" >&2; exit 1; }
+           BUMP_KIND="$arg" ;;
+    esac
 done
+BUMP_KIND="${BUMP_KIND:-patch}"
+APPCAST_KEEP=10
 
 APP_NAME="pgBrain"
 APP_PATH="build/${APP_NAME}.app"
@@ -100,19 +110,17 @@ fi
 sparkle generate_keys -p >/dev/null 2>&1 \
     || error "Sparkle EdDSA private key missing from Keychain. Run: ./scripts/sparkle-tools.sh generate_keys"
 
-# Test gate (RELIMPR #3): a broken build shouldn't ship. Live since the
-# `pgBrainTests` target landed. The data-layer E2E tests need a Postgres to run
-# against (PGBRAIN_TEST_DSN, else a local pgbrain_demo); when none is reachable
-# they SKIP rather than fail, so this gate still passes on a DB-less box — it
-# catches build breaks and the always-on pure tests, and exercises the real
-# clone engine whenever a database is present.
-if [[ -d "Tests" ]] || grep -q '\.testTarget' Package.swift; then
-    info "Running test suite"
-    swift test >/dev/null || error "Tests failed — aborting release."
-    success "Tests passed"
-else
-    info "No test target present — skipping test gate (add one to enable)."
+# Test gate — the only automated check (there is no CI). The data-layer E2E
+# tests need a Postgres (PGBRAIN_TEST_DSN, else a local pgbrain_demo); with none
+# reachable they SKIP rather than fail, so the gate still catches build breaks
+# and the pure tests on a DB-less box.
+info "Running test suite (log: build/test.log)"
+mkdir -p build
+if ! swift test > build/test.log 2>&1; then
+    tail -40 build/test.log >&2
+    error "Tests failed — aborting release. Full log: build/test.log"
 fi
+success "Tests passed"
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
     error "Working tree has uncommitted changes. Commit or stash first."
@@ -146,6 +154,17 @@ trap revert_bump_on_abort EXIT
 if git rev-parse "v$VERSION" >/dev/null 2>&1; then
     error "Git tag v$VERSION already exists. Choose a different version."
 fi
+changelog_section() {
+    awk -v ver="$1" '
+        $0 ~ "^## v" ver "( |$)" { on = 1; next }
+        on && /^## / { exit }
+        on { print }
+    ' CHANGELOG.md
+}
+if [[ $SKIP_NOTARIZE -eq 0 ]] && [[ -z "$(changelog_section "$VERSION" | tr -d '[:space:]')" ]]; then
+    error "CHANGELOG.md has no '## v$VERSION' section. Write the release notes first."
+fi
+MIN_SYSTEM=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$PLIST")
 success "Now releasing pgBrain v$VERSION"
 
 # ==========================================================================
@@ -234,6 +253,13 @@ LENGTH=$(stat -f%z "$DMG_BUILD_PATH")
 [[ -n "$ED_SIGNATURE" ]] || error "sign_update didn't return a signature; got: $SIGN_OUTPUT"
 success "Signature: $ED_SIGNATURE"
 
+if [[ $SKIP_NOTARIZE -eq 1 ]]; then
+    echo
+    success "Dry run complete — $DMG_BUILD_PATH (ad-hoc signed, not notarized)"
+    echo "  Nothing was committed, tagged, pushed or uploaded; the version bump is reverted."
+    exit 0
+fi
+
 # ==========================================================================
 # STEP 8: APPEND TO APPCAST
 # ==========================================================================
@@ -258,7 +284,7 @@ cat > "$ITEM_FILE" <<XML
             <pubDate>$PUB_DATE</pubDate>
             <sparkle:version>$BUILD</sparkle:version>
             <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:minimumSystemVersion>$MIN_SYSTEM</sparkle:minimumSystemVersion>
             <enclosure url="$DOWNLOAD_URL" length="$LENGTH" type="application/octet-stream" sparkle:edSignature="$ED_SIGNATURE"/>
         </item>
 XML
@@ -284,8 +310,16 @@ else
         { print }
     ' appcast.xml > "$TMP_APPCAST"
 fi
-mv "$TMP_APPCAST" appcast.xml
-rm -f "$ITEM_FILE"
+# Keep only the newest items — Sparkle only needs the latest one, and older
+# DMGs stay downloadable from GitHub Releases. `cat >` (not mv) preserves the
+# file's 0644 mode; mktemp files are 0600.
+awk -v keep="$APPCAST_KEEP" '
+    /<item>/ { n++ }
+    n > keep && /<item>/ { skip = 1 }
+    !skip { print }
+    skip && /<\/item>/ { skip = 0 }
+' "$TMP_APPCAST" > appcast.xml
+rm -f "$TMP_APPCAST" "$ITEM_FILE"
 
 # ==========================================================================
 # STEP 9: COMMIT + PUSH
@@ -307,12 +341,7 @@ git push origin "v$VERSION"
 if [[ $SKIP_UPLOAD -eq 0 ]]; then
     info "Step 10/10: Creating GitHub release v$VERSION"
     NOTES=$(mktemp)
-    PREV_TAG=$(git tag --sort=-v:refname | sed -n '2p')
-    if [[ -n "$PREV_TAG" ]]; then
-        git log --pretty=format:'- %s' "${PREV_TAG}..v${VERSION}" > "$NOTES"
-    else
-        git log --pretty=format:'- %s' "v${VERSION}" > "$NOTES"
-    fi
+    changelog_section "$VERSION" > "$NOTES"
     gh release create "v$VERSION" \
         "$DMG_BUILD_PATH" \
         --repo "$GITHUB_REPO" \

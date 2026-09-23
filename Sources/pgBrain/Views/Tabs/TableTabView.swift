@@ -1579,7 +1579,7 @@ private struct QueryStripView: View {
             clauseField(
                 keyword: "WHERE",
                 text: $whereDraft,
-                placeholder: "e.g. id = 5  OR  email ILIKE '%@valuo.cz'",
+                placeholder: "e.g. id = 5  OR  email ILIKE '%@example.com'",
                 tint: .blue,
                 clauseKind: .whereExpr
             ) { committed in

@@ -20,7 +20,7 @@ enum FeedbackWindowFactory {
 
         let observer = WindowCloseObserver(onClose: onClose)
         window.delegate = observer
-        objc_setAssociatedObject(window, &WindowCloseObserver.assocKey, observer, .OBJC_ASSOCIATION_RETAIN)
+        objc_setAssociatedObject(window as NSWindow, &WindowCloseObserver.assocKey, observer, .OBJC_ASSOCIATION_RETAIN)
         return window
     }
 }

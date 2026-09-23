@@ -349,7 +349,6 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertTrue(s.restoreLastSession)
         XCTAssertEqual(s.defaultRowLimit, 1000)
         XCTAssertEqual(s.editorFontSize, 12)
-        XCTAssertEqual(s.sparkleChannel, "stable")
         XCTAssertEqual(s.pgDumpPath, "")
         XCTAssertFalse(s.verbosePostgresLogging)
     }
@@ -372,11 +371,9 @@ final class AppSettingsTests: XCTestCase {
         let suite = TestPaths.suite()
         let a = AppSettings(testDefaults: suite)
         a.defaultRowLimit = 250
-        a.sparkleChannel = "beta"
         a.pgDumpPath = "/usr/bin/pg_dump"
         let b = AppSettings(testDefaults: suite)
         XCTAssertEqual(b.defaultRowLimit, 250)
-        XCTAssertEqual(b.sparkleChannel, "beta")
         XCTAssertEqual(b.pgDumpPath, "/usr/bin/pg_dump")
     }
 }

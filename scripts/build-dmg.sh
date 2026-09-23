@@ -37,6 +37,13 @@ if [[ ! -f "$BG" ]] || [[ "scripts/gen-dmg-background.swift" -nt "$BG" ]]; then
     swift scripts/gen-dmg-background.swift "$BG"
 fi
 
+# A leftover "pgBrain" volume from an aborted run would make hdiutil mount the
+# new image at "/Volumes/pgBrain 1" while the AppleScript below targets
+# disk "pgBrain" — laying out the wrong disk. Detach stragglers first.
+for vol in /Volumes/"$VOLUME_NAME"*; do
+    [[ -d "$vol" ]] && hdiutil detach "$vol" -force -quiet || true
+done
+
 # Clean up any prior staging.
 rm -rf "$STAGING" "$TEMP_DMG" "$OUT"
 mkdir -p "$STAGING/.background"

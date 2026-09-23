@@ -32,6 +32,8 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>© Souris.CLOUD</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>pgBrain connects to PostgreSQL servers on your local network.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSSupportsAutomaticTermination</key>

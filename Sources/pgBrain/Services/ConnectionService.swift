@@ -6,9 +6,9 @@ import NIOCore
 import NIOPosix
 import NIOSSL
 
-/// Shared no-op logger for the (currently very chatty) PostgresNIO query
-/// surface. Centralised so iter-11's Settings can swap it for a real logger
-/// behind a verbose flag.
+/// Shared no-op logger for per-query PostgresNIO calls, which are too chatty
+/// to log even in verbose mode. Client-level logging goes through
+/// `Log.postgresClientLogger()`.
 let pgbrainQuietLogger = Logger(label: "cloud.souris.pgbrain", factory: { _ in SwiftLogNoOpLogHandler() })
 
 /// One per ConnectionWindow. Owns a PostgresClient and exposes a UI-friendly
@@ -223,7 +223,7 @@ final class ConnectionService {
             tls: tls
         )
 
-        let client = PostgresClient(configuration: config)
+        let client = PostgresClient(configuration: config, backgroundLogger: Log.postgresClientLogger())
         self.client = client
         let task = Task.detached(priority: .userInitiated) {
             await client.run()

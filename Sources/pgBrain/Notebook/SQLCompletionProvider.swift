@@ -262,7 +262,7 @@ enum SQLCompletionProvider {
             if c == 0x20 || c == 0x09 || c == 0x0A { i -= 1 } else { break }
         }
         guard i > 0, ns.character(at: i - 1) == 0x2E /* . */ else { return nil }
-        var end = i - 1
+        let end = i - 1
         var start = end
         while start > 0 {
             let c = ns.character(at: start - 1)

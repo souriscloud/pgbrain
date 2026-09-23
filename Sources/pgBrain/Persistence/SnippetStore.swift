@@ -97,7 +97,7 @@ final class SnippetStore {
             let data = try JSONEncoder().encode(snippets)
             try data.write(to: url, options: .atomic)
         } catch {
-            NSLog("pgBrain: SnippetStore.flush failed: \(error)")
+            Log.persistence.error("SnippetStore.flush failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 

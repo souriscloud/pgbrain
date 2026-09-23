@@ -7,7 +7,7 @@
 #
 # pgBrain is an SwiftPM-only project (no Xcode workspace), so the Sparkle
 # binaries live under `.build/artifacts/sparkle/...` rather than the
-# DerivedData path VirtualMirror's helper looks at. Build the project once
+# DerivedData path an Xcode project would use. Build the project once
 # (`swift build`) and the Sparkle dependency is resolved + extracted.
 
 set -euo pipefail

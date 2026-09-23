@@ -212,15 +212,15 @@ private struct BinaryPathRow: View {
 
 private struct UpdatesSettings: View {
     @Bindable var settings: AppSettings
+    @State private var autoCheck = UpdateController.shared.automaticallyChecksForUpdates
 
     var body: some View {
         Form {
             Section {
-                Picker("Channel", selection: $settings.sparkleChannel) {
-                    Text("Stable").tag("stable")
-                    Text("Beta").tag("beta")
-                }
-                .pickerStyle(.segmented)
+                Toggle("Check for updates automatically", isOn: $autoCheck)
+                    .onChange(of: autoCheck) { _, on in
+                        UpdateController.shared.automaticallyChecksForUpdates = on
+                    }
                 HStack {
                     Button("Check for Updates Now") {
                         UpdateController.shared.checkForUpdates(nil)
@@ -230,7 +230,7 @@ private struct UpdatesSettings: View {
             } header: {
                 Text("Auto-update")
             } footer: {
-                Text("pgBrain auto-updates via Sparkle. Stable is recommended; Beta opts into pre-release builds.")
+                Text("pgBrain checks GitHub Releases once a day and on launch, and asks before installing.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

@@ -83,7 +83,7 @@ final class QueryHistoryStore {
             let data = try JSONEncoder().encode(entries)
             try data.write(to: url, options: .atomic)
         } catch {
-            NSLog("pgBrain: QueryHistoryStore.flush failed: \(error)")
+            Log.persistence.error("QueryHistoryStore.flush failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
