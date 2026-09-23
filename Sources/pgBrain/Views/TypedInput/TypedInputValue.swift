@@ -39,7 +39,7 @@ enum TypedInputValue: Equatable, Sendable {
         case .defaultKeyword:     return "DEFAULT"
         case .expression(let e):  return e
         case .literal(let s):
-            let quoted = "'" + s.replacingOccurrences(of: "'", with: "''") + "'"
+            let quoted = UpdateApplier.quoteLiteral(s)
             return cast ? "\(quoted)::\(typeName)" : quoted
         }
     }

@@ -129,7 +129,7 @@ final class UpdateApplierTests: XCTestCase {
 
     // MARK: DELETE
 
-    func testDeleteByPrimaryKeyAndNullPkComponent() async throws {
+    func testDeleteByPrimaryKeySkipsOutOfRange() async throws {
         let db = try await TestDB.connectOrSkip(); defer { db.shutdown() }
         let schema = TestDB.uniqueTag(); await db.dropSchemas(schema)
         do {
@@ -137,12 +137,11 @@ final class UpdateApplierTests: XCTestCase {
             let t = try await makeT(db, schema)
             try await db.exec("INSERT INTO \"\(schema)\".t (id,n) VALUES (2,20),(3,30)")
 
-            // Delete id=2 (rowIndex 0), skip an out-of-range delete, and a NULL-PK
-            // delete that matches nothing via the `IS NULL` branch.
-            let rows: [[String?]] = [["2", nil, nil, nil, nil], [nil, nil, nil, nil, nil]]
-            try await UpdateApplier.apply(edits: [],
-                                          deletes: [.init(rowIndex: 0), .init(rowIndex: 1), .init(rowIndex: 99)],
+            let rows: [[String?]] = [["2", nil, nil, nil, nil]]
+            let outcome = try await UpdateApplier.apply(edits: [],
+                                          deletes: [.init(rowIndex: 0), .init(rowIndex: 99)],
                                           table: t, originalRows: rows, client: db.client)
+            XCTAssertEqual(outcome.deletedRows, [0])
 
             let has2 = try await db.scalarBool("SELECT EXISTS(SELECT 1 FROM \"\(schema)\".t WHERE id=2)")
             let has1 = try await db.scalarBool("SELECT EXISTS(SELECT 1 FROM \"\(schema)\".t WHERE id=1)")
@@ -154,20 +153,43 @@ final class UpdateApplierTests: XCTestCase {
         await db.dropSchemas(schema)
     }
 
+    /// A DELETE that matches nothing (row already gone) is a stale row, not a
+    /// silent success — and it rolls back everything else in the batch.
+    func testDeleteOfVanishedRowThrowsAndRollsBack() async throws {
+        let db = try await TestDB.connectOrSkip(); defer { db.shutdown() }
+        let schema = TestDB.uniqueTag(); await db.dropSchemas(schema)
+        do {
+            try await db.exec("CREATE SCHEMA \"\(schema)\"")
+            let t = try await makeT(db, schema)
+            try await db.exec("INSERT INTO \"\(schema)\".t (id,n) VALUES (2,20)")
+            let rows: [[String?]] = [["2", "20", nil, nil, nil], ["7", nil, nil, nil, nil]]
+            await XCTAssertThrowsErrorAsync(
+                try await UpdateApplier.apply(edits: [], deletes: [.init(rowIndex: 0), .init(rowIndex: 1)],
+                                              table: t, originalRows: rows, client: db.client)
+            ) {
+                guard case UpdateApplier.Failure.staleRow(let label) = $0 else {
+                    return XCTFail("expected .staleRow, got \($0)")
+                }
+                XCTAssertEqual(label, "id=7")
+            }
+            let has2 = try await db.scalarBool("SELECT EXISTS(SELECT 1 FROM \"\(schema)\".t WHERE id=2)")
+            XCTAssertTrue(has2, "the id=2 delete rolled back with the batch")
+        } catch { await db.dropSchemas(schema); throw error }
+        await db.dropSchemas(schema)
+    }
+
     // MARK: failure modes
 
-    func testApplyThrowsWithoutPrimaryKey() async throws {
+    func testApplyThrowsForViews() async throws {
         let db = try await TestDB.connectOrSkip(); defer { db.shutdown() }
-        let noPK = TableNode(schema: "public", name: "v", kind: .table, columns: [
+        let view = TableNode(schema: "public", name: "v", kind: .view, columns: [
             ColumnNode(name: "id", typeName: "integer", nullable: false, ordinal: 0)
         ], primaryKey: [])
         await XCTAssertThrowsErrorAsync(
-            try await UpdateApplier.apply(edits: [], table: noPK, originalRows: [], client: db.client)
+            try await UpdateApplier.apply(edits: [], table: view, originalRows: [], client: db.client)
         ) {
-            guard case UpdateApplier.Failure.noPrimaryKey = $0 else {
-                return XCTFail("expected .noPrimaryKey, got \($0)")
-            }
-            XCTAssertTrue($0.localizedDescription.contains("no primary key"))
+            XCTAssertEqual($0 as? UpdateApplier.Failure, .notEditable)
+            XCTAssertTrue($0.localizedDescription.contains("isn't editable"))
         }
     }
 
@@ -212,7 +234,7 @@ final class UpdateApplierTests: XCTestCase {
                     return XCTFail("expected .staleRow, got \($0)")
                 }
                 XCTAssertTrue(pk.contains("id=1"))
-                XCTAssertTrue($0.localizedDescription.contains("no longer exists"))
+                XCTAssertTrue($0.localizedDescription.contains("changed or deleted by someone else"))
             }
             // The id=2 update (applied first) must be rolled back by the batch abort.
             let n2 = try await db.scalarInt("SELECT n FROM \"\(schema)\".t WHERE id=2")
