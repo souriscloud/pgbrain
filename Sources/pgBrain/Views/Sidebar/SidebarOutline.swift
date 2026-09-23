@@ -195,21 +195,7 @@ enum SidebarTree {
         var tablesByID: [String: TableNode] = [:]
         for s in content.snapshot.schemas { for t in s.tables { tablesByID[t.id] = t } }
 
-        var roots: [SidebarNode] = []
-        func sectionNode(_ section: SidebarNode.Section, ids: [String]) -> SidebarNode? {
-            let nodes = ids.compactMap { id -> SidebarNode? in
-                guard let t = tablesByID[id] else { return nil }
-                return SidebarNode(id: "\(section.rawValue)/table:\(t.id)", kind: .table(t), children: [])
-            }
-            guard !nodes.isEmpty else { return nil }
-            let node = SidebarNode(id: "section:\(section.rawValue)", kind: .section(section), children: nodes)
-            return node
-        }
-        if let pinned = sectionNode(.pinned, ids: content.pinned) { roots.append(pinned) }
-        let pinnedSet = Set(content.pinned)
-        if let recent = sectionNode(.recent, ids: content.recents.filter { !pinnedSet.contains($0) }) {
-            roots.append(recent)
-        }
+        var roots = sections(content, tablesByID: tablesByID)
 
         // Partitions nest under their parent even across schemas, so the
         // parent→children map is global.
@@ -250,6 +236,43 @@ enum SidebarTree {
             for c in r.children { byID[c.id] = c }
         }
         return Built(roots: roots, nodesByID: byID)
+    }
+
+    /// Only the Pinned / Recent lists differ — the schema tree (10k+ nodes
+    /// on big databases) can stay; just the section roots are swapped.
+    static func onlySectionsChanged(from old: SidebarContent?, to new: SidebarContent) -> Bool {
+        guard let old, old != new else { return false }
+        return old.snapshot == new.snapshot && old.showExtensionObjects == new.showExtensionObjects
+    }
+
+    /// The Pinned and Recent section roots (absent when empty).
+    static func sections(_ content: SidebarContent, tablesByID: [String: TableNode]? = nil) -> [SidebarNode] {
+        let lookup: [String: TableNode]
+        if let tablesByID {
+            lookup = tablesByID
+        } else {
+            let wanted = Set(content.pinned).union(content.recents)
+            var found: [String: TableNode] = [:]
+            for s in content.snapshot.schemas {
+                for t in s.tables where wanted.contains(t.id) { found[t.id] = t }
+            }
+            lookup = found
+        }
+        func sectionNode(_ section: SidebarNode.Section, ids: [String]) -> SidebarNode? {
+            let nodes = ids.compactMap { id -> SidebarNode? in
+                guard let t = lookup[id] else { return nil }
+                return SidebarNode(id: "\(section.rawValue)/table:\(t.id)", kind: .table(t), children: [])
+            }
+            guard !nodes.isEmpty else { return nil }
+            return SidebarNode(id: "section:\(section.rawValue)", kind: .section(section), children: nodes)
+        }
+        var out: [SidebarNode] = []
+        if let pinned = sectionNode(.pinned, ids: content.pinned) { out.append(pinned) }
+        let pinnedSet = Set(content.pinned)
+        if let recent = sectionNode(.recent, ids: content.recents.filter { !pinnedSet.contains($0) }) {
+            out.append(recent)
+        }
+        return out
     }
 
     private static func tableNode(_ t: TableNode, partitionsByParent: [String: [TableNode]],
@@ -457,6 +480,9 @@ struct SidebarOutlineView: NSViewRepresentable {
                                       newContent: newContent, newFilter: newFilter) {
             case .none:
                 return
+            case .rebuild where filter == newFilter && SidebarTree.onlySectionsChanged(from: content, to: newContent):
+                content = newContent
+                swapSections(SidebarTree.sections(newContent), in: outline)
             case .rebuild:
                 let snapshotChanged = content?.snapshot != newContent.snapshot
                 content = newContent
@@ -472,6 +498,38 @@ struct SidebarOutlineView: NSViewRepresentable {
                 filter = newFilter
                 reload(outline)
             }
+        }
+
+        /// Replace just the Pinned / Recent roots, leaving the schema tree's
+        /// nodes, rows and expansion alone.
+        private func swapSections(_ fresh: [SidebarNode], in outline: NSOutlineView) {
+            guard var built = fullBuild else { return }
+            let oldSections = built.roots.filter(\.isSection)
+            for node in oldSections {
+                built.nodesByID.removeValue(forKey: node.id)
+                for child in node.children { built.nodesByID.removeValue(forKey: child.id) }
+            }
+            for node in fresh {
+                built.nodesByID[node.id] = node
+                for child in node.children { built.nodesByID[child.id] = child }
+            }
+            built.roots = fresh + built.roots.filter { !$0.isSection }
+            fullBuild = built
+            guard !isFiltering else { return }
+            roots = built.roots
+            nodesByID = built.nodesByID
+            isRestoring = true
+            outline.beginUpdates()
+            if !oldSections.isEmpty {
+                outline.removeItems(at: IndexSet(integersIn: 0..<oldSections.count), inParent: nil, withAnimation: [])
+            }
+            if !fresh.isEmpty {
+                outline.insertItems(at: IndexSet(integersIn: 0..<fresh.count), inParent: nil, withAnimation: [])
+            }
+            outline.endUpdates()
+            let exp = expanded
+            for node in fresh where exp.contains(node.id) { outline.expandItem(node) }
+            isRestoring = false
         }
 
         func syncFilter(_ term: String) {

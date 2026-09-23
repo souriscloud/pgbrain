@@ -78,7 +78,12 @@ final class WorkspaceState {
         }
         /// Single-click "preview" tab (italic title). At most one per
         /// window; the next preview replaces it until something pins it.
-        var isPreview: Bool = false
+        var isPreview: Bool = false {
+            didSet { if oldValue, !isPreview { onPromoted?() } }
+        }
+        /// Fired once a preview tab becomes a kept tab (double-click, edit,
+        /// filter, pin, Keep Tab Open) — the moment it counts as "opened".
+        @ObservationIgnored var onPromoted: (() -> Void)?
         /// User-pinned tab: kept at the front of the strip and skipped by
         /// Close Others / Close to the Right / Close All.
         var isPinned: Bool = false
@@ -130,8 +135,10 @@ final class WorkspaceState {
     /// `ConnectionService` uses this to prune its loader cache, so
     /// closed-tab loaders + edit buffers don't leak.
     @ObservationIgnored var onTabClosed: ((UUID) -> Void)?
-    /// Fires whenever a table is opened or re-focused via `openTable`;
-    /// the window wires it to the recents store.
+    /// Fires when a table is really opened — a kept tab, or a preview tab
+    /// once it's promoted; the window wires it to the recents store.
+    /// Previews don't count: recording them reshuffled the sidebar's Recent
+    /// section on every single click, moving rows under a double-click.
     @ObservationIgnored var onTableOpened: ((TableNode) -> Void)?
 
     // MARK: Sidebar UI state (per window, persisted by SessionState)
@@ -167,7 +174,7 @@ final class WorkspaceState {
     /// tab instead of adding one; any non-preview open of an existing
     /// preview tab pins it.
     func openTable(_ table: TableNode, focusPane: TablePane = .data, preview: Bool = false) {
-        defer { onTableOpened?(table) }
+        defer { if !preview { onTableOpened?(table) } }
         if let existing = tab(showing: table.id) {
             existing.requestedPane = focusPane
             if !preview { existing.isPreview = false }
@@ -177,6 +184,11 @@ final class WorkspaceState {
         let tab = Tab(kind: .table(table), title: table.qualifiedName)
         tab.requestedPane = focusPane
         tab.isPreview = preview
+        if preview {
+            tab.onPromoted = { [weak self, weak tab] in
+                if let node = tab?.tableNode { self?.onTableOpened?(node) }
+            }
+        }
         if preview, let idx = tabs.firstIndex(where: { $0.isPreview && !$0.hasPendingChanges }) {
             let old = tabs[idx]
             tabs[idx] = tab
