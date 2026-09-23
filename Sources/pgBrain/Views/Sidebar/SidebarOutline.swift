@@ -3,73 +3,95 @@ import SwiftUI
 
 /// Class-backed tree node used as item identity for `NSOutlineView`.
 /// SwiftUI value types can't satisfy NSOutlineView's identity-by-pointer
-/// requirement, so we mirror the snapshot once into these.
+/// requirement, so we mirror the snapshot into these. Every node carries a
+/// stable string `id` so expansion and selection survive rebuilds.
 @MainActor
 final class SidebarNode {
+    enum Section: String {
+        case pinned, recent
+
+        var title: String {
+            switch self {
+            case .pinned: return "Pinned"
+            case .recent: return "Recent"
+            }
+        }
+    }
+
     enum Kind {
-        case database(name: String)
+        case section(Section)
         case schema(name: String)
         case table(TableNode)
         case columns(ofTable: TableNode)   // group node so columns nest one extra level
         case column(ColumnNode)
+        case partitions(ofTable: TableNode)
         case functionsGroup(schema: String)  // group node holding a schema's routines
         case function(FunctionNode)
+        /// Filter hit on a column: shown as `table.column`, opens the table.
+        case columnMatch(TableNode, ColumnNode)
     }
 
+    let id: String
     let kind: Kind
-    var children: [SidebarNode]
+    weak var parent: SidebarNode?
+    /// Filter-mode schema rows show their hit count here.
+    var countBadge: Int?
+    private var storedChildren: [SidebarNode]?
 
-    init(kind: Kind, children: [SidebarNode] = []) {
+    init(id: String, kind: Kind, children: [SidebarNode]? = nil) {
+        self.id = id
         self.kind = kind
-        self.children = children
+        self.storedChildren = children
+        children?.forEach { $0.parent = self }
     }
 
-    static func build(from snapshot: SchemaSnapshot) -> SidebarNode {
-        let schemaNodes = snapshot.schemas.map { schema -> SidebarNode in
-            let tableNodes = schema.tables.map { table -> SidebarNode in
-                let columnNodes = table.columns.map { col in
-                    SidebarNode(kind: .column(col))
-                }
-                let columnsGroup = SidebarNode(kind: .columns(ofTable: table), children: columnNodes)
-                return SidebarNode(kind: .table(table), children: [columnsGroup])
+    /// Column nodes are materialised on first expansion — a 10k-table
+    /// schema would otherwise allocate ~200k column nodes per rebuild.
+    var children: [SidebarNode] {
+        if let storedChildren { return storedChildren }
+        var built: [SidebarNode] = []
+        if case .columns(let table) = kind {
+            built = table.columns.map {
+                SidebarNode(id: "\(id)/\($0.name)", kind: .column($0))
             }
-            var children = tableNodes
-            // Functions live in a collapsed "functions" group below the
-            // schema's tables so they're browsable without cluttering
-            // the common table-hunting flow.
-            if !schema.functions.isEmpty {
-                let fnNodes = schema.functions.map { SidebarNode(kind: .function($0)) }
-                children.append(SidebarNode(kind: .functionsGroup(schema: schema.name), children: fnNodes))
-            }
-            return SidebarNode(kind: .schema(name: schema.name), children: children)
+            built.forEach { $0.parent = self }
         }
-        return SidebarNode(
-            kind: .database(name: snapshot.databaseName.isEmpty ? "database" : snapshot.databaseName),
-            children: schemaNodes
-        )
+        storedChildren = built
+        return built
+    }
+
+    var isExpandable: Bool {
+        switch kind {
+        case .columns(let t): return !t.columns.isEmpty
+        case .column, .function, .columnMatch: return false
+        default: return !children.isEmpty
+        }
     }
 
     var displayName: String {
         switch kind {
-        case .database(let n): return n
+        case .section(let s): return s.title
         case .schema(let n): return n
         case .table(let t): return t.name
         case .columns: return "columns"
         case .column(let c): return c.name
+        case .partitions: return "partitions"
         case .functionsGroup: return "functions"
         case .function(let f): return f.name
+        case .columnMatch(let t, let c): return "\(t.name).\(c.name)"
         }
     }
 
     var secondary: String? {
         switch kind {
         case .table(let t):
-            switch t.kind {
-            case .view: return "view"
-            case .materializedView: return "matview"
-            case .table: return nil
+            if let p = parent, case .section = p.kind { return t.schema }
+            switch (t.kind, t.flavor) {
+            case (.table, .plain): return t.isExtensionOwned ? "ext" : nil
+            default: return t.kindLabel
             }
         case .column(let c): return c.typeName + (c.nullable ? "" : " NOT NULL")
+        case .columnMatch(_, let c): return c.typeName
         case .function(let f):
             switch f.kind {
             case .function: return nil
@@ -77,44 +99,287 @@ final class SidebarNode {
             case .aggregate: return "agg"
             case .window: return "window"
             }
-        case .schema, .database, .columns, .functionsGroup: return nil
+        case .schema:
+            if let n = countBadge { return "\(n)" }
+            return children.isEmpty ? "empty" : nil
+        case .partitions: return "\(children.count)"
+        case .section, .columns, .functionsGroup: return nil
         }
     }
 
     var symbol: String {
         switch kind {
-        case .database: return "cylinder.split.1x2.fill"
+        case .section(.pinned): return "pin"
+        case .section(.recent): return "clock"
         case .schema: return "folder"
-        case .table(let t):
-            switch t.kind {
-            case .table: return "tablecells"
-            case .view: return "rectangle.stack"
-            case .materializedView: return "rectangle.stack.fill"
-            }
+        case .table(let t): return t.symbolName
         case .columns: return "list.bullet.rectangle"
         case .column: return "circle.dotted"
+        case .partitions: return "square.split.1x2"
         case .functionsGroup: return "function"
         case .function: return "f.cursive"
+        case .columnMatch: return "circle.dotted"
         }
     }
 
-    /// Tables are the only item that opens a tab on activation.
+    /// Relation this row opens on activation.
     var openableTable: TableNode? {
-        if case .table(let t) = kind { return t } else { return nil }
+        switch kind {
+        case .table(let t), .columnMatch(let t, _): return t
+        default: return nil
+        }
     }
 
     /// Functions open the editor sheet on activation.
     var openableFunction: FunctionNode? {
         if case .function(let f) = kind { return f } else { return nil }
     }
+
+    /// Schema the row belongs to — drives "New query here" and ⌘T scoping.
+    var schemaName: String? {
+        switch kind {
+        case .schema(let n), .functionsGroup(let n): return n
+        case .table(let t), .columns(let t), .partitions(let t), .columnMatch(let t, _): return t.schema
+        case .function(let f): return f.schema
+        case .column: return parent?.schemaName
+        case .section: return nil
+        }
+    }
+
+    var isSection: Bool { if case .section = kind { return true } else { return false } }
 }
 
+// MARK: - Tree building (pure)
+
+/// Everything that decides the tree's shape, apart from the filter. The
+/// outline only rebuilds when this changes — comparing it is cheap because
+/// an unchanged `SchemaSnapshot` shares array storage, and `Array ==`
+/// short-circuits on identical buffers.
+struct SidebarContent: Equatable {
+    var snapshot: SchemaSnapshot
+    var showExtensionObjects: Bool = false
+    var pinned: [String] = []
+    var recents: [String] = []
+}
+
+struct SidebarFilterKey: Equatable {
+    var term: String
+    var includeColumns: Bool
+
+    var isActive: Bool { !term.trimmingCharacters(in: .whitespaces).isEmpty }
+}
+
+enum SidebarUpdate: Equatable {
+    case none, refilter, rebuild
+}
+
+@MainActor
+enum SidebarTree {
+    /// What `updateNSView` has to do: nothing (the common case — a parent
+    /// re-render with identical inputs), re-run the filter, or rebuild.
+    static func update(oldContent: SidebarContent?, oldFilter: SidebarFilterKey?,
+                       newContent: SidebarContent, newFilter: SidebarFilterKey) -> SidebarUpdate {
+        if oldContent != newContent { return .rebuild }
+        if oldFilter != newFilter { return .refilter }
+        return .none
+    }
+
+    struct Built {
+        var roots: [SidebarNode]
+        var nodesByID: [String: SidebarNode]
+    }
+
+    static func build(_ content: SidebarContent) -> Built {
+        var byID: [String: SidebarNode] = [:]
+        let showExt = content.showExtensionObjects
+        var tablesByID: [String: TableNode] = [:]
+        for s in content.snapshot.schemas { for t in s.tables { tablesByID[t.id] = t } }
+
+        var roots: [SidebarNode] = []
+        func sectionNode(_ section: SidebarNode.Section, ids: [String]) -> SidebarNode? {
+            let nodes = ids.compactMap { id -> SidebarNode? in
+                guard let t = tablesByID[id] else { return nil }
+                return SidebarNode(id: "\(section.rawValue)/table:\(t.id)", kind: .table(t), children: [])
+            }
+            guard !nodes.isEmpty else { return nil }
+            let node = SidebarNode(id: "section:\(section.rawValue)", kind: .section(section), children: nodes)
+            return node
+        }
+        if let pinned = sectionNode(.pinned, ids: content.pinned) { roots.append(pinned) }
+        let pinnedSet = Set(content.pinned)
+        if let recent = sectionNode(.recent, ids: content.recents.filter { !pinnedSet.contains($0) }) {
+            roots.append(recent)
+        }
+
+        // Partitions nest under their parent even across schemas, so the
+        // parent→children map is global.
+        func visible(_ t: TableNode) -> Bool { showExt || !t.isExtensionOwned }
+        var partitionsByParent: [String: [TableNode]] = [:]
+        for s in content.snapshot.schemas where showExt || !s.isExtensionOwned {
+            for t in s.tables where visible(t) {
+                if let p = t.partitionOf, let parent = tablesByID[p], visible(parent) {
+                    partitionsByParent[p, default: []].append(t)
+                }
+            }
+        }
+
+        for schema in content.snapshot.schemas {
+            if schema.isExtensionOwned && !showExt { continue }
+            var children: [SidebarNode] = []
+            for t in schema.tables where visible(t) {
+                if let p = t.partitionOf, let parent = tablesByID[p], visible(parent) { continue }
+                children.append(tableNode(t, partitionsByParent: partitionsByParent, byID: &byID))
+            }
+            let fns = schema.functions.filter { showExt || !$0.isExtensionOwned }
+            if !fns.isEmpty {
+                let fnNodes = fns.map { f -> SidebarNode in
+                    let n = SidebarNode(id: "function:\(f.id)", kind: .function(f))
+                    byID[n.id] = n
+                    return n
+                }
+                let group = SidebarNode(id: "functions:\(schema.name)", kind: .functionsGroup(schema: schema.name), children: fnNodes)
+                byID[group.id] = group
+                children.append(group)
+            }
+            let node = SidebarNode(id: "schema:\(schema.name)", kind: .schema(name: schema.name), children: children)
+            byID[node.id] = node
+            roots.append(node)
+        }
+        for r in roots where r.isSection {
+            byID[r.id] = r
+            for c in r.children { byID[c.id] = c }
+        }
+        return Built(roots: roots, nodesByID: byID)
+    }
+
+    private static func tableNode(_ t: TableNode, partitionsByParent: [String: [TableNode]],
+                                  byID: inout [String: SidebarNode]) -> SidebarNode {
+        var kids: [SidebarNode] = [
+            SidebarNode(id: "columns:\(t.id)", kind: .columns(ofTable: t))
+        ]
+        if let parts = partitionsByParent[t.id], !parts.isEmpty {
+            let partNodes = parts.map { tableNode($0, partitionsByParent: partitionsByParent, byID: &byID) }
+            let group = SidebarNode(id: "partitions:\(t.id)", kind: .partitions(ofTable: t), children: partNodes)
+            byID[group.id] = group
+            kids.append(group)
+        }
+        let node = SidebarNode(id: "table:\(t.id)", kind: .table(t), children: kids)
+        byID[node.id] = node
+        return node
+    }
+
+    static let filterResultLimit = 2000
+
+    /// Filter results in their real schema grouping, best match first
+    /// within each schema.
+    static func buildFiltered(index: SchemaIndex, filter: SidebarFilterKey, showExtensionObjects: Bool) -> Built {
+        let hits = index.fuzzy(filter.term, includeColumns: filter.includeColumns, limit: filterResultLimit)
+        var bySchema: [String: [SidebarNode]] = [:]
+        var order: [String] = []
+        var byID: [String: SidebarNode] = [:]
+        for hit in hits {
+            let e = hit.entry
+            if e.isExtensionOwned && !showExtensionObjects { continue }
+            let node: SidebarNode
+            switch e.kind {
+            case .relation:
+                guard let id = e.tableID, let t = index.tablesByID[id] else { continue }
+                node = SidebarNode(id: "filter/table:\(t.id)", kind: .table(t),
+                                   children: [SidebarNode(id: "filter/columns:\(t.id)", kind: .columns(ofTable: t))])
+            case .function:
+                guard let id = e.functionID, let f = index.functionsByID[id] else { continue }
+                node = SidebarNode(id: "filter/function:\(f.id)", kind: .function(f))
+            case .column:
+                guard let id = e.tableID, let t = index.tablesByID[id],
+                      let c = t.columns.first(where: { $0.name == e.name }) else { continue }
+                node = SidebarNode(id: "filter/column:\(t.id).\(c.name)", kind: .columnMatch(t, c))
+            }
+            if bySchema[e.schema] == nil { order.append(e.schema) }
+            bySchema[e.schema, default: []].append(node)
+            byID[node.id] = node
+        }
+        let roots = order.sorted().map { name -> SidebarNode in
+            let kids = bySchema[name] ?? []
+            let n = SidebarNode(id: "filter/schema:\(name)", kind: .schema(name: name), children: kids)
+            n.countBadge = kids.count
+            byID[n.id] = n
+            return n
+        }
+        return Built(roots: roots, nodesByID: byID)
+    }
+
+    /// First-connect expansion: with more than three non-empty schemas only
+    /// the preferred one (search_path head, else `public`) starts open, so
+    /// the tree doesn't open as a wall of tables.
+    static func defaultExpansion(for snapshot: SchemaSnapshot, preferredSchema: String?) -> Set<String> {
+        var out: Set<String> = ["section:pinned", "section:recent"]
+        let nonEmpty = snapshot.schemas.filter { !$0.isEmpty }
+        if nonEmpty.count <= 3 {
+            for s in nonEmpty { out.insert("schema:\(s.name)") }
+            return out
+        }
+        let names = Set(snapshot.schemas.map(\.name))
+        if let p = preferredSchema, names.contains(p) {
+            out.insert("schema:\(p)")
+        } else if names.contains("public") {
+            out.insert("schema:public")
+        }
+        return out
+    }
+}
+
+// MARK: - Controller (SwiftUI → AppKit commands)
+
+/// Imperative handle the SwiftUI side uses to drive the AppKit outline and
+/// filter field: focus moves, reveal, open-top-match. Held in `@State` by
+/// the window content; the coordinator registers itself on creation.
+@MainActor
+final class SidebarController {
+    fileprivate weak var coordinator: SidebarOutlineView.Coordinator?
+    weak var filterField: NSSearchField?
+
+    func focusFilter() {
+        guard let field = filterField, let window = field.window else { return }
+        window.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+    }
+
+    func focusOutline(selectFirst: Bool = false) {
+        coordinator?.focus(selectFirst: selectFirst)
+    }
+
+    /// Select + scroll to the relation's row, expanding only its ancestors.
+    func reveal(tableID: String) {
+        coordinator?.reveal(tableID: tableID)
+    }
+
+    /// Return in the filter field: open the best match.
+    func openFirstMatch() {
+        coordinator?.openFirstMatch()
+    }
+
+    /// Schema of the selected row, if any.
+    var selectedSchema: String? { coordinator?.selectedNode?.schemaName }
+
+    func collapseAll() { coordinator?.collapseAll() }
+
+    /// Apply `term` to the tree right now instead of on the next SwiftUI
+    /// pass, so a Return/↓ typed straight after the last keystroke acts on
+    /// the up-to-date results.
+    func syncFilter(_ term: String) { coordinator?.syncFilter(term) }
+}
+
+// MARK: - NSViewRepresentable
+
 struct SidebarOutlineView: NSViewRepresentable {
-    let snapshot: SchemaSnapshot
-    /// When non-empty, only tables matching the term are shown (flat list).
-    /// Computed lazily through `SchemaIndex` for O(prefix + matches).
-    var filterTerm: String = ""
+    let content: SidebarContent
+    var filter: SidebarFilterKey = SidebarFilterKey(term: "", includeColumns: false)
+    let controller: SidebarController
+    /// Mutable expansion state owned by the window's workspace.
+    let workspace: WorkspaceState
+    var preferredSchema: String?
     let onOpenTable: (TableNode) -> Void
+    var onPreviewTable: ((TableNode) -> Void)? = nil
     var onCopyTable: ((TableNode) -> Void)? = nil
     var onExportTable: ((TableNode) -> Void)? = nil
     var onImportInto: ((TableNode) -> Void)? = nil
@@ -127,458 +392,375 @@ struct SidebarOutlineView: NSViewRepresentable {
     /// REFRESH MATERIALIZED VIEW [CONCURRENTLY]. Only offered on
     /// materialized views.
     var onRefreshMatView: ((TableNode, Bool) -> Void)? = nil
-    /// Open the comments editor sheet for this table.
     var onEditComments: ((TableNode) -> Void)? = nil
-    /// Schema-level: rename, drop. Receiver pops a confirmation sheet.
     var onRenameSchema: ((String) -> Void)? = nil
     var onDropSchema: ((String) -> Void)? = nil
     var onDuplicateSchema: ((String) -> Void)? = nil
-    /// Database-level: create a new schema.
     var onCreateSchema: (() -> Void)? = nil
     /// New table in the given schema (nil → let the sheet pick the schema).
     var onNewTable: ((String?) -> Void)? = nil
-    /// Find usages — pops the "where is this table referenced?" sheet.
     var onFindUsages: ((TableNode) -> Void)? = nil
-    /// Open a function in the editor sheet.
     var onOpenFunction: ((FunctionNode) -> Void)? = nil
     var onNewFunction: ((String?) -> Void)? = nil
     var onRunFunction: ((FunctionNode) -> Void)? = nil
-    /// TRUNCATE a table (pops the confirm sheet).
     var onTruncate: ((TableNode) -> Void)? = nil
-    /// Generate test data into a table.
     var onGenerateData: ((TableNode) -> Void)? = nil
     var onNewIndex: ((TableNode) -> Void)? = nil
-    /// Edit a view / matview body.
     var onEditView: ((TableNode) -> Void)? = nil
-    /// Open the ERD for a schema.
     var onShowERD: ((String) -> Void)? = nil
+    /// Scratchpad with `search_path` preset to the schema.
+    var onNewQuery: ((String) -> Void)? = nil
+    var onTogglePin: ((TableNode) -> Void)? = nil
+    var onHideSchema: ((String) -> Void)? = nil
+    var onShowOnlySchema: ((String) -> Void)? = nil
+    var onClearRecents: (() -> Void)? = nil
+    var onClearFilter: (() -> Void)? = nil
+    var onToggleExtensionObjects: (() -> Void)? = nil
 
     @MainActor
     final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
-        var root: SidebarNode
-        var filteredRoot: SidebarNode?  // non-nil = filter mode
-        var index: SchemaIndex
-        let onOpenTable: (TableNode) -> Void
-        var onCopyTable: ((TableNode) -> Void)?
-        var onExportTable: ((TableNode) -> Void)?
-        var onImportInto: ((TableNode) -> Void)?
-        var onShowStructure: ((TableNode) -> Void)?
-        var onShowDDL: ((TableNode) -> Void)?
-        var onMaintenance: ((TableNode, AdminActions.Maintenance) -> Void)?
-        var onRefreshMatView: ((TableNode, Bool) -> Void)?
-        var onEditComments: ((TableNode) -> Void)?
-        var onRenameSchema: ((String) -> Void)?
-        var onDropSchema: ((String) -> Void)?
-        var onDuplicateSchema: ((String) -> Void)?
-        var onCreateSchema: (() -> Void)?
-        var onNewTable: ((String?) -> Void)?
-        var onFindUsages: ((TableNode) -> Void)?
-        var onOpenFunction: ((FunctionNode) -> Void)?
-        var onNewFunction: ((String?) -> Void)?
-        var onRunFunction: ((FunctionNode) -> Void)?
-        var onTruncate: ((TableNode) -> Void)?
-        var onGenerateData: ((TableNode) -> Void)?
-        var onNewIndex: ((TableNode) -> Void)?
-        var onEditView: ((TableNode) -> Void)?
-        var onShowERD: ((String) -> Void)?
+        var parent: SidebarOutlineView
+        weak var outline: SidebarOutline?
+        private(set) var roots: [SidebarNode] = []
+        private var nodesByID: [String: SidebarNode] = [:]
+        private var fullBuild: SidebarTree.Built?
+        private(set) var index: SchemaIndex?
+        private var content: SidebarContent?
+        private var filter: SidebarFilterKey?
+        private var isRestoring = false
+        private var highlight: String = ""
 
-        var activeRoot: SidebarNode { filteredRoot ?? root }
-
-        init(
-            root: SidebarNode,
-            index: SchemaIndex,
-            onOpenTable: @escaping (TableNode) -> Void,
-            onCopyTable: ((TableNode) -> Void)?,
-            onExportTable: ((TableNode) -> Void)?,
-            onImportInto: ((TableNode) -> Void)?,
-            onShowStructure: ((TableNode) -> Void)?,
-            onShowDDL: ((TableNode) -> Void)?
-        ) {
-            self.root = root
-            self.index = index
-            self.onOpenTable = onOpenTable
-            self.onCopyTable = onCopyTable
-            self.onExportTable = onExportTable
-            self.onImportInto = onImportInto
-            self.onShowStructure = onShowStructure
-            self.onShowDDL = onShowDDL
+        init(parent: SidebarOutlineView) {
+            self.parent = parent
         }
 
-        /// Rebuild `filteredRoot` from `term` (empty = clear filter).
-        /// Filtered root is a synthetic "search" database with one schema
-        /// per matching table grouped by source schema.
-        func applyFilter(_ term: String) {
-            let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
-                filteredRoot = nil
+        var isFiltering: Bool { filter?.isActive ?? false }
+
+        var selectedNode: SidebarNode? {
+            guard let outline, outline.selectedRow >= 0 else { return nil }
+            return outline.item(atRow: outline.selectedRow) as? SidebarNode
+        }
+
+        private var expanded: Set<String> {
+            get { parent.workspace.expandedSidebarNodes ?? [] }
+            set {
+                parent.workspace.expandedSidebarNodes = newValue
+                SessionStateStore.shared.scheduleSnapshot(delay: 1.5)
+            }
+        }
+
+        // MARK: Apply
+
+        func apply(content newContent: SidebarContent, filter newFilter: SidebarFilterKey) {
+            guard let outline else { return }
+            switch SidebarTree.update(oldContent: content, oldFilter: filter,
+                                      newContent: newContent, newFilter: newFilter) {
+            case .none:
+                return
+            case .rebuild:
+                let snapshotChanged = content?.snapshot != newContent.snapshot
+                content = newContent
+                filter = newFilter
+                fullBuild = SidebarTree.build(newContent)
+                if snapshotChanged || index == nil { index = SchemaIndex(snapshot: newContent.snapshot) }
+                if parent.workspace.expandedSidebarNodes == nil, !newContent.snapshot.schemas.isEmpty {
+                    parent.workspace.expandedSidebarNodes = SidebarTree.defaultExpansion(
+                        for: newContent.snapshot, preferredSchema: parent.preferredSchema)
+                }
+                reload(outline)
+            case .refilter:
+                filter = newFilter
+                reload(outline)
+            }
+        }
+
+        func syncFilter(_ term: String) {
+            guard let content else { return }
+            apply(content: content, filter: SidebarFilterKey(term: term, includeColumns: filter?.includeColumns ?? false))
+        }
+
+        private func reload(_ outline: NSOutlineView) {
+            let selectedID = selectedNode?.id
+            let scrollOrigin = outline.enclosingScrollView?.contentView.bounds.origin
+            if let filter, filter.isActive, let index {
+                let built = SidebarTree.buildFiltered(index: index, filter: filter,
+                                                      showExtensionObjects: content?.showExtensionObjects ?? false)
+                roots = built.roots
+                nodesByID = built.nodesByID
+                highlight = filter.term
+            } else {
+                roots = fullBuild?.roots ?? []
+                nodesByID = fullBuild?.nodesByID ?? [:]
+                highlight = ""
+            }
+            isRestoring = true
+            outline.reloadData()
+            if isFiltering {
+                for r in roots { outline.expandItem(r) }
+            } else {
+                let exp = expanded
+                func restore(_ node: SidebarNode) {
+                    guard exp.contains(node.id) else { return }
+                    outline.expandItem(node)
+                    for child in node.children where child.isExpandable { restore(child) }
+                }
+                for r in roots { restore(r) }
+            }
+            isRestoring = false
+            if let selectedID, let node = nodesByID[selectedID] {
+                let row = outline.row(forItem: node)
+                if row >= 0 { outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
+            }
+            if !isFiltering, let scrollOrigin, let clip = outline.enclosingScrollView?.contentView {
+                clip.scroll(to: scrollOrigin)
+                outline.enclosingScrollView?.reflectScrolledClipView(clip)
+            } else if isFiltering {
+                outline.scrollRowToVisible(0)
+            }
+        }
+
+        // MARK: Commands
+
+        func focus(selectFirst: Bool) {
+            guard let outline, let window = outline.window else { return }
+            window.makeFirstResponder(outline)
+            if selectFirst || outline.selectedRow < 0 {
+                if let row = firstOpenableRow() ?? (outline.numberOfRows > 0 ? 0 : nil) {
+                    outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                    outline.scrollRowToVisible(row)
+                }
+            }
+        }
+
+        private func firstOpenableRow() -> Int? {
+            guard let outline else { return nil }
+            for row in 0..<outline.numberOfRows {
+                if let n = outline.item(atRow: row) as? SidebarNode,
+                   n.openableTable != nil || n.openableFunction != nil { return row }
+            }
+            return nil
+        }
+
+        func openFirstMatch() {
+            guard let outline, let row = firstOpenableRow(),
+                  let node = outline.item(atRow: row) as? SidebarNode else { return }
+            outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            activate(node, in: outline)
+        }
+
+        func reveal(tableID: String) {
+            guard let outline else { return }
+            if let sel = selectedNode, sel.openableTable?.id == tableID { return }
+            let candidates = isFiltering ? ["filter/table:\(tableID)"] : ["table:\(tableID)"]
+            guard let node = candidates.compactMap({ nodesByID[$0] }).first else {
+                outline.deselectAll(nil)
                 return
             }
-            let matches = index.matches(trimmed)
-            var bySchema: [String: [TableNode]] = [:]
-            for table in matches {
-                bySchema[table.schema, default: []].append(table)
-            }
-            let schemaNodes = bySchema.keys.sorted().map { name -> SidebarNode in
-                let tables = bySchema[name]!.sorted { $0.name < $1.name }
-                return SidebarNode(
-                    kind: .schema(name: name),
-                    children: tables.map { SidebarNode(kind: .table($0)) }
-                )
-            }
-            filteredRoot = SidebarNode(
-                kind: .database(name: "matches (\(matches.count))"),
-                children: schemaNodes
-            )
+            var chain: [SidebarNode] = []
+            var p = node.parent
+            while let cur = p { chain.insert(cur, at: 0); p = cur.parent }
+            for ancestor in chain where !outline.isItemExpanded(ancestor) { outline.expandItem(ancestor) }
+            let row = outline.row(forItem: node)
+            guard row >= 0 else { return }
+            outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            outline.scrollRowToVisible(row)
         }
 
+        func collapseAll() {
+            guard let outline else { return }
+            for r in roots where !r.isSection { outline.collapseItem(r, collapseChildren: true) }
+        }
+
+        func activate(_ node: SidebarNode, in outline: NSOutlineView) {
+            if let table = node.openableTable {
+                parent.onOpenTable(table)
+            } else if let fn = node.openableFunction {
+                parent.onOpenFunction?(fn)
+            } else if outline.isItemExpanded(node) {
+                outline.collapseItem(node)
+            } else {
+                outline.expandItem(node)
+            }
+        }
+
+        func preview(_ node: SidebarNode) {
+            if let table = node.openableTable { parent.onPreviewTable?(table) }
+        }
+
+        // MARK: Menus
+
         func menu(forRow row: Int, in outline: NSOutlineView) -> NSMenu? {
-            guard let node = outline.item(atRow: row) as? SidebarNode else { return nil }
+            guard row >= 0, let node = outline.item(atRow: row) as? SidebarNode else { return backgroundMenu() }
             switch node.kind {
-            case .database:
-                return databaseMenu()
+            case .section(let s):
+                return sectionMenu(s)
             case .schema(let name):
                 return schemaMenu(name: name)
-            case .table(let table):
+            case .table(let table), .columnMatch(let table, _):
                 return tableMenu(for: table)
             case .function(let fn):
                 return functionMenu(for: fn)
             case .functionsGroup(let schema):
                 return functionsGroupMenu(schema: schema)
+            case .partitions(let t):
+                return tableMenu(for: t)
             case .columns, .column:
                 return nil
             }
         }
 
-        private func functionMenu(for fn: FunctionNode) -> NSMenu? {
-            guard onOpenFunction != nil || onRunFunction != nil else { return nil }
+        private func item(_ title: String, _ action: @escaping () -> Void) -> NSMenuItem {
+            ClosureMenuItem(title: title, action: action)
+        }
+
+        private func sectionMenu(_ section: SidebarNode.Section) -> NSMenu? {
             let menu = NSMenu()
-            let verb = fn.kind == .procedure ? "Call" : "Run"
-            if onRunFunction != nil {
-                let run = NSMenuItem(title: "\(verb) \(fn.kind == .procedure ? "procedure" : "function")…",
-                                     action: #selector(handleRunFunction(_:)), keyEquivalent: "")
-                run.target = self
-                run.representedObject = FunctionBox(fn)
-                menu.addItem(run)
+            if section == .recent, let clear = parent.onClearRecents {
+                menu.addItem(item("Clear Recent Tables", clear))
             }
-            if onOpenFunction != nil {
-                let edit = NSMenuItem(title: "Edit \(fn.kind == .procedure ? "procedure" : "function")…",
-                                      action: #selector(handleOpenFunction(_:)), keyEquivalent: "")
-                edit.target = self
-                edit.representedObject = FunctionBox(fn)
-                menu.addItem(edit)
-            }
-            if onNewFunction != nil {
+            return menu.items.isEmpty ? nil : menu
+        }
+
+        /// Right-click on empty space: database-level actions.
+        func backgroundMenu() -> NSMenu? {
+            let menu = NSMenu()
+            if let newTable = parent.onNewTable { menu.addItem(item("New Table…") { newTable(nil) }) }
+            if let create = parent.onCreateSchema { menu.addItem(item("New Schema…", create)) }
+            if let toggle = parent.onToggleExtensionObjects {
                 menu.addItem(.separator())
-                let new = NSMenuItem(title: "New function…", action: #selector(handleNewFunction(_:)), keyEquivalent: "")
-                new.target = self
-                new.representedObject = fn.schema
-                menu.addItem(new)
+                let ext = item("Show Extension Objects", toggle)
+                ext.state = (content?.showExtensionObjects ?? false) ? .on : .off
+                menu.addItem(ext)
             }
-            return menu
+            if outline != nil {
+                menu.addItem(item("Collapse All") { [weak self] in self?.collapseAll() })
+            }
+            return menu.items.isEmpty ? nil : menu
+        }
+
+        private func functionMenu(for fn: FunctionNode) -> NSMenu? {
+            let menu = NSMenu()
+            let isProc = fn.kind == .procedure
+            if let run = parent.onRunFunction {
+                menu.addItem(item("\(isProc ? "Call" : "Run") \(isProc ? "procedure" : "function")…") { run(fn) })
+            }
+            if let open = parent.onOpenFunction {
+                menu.addItem(item("Edit \(isProc ? "procedure" : "function")…") { open(fn) })
+            }
+            if let newQuery = parent.onNewQuery {
+                menu.addItem(item("New Query in “\(fn.schema)”") { newQuery(fn.schema) })
+            }
+            if let new = parent.onNewFunction {
+                menu.addItem(.separator())
+                menu.addItem(item("New function…") { new(fn.schema) })
+            }
+            return menu.items.isEmpty ? nil : menu
         }
 
         private func functionsGroupMenu(schema: String) -> NSMenu? {
-            guard onNewFunction != nil else { return nil }
+            guard let new = parent.onNewFunction else { return nil }
             let menu = NSMenu()
-            let new = NSMenuItem(title: "New function in “\(schema)”…", action: #selector(handleNewFunction(_:)), keyEquivalent: "")
-            new.target = self
-            new.representedObject = schema
-            menu.addItem(new)
-            return menu
-        }
-
-        private func databaseMenu() -> NSMenu? {
-            guard onCreateSchema != nil || onNewTable != nil else { return nil }
-            let menu = NSMenu()
-            if onNewTable != nil {
-                let newTable = NSMenuItem(title: "New table…", action: #selector(handleNewTable(_:)), keyEquivalent: "")
-                newTable.target = self
-                menu.addItem(newTable)
-            }
-            if onCreateSchema != nil {
-                let new = NSMenuItem(title: "New schema…", action: #selector(handleCreateSchema(_:)), keyEquivalent: "")
-                new.target = self
-                menu.addItem(new)
-            }
+            menu.addItem(item("New function in “\(schema)”…") { new(schema) })
             return menu
         }
 
         private func schemaMenu(name: String) -> NSMenu? {
-            guard onRenameSchema != nil || onDropSchema != nil || onDuplicateSchema != nil || onCreateSchema != nil || onShowERD != nil || onNewTable != nil else { return nil }
             let menu = NSMenu()
-            if onNewTable != nil {
-                let newTable = NSMenuItem(title: "New table in “\(name)”…", action: #selector(handleNewTable(_:)), keyEquivalent: "")
-                newTable.target = self
-                newTable.representedObject = name
-                menu.addItem(newTable)
-            }
-            if onNewFunction != nil {
-                let newFn = NSMenuItem(title: "New function in “\(name)”…", action: #selector(handleNewFunction(_:)), keyEquivalent: "")
-                newFn.target = self
-                newFn.representedObject = name
-                menu.addItem(newFn)
-            }
-            if onNewTable != nil || onNewFunction != nil {
+            if let newQuery = parent.onNewQuery {
+                menu.addItem(item("New Query in “\(name)”") { newQuery(name) })
                 menu.addItem(.separator())
             }
-            if onShowERD != nil {
-                let erd = NSMenuItem(title: "Show ERD…", action: #selector(handleShowERD(_:)), keyEquivalent: "")
-                erd.target = self
-                erd.representedObject = name
-                menu.addItem(erd)
+            if let newTable = parent.onNewTable {
+                menu.addItem(item("New table in “\(name)”…") { newTable(name) })
+            }
+            if let newFn = parent.onNewFunction {
+                menu.addItem(item("New function in “\(name)”…") { newFn(name) })
+            }
+            if parent.onNewTable != nil || parent.onNewFunction != nil { menu.addItem(.separator()) }
+            if let erd = parent.onShowERD {
+                menu.addItem(item("Show ERD…") { erd(name) })
                 menu.addItem(.separator())
             }
-            if onCreateSchema != nil {
-                let new = NSMenuItem(title: "New schema…", action: #selector(handleCreateSchema(_:)), keyEquivalent: "")
-                new.target = self
-                menu.addItem(new)
-            }
-            if onDuplicateSchema != nil {
-                let dup = NSMenuItem(title: "Duplicate schema…", action: #selector(handleDuplicateSchema(_:)), keyEquivalent: "")
-                dup.target = self
-                dup.representedObject = name
-                menu.addItem(dup)
-            }
-            if onRenameSchema != nil {
-                let rename = NSMenuItem(title: "Rename schema…", action: #selector(handleRenameSchema(_:)), keyEquivalent: "")
-                rename.target = self
-                rename.representedObject = name
-                menu.addItem(rename)
-            }
-            if onDropSchema != nil {
+            if let hide = parent.onHideSchema { menu.addItem(item("Hide Schema") { hide(name) }) }
+            if let only = parent.onShowOnlySchema { menu.addItem(item("Show Only This Schema") { only(name) }) }
+            if parent.onHideSchema != nil || parent.onShowOnlySchema != nil { menu.addItem(.separator()) }
+            if let create = parent.onCreateSchema { menu.addItem(item("New schema…", create)) }
+            if let dup = parent.onDuplicateSchema { menu.addItem(item("Duplicate schema…") { dup(name) }) }
+            if let rename = parent.onRenameSchema { menu.addItem(item("Rename schema…") { rename(name) }) }
+            if let drop = parent.onDropSchema {
                 menu.addItem(.separator())
-                let drop = NSMenuItem(title: "Drop schema…", action: #selector(handleDropSchema(_:)), keyEquivalent: "")
-                drop.target = self
-                drop.representedObject = name
-                menu.addItem(drop)
+                menu.addItem(item("Drop schema…") { drop(name) })
             }
-            return menu
+            return menu.items.isEmpty ? nil : menu
         }
 
         private func tableMenu(for table: TableNode) -> NSMenu {
+            let p = parent
             let menu = NSMenu()
-            let open = NSMenuItem(title: "Open in tab", action: #selector(handleOpen(_:)), keyEquivalent: "")
-            open.target = self
-            open.representedObject = table
-            menu.addItem(open)
-            if onShowStructure != nil {
-                let struc = NSMenuItem(title: "Show Structure", action: #selector(handleShowStructure(_:)), keyEquivalent: "")
-                struc.target = self
-                struc.representedObject = table
-                menu.addItem(struc)
+            menu.addItem(item("Open in Tab") { p.onOpenTable(table) })
+            if let structure = p.onShowStructure { menu.addItem(item("Show Structure") { structure(table) }) }
+            if let ddl = p.onShowDDL { menu.addItem(item("Show CREATE SQL") { ddl(table) }) }
+            if let pin = p.onTogglePin {
+                let pinned = content?.pinned.contains(table.id) ?? false
+                menu.addItem(item(pinned ? "Unpin from Sidebar" : "Pin to Sidebar") { pin(table) })
             }
-            if onShowDDL != nil {
-                let ddl = NSMenuItem(title: "Show CREATE SQL", action: #selector(handleShowDDL(_:)), keyEquivalent: "")
-                ddl.target = self
-                ddl.representedObject = table
-                menu.addItem(ddl)
+            if let newQuery = p.onNewQuery {
+                menu.addItem(item("New Query in “\(table.schema)”") { newQuery(table.schema) })
             }
-            if onEditComments != nil {
-                let cm = NSMenuItem(title: "Edit comments…", action: #selector(handleEditComments(_:)), keyEquivalent: "")
-                cm.target = self
-                cm.representedObject = table
-                menu.addItem(cm)
+            menu.addItem(item("Copy Qualified Name") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(table.qualifiedName, forType: .string)
+            })
+            menu.addItem(.separator())
+            if let comments = p.onEditComments { menu.addItem(item("Edit comments…") { comments(table) }) }
+            if let usages = p.onFindUsages { menu.addItem(item("Find usages…") { usages(table) }) }
+            if let editView = p.onEditView, table.kind != .table {
+                menu.addItem(item("Edit view definition…") { editView(table) })
             }
-            if onFindUsages != nil {
-                let find = NSMenuItem(title: "Find usages…", action: #selector(handleFindUsages(_:)), keyEquivalent: "")
-                find.target = self
-                find.representedObject = table
-                menu.addItem(find)
-            }
-            // View body editor — only for views / matviews.
-            if onEditView != nil, table.kind != .table {
-                let editView = NSMenuItem(title: "Edit view definition…", action: #selector(handleEditView(_:)), keyEquivalent: "")
-                editView.target = self
-                editView.representedObject = table
-                menu.addItem(editView)
-            }
-            // Data tools — real tables only.
             if table.kind == .table {
-                if onNewIndex != nil {
-                    let idx = NSMenuItem(title: "New index…", action: #selector(handleNewIndex(_:)), keyEquivalent: "")
-                    idx.target = self
-                    idx.representedObject = table
-                    menu.addItem(idx)
-                }
-                if onGenerateData != nil {
-                    let gen = NSMenuItem(title: "Generate data…", action: #selector(handleGenerateData(_:)), keyEquivalent: "")
-                    gen.target = self
-                    gen.representedObject = table
-                    menu.addItem(gen)
-                }
-                if onTruncate != nil {
-                    let trunc = NSMenuItem(title: "Truncate…", action: #selector(handleTruncate(_:)), keyEquivalent: "")
-                    trunc.target = self
-                    trunc.representedObject = table
-                    menu.addItem(trunc)
-                }
+                if let idx = p.onNewIndex { menu.addItem(item("New index…") { idx(table) }) }
+                if let gen = p.onGenerateData { menu.addItem(item("Generate data…") { gen(table) }) }
+                if let trunc = p.onTruncate { menu.addItem(item("Truncate…") { trunc(table) }) }
             }
-            // Maintenance bloc — tables + matviews only.
-            if onMaintenance != nil, table.kind != .view {
+            if let maintenance = p.onMaintenance, table.kind != .view {
                 menu.addItem(.separator())
                 let maint = NSMenuItem(title: "Maintenance", action: nil, keyEquivalent: "")
                 let sub = NSMenu()
                 for action in AdminActions.Maintenance.allCases {
-                    let item = NSMenuItem(
-                        title: action.label,
-                        action: #selector(handleMaintenance(_:)),
-                        keyEquivalent: ""
-                    )
-                    item.target = self
-                    item.representedObject = MaintenancePayload(table: table, action: action)
-                    item.toolTip = action.help
-                    sub.addItem(item)
+                    let mi = item(action.label) { maintenance(table, action) }
+                    mi.toolTip = action.help
+                    sub.addItem(mi)
                 }
                 maint.submenu = sub
                 menu.addItem(maint)
             }
-            // Materialized view refresh.
-            if onRefreshMatView != nil, table.kind == .materializedView {
-                let refresh = NSMenuItem(title: "Refresh", action: #selector(handleRefreshMV(_:)), keyEquivalent: "")
-                refresh.target = self
-                refresh.representedObject = RefreshPayload(table: table, concurrently: false)
-                menu.addItem(refresh)
-                let refreshC = NSMenuItem(title: "Refresh CONCURRENTLY", action: #selector(handleRefreshMV(_:)), keyEquivalent: "")
-                refreshC.target = self
-                refreshC.representedObject = RefreshPayload(table: table, concurrently: true)
+            if let refresh = p.onRefreshMatView, table.kind == .materializedView {
+                menu.addItem(item("Refresh") { refresh(table, false) })
+                let refreshC = item("Refresh CONCURRENTLY") { refresh(table, true) }
                 refreshC.toolTip = "Requires a unique index on the matview. Fails otherwise."
                 menu.addItem(refreshC)
             }
             menu.addItem(.separator())
-            if onCopyTable != nil {
-                let copy = NSMenuItem(title: "Copy table to…", action: #selector(handleCopy(_:)), keyEquivalent: "")
-                copy.target = self
-                copy.representedObject = table
-                menu.addItem(copy)
-            }
-            if onExportTable != nil {
-                let exp = NSMenuItem(title: "Export…", action: #selector(handleExport(_:)), keyEquivalent: "")
-                exp.target = self
-                exp.representedObject = table
-                menu.addItem(exp)
-            }
-            if onImportInto != nil {
-                let imp = NSMenuItem(title: "Import CSV into this table…", action: #selector(handleImport(_:)), keyEquivalent: "")
-                imp.target = self
-                imp.representedObject = table
-                menu.addItem(imp)
-            }
+            if let copy = p.onCopyTable { menu.addItem(item("Copy table to…") { copy(table) }) }
+            if let exp = p.onExportTable { menu.addItem(item("Export…") { exp(table) }) }
+            if let imp = p.onImportInto { menu.addItem(item("Import CSV into this table…") { imp(table) }) }
             return menu
-        }
-
-        private struct MaintenancePayload { let table: TableNode; let action: AdminActions.Maintenance }
-        private struct RefreshPayload { let table: TableNode; let concurrently: Bool }
-
-        @objc private func handleMaintenance(_ sender: NSMenuItem) {
-            guard let p = sender.representedObject as? MaintenancePayload else { return }
-            onMaintenance?(p.table, p.action)
-        }
-        @objc private func handleRefreshMV(_ sender: NSMenuItem) {
-            guard let p = sender.representedObject as? RefreshPayload else { return }
-            onRefreshMatView?(p.table, p.concurrently)
-        }
-        @objc private func handleEditComments(_ sender: NSMenuItem) {
-            guard let table = sender.representedObject as? TableNode else { return }
-            onEditComments?(table)
-        }
-        @objc private func handleRenameSchema(_ sender: NSMenuItem) {
-            guard let name = sender.representedObject as? String else { return }
-            onRenameSchema?(name)
-        }
-        @objc private func handleDropSchema(_ sender: NSMenuItem) {
-            guard let name = sender.representedObject as? String else { return }
-            onDropSchema?(name)
-        }
-        @objc private func handleDuplicateSchema(_ sender: NSMenuItem) {
-            guard let name = sender.representedObject as? String else { return }
-            onDuplicateSchema?(name)
-        }
-        @objc private func handleCreateSchema(_ sender: NSMenuItem) {
-            onCreateSchema?()
-        }
-        @objc private func handleNewTable(_ sender: NSMenuItem) {
-            onNewTable?(sender.representedObject as? String)
-        }
-        @objc private func handleFindUsages(_ sender: NSMenuItem) {
-            guard let table = sender.representedObject as? TableNode else { return }
-            onFindUsages?(table)
-        }
-        @objc private func handleOpenFunction(_ sender: NSMenuItem) {
-            guard let box = sender.representedObject as? FunctionBox else { return }
-            onOpenFunction?(box.fn)
-        }
-        @objc private func handleRunFunction(_ sender: NSMenuItem) {
-            guard let box = sender.representedObject as? FunctionBox else { return }
-            onRunFunction?(box.fn)
-        }
-        @objc private func handleNewFunction(_ sender: NSMenuItem) {
-            onNewFunction?(sender.representedObject as? String)
-        }
-        @objc private func handleTruncate(_ sender: NSMenuItem) {
-            guard let table = sender.representedObject as? TableNode else { return }
-            onTruncate?(table)
-        }
-        @objc private func handleGenerateData(_ sender: NSMenuItem) {
-            guard let table = sender.representedObject as? TableNode else { return }
-            onGenerateData?(table)
-        }
-        @objc private func handleNewIndex(_ sender: NSMenuItem) {
-            guard let table = sender.representedObject as? TableNode else { return }
-            onNewIndex?(table)
-        }
-        @objc private func handleEditView(_ sender: NSMenuItem) {
-            guard let table = sender.representedObject as? TableNode else { return }
-            onEditView?(table)
-        }
-        @objc private func handleShowERD(_ sender: NSMenuItem) {
-            guard let name = sender.representedObject as? String else { return }
-            onShowERD?(name)
-        }
-
-        @objc private func handleOpen(_ sender: NSMenuItem) {
-            guard let table = sender.representedObject as? TableNode else { return }
-            onOpenTable(table)
-        }
-
-        @objc private func handleCopy(_ sender: NSMenuItem) {
-            guard let table = sender.representedObject as? TableNode else { return }
-            onCopyTable?(table)
-        }
-
-        @objc private func handleExport(_ sender: NSMenuItem) {
-            guard let table = sender.representedObject as? TableNode else { return }
-            onExportTable?(table)
-        }
-
-        @objc private func handleImport(_ sender: NSMenuItem) {
-            guard let table = sender.representedObject as? TableNode else { return }
-            onImportInto?(table)
-        }
-
-        @objc private func handleShowStructure(_ sender: NSMenuItem) {
-            guard let table = sender.representedObject as? TableNode else { return }
-            onShowStructure?(table)
-        }
-
-        @objc private func handleShowDDL(_ sender: NSMenuItem) {
-            guard let table = sender.representedObject as? TableNode else { return }
-            onShowDDL?(table)
         }
 
         // MARK: NSOutlineViewDataSource
 
         func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-            guard let node = item as? SidebarNode else { return activeRoot.children.count }
+            guard let node = item as? SidebarNode else { return roots.count }
             return node.children.count
         }
 
         func outlineView(_ outlineView: NSOutlineView, child childIndex: Int, ofItem item: Any?) -> Any {
-            guard let node = item as? SidebarNode else { return activeRoot.children[childIndex] }
+            guard let node = item as? SidebarNode else { return roots[childIndex] }
             return node.children[childIndex]
         }
 
         func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-            (item as? SidebarNode)?.children.isEmpty == false
+            (item as? SidebarNode)?.isExpandable ?? false
         }
 
         // MARK: NSOutlineViewDelegate
@@ -586,81 +768,59 @@ struct SidebarOutlineView: NSViewRepresentable {
         func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
             guard let node = item as? SidebarNode else { return nil }
             let identifier = NSUserInterfaceItemIdentifier("SidebarCell")
-            let cell: NSTableCellView
-            if let reused = outlineView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView {
+            let cell: SidebarCellView
+            if let reused = outlineView.makeView(withIdentifier: identifier, owner: self) as? SidebarCellView {
                 cell = reused
             } else {
                 cell = SidebarCellView()
                 cell.identifier = identifier
             }
-            (cell as? SidebarCellView)?.configure(node: node)
+            cell.configure(node: node, highlight: highlight)
             return cell
         }
 
         func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
-            22
+            (item as? SidebarNode)?.isSection == true ? 24 : 22
         }
 
-        @MainActor @objc func handleDoubleClick(_ sender: NSOutlineView) {
+        func outlineView(_ outlineView: NSOutlineView, typeSelectStringFor tableColumn: NSTableColumn?, item: Any) -> String? {
+            (item as? SidebarNode)?.displayName
+        }
+
+        func outlineViewItemDidExpand(_ notification: Notification) {
+            guard !isRestoring, !isFiltering,
+                  let node = notification.userInfo?["NSObject"] as? SidebarNode else { return }
+            var set = expanded
+            if set.insert(node.id).inserted { expanded = set }
+        }
+
+        func outlineViewItemDidCollapse(_ notification: Notification) {
+            guard !isRestoring, !isFiltering,
+                  let node = notification.userInfo?["NSObject"] as? SidebarNode else { return }
+            var set = expanded
+            if set.remove(node.id) != nil { expanded = set }
+        }
+
+        @objc func handleClick(_ sender: NSOutlineView) {
+            let row = sender.clickedRow
+            guard row >= 0, let node = sender.item(atRow: row) as? SidebarNode,
+                  let event = NSApp.currentEvent, event.clickCount == 1,
+                  !event.modifierFlags.contains(.command) else { return }
+            // Clicks on the disclosure triangle only toggle expansion.
+            let point = sender.convert(event.locationInWindow, from: nil)
+            if sender.frameOfOutlineCell(atRow: row).contains(point) { return }
+            preview(node)
+        }
+
+        @objc func handleDoubleClick(_ sender: NSOutlineView) {
             let row = sender.clickedRow
             guard row >= 0, let node = sender.item(atRow: row) as? SidebarNode else { return }
-            if let table = node.openableTable {
-                onOpenTable(table)
-            } else if let fn = node.openableFunction {
-                onOpenFunction?(fn)
-            } else if sender.isItemExpanded(node) {
-                sender.collapseItem(node)
-            } else {
-                sender.expandItem(node)
-            }
+            activate(node, in: sender)
         }
-    }
-
-    /// AppKit's `representedObject` needs a class; `FunctionNode` is a
-    /// struct, so box it for the menu round-trip.
-    private final class FunctionBox {
-        let fn: FunctionNode
-        init(_ fn: FunctionNode) { self.fn = fn }
     }
 
     func makeCoordinator() -> Coordinator {
-        let coord = Coordinator(
-            root: SidebarNode.build(from: snapshot),
-            index: SchemaIndex(snapshot: snapshot),
-            onOpenTable: onOpenTable,
-            onCopyTable: onCopyTable,
-            onExportTable: onExportTable,
-            onImportInto: onImportInto,
-            onShowStructure: onShowStructure,
-            onShowDDL: onShowDDL
-        )
-        propagateExtra(to: coord)
-        return coord
-    }
-
-    private func propagateExtra(to coord: Coordinator) {
-        coord.onCopyTable = onCopyTable
-        coord.onExportTable = onExportTable
-        coord.onImportInto = onImportInto
-        coord.onShowStructure = onShowStructure
-        coord.onShowDDL = onShowDDL
-        coord.onMaintenance = onMaintenance
-        coord.onRefreshMatView = onRefreshMatView
-        coord.onEditComments = onEditComments
-        coord.onRenameSchema = onRenameSchema
-        coord.onDropSchema = onDropSchema
-        coord.onDuplicateSchema = onDuplicateSchema
-        coord.onCreateSchema = onCreateSchema
-        coord.onNewTable = onNewTable
-        coord.onFindUsages = onFindUsages
-        coord.onOpenFunction = onOpenFunction
-        coord.onNewFunction = onNewFunction
-        coord.onRunFunction = onRunFunction
-        coord.onTruncate = onTruncate
-        coord.onGenerateData = onGenerateData
-        coord.onNewIndex = onNewIndex
-        coord.onEditView = onEditView
-        coord.onShowERD = onShowERD
+        Coordinator(parent: self)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -672,9 +832,11 @@ struct SidebarOutlineView: NSViewRepresentable {
         outline.allowsMultipleSelection = false
         outline.allowsColumnReordering = false
         outline.allowsColumnResizing = false
+        outline.allowsTypeSelect = true
         outline.indentationPerLevel = 14
         outline.autosaveExpandedItems = false
         outline.target = context.coordinator
+        outline.action = #selector(Coordinator.handleClick(_:))
         outline.doubleAction = #selector(Coordinator.handleDoubleClick(_:))
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("Main"))
@@ -685,6 +847,8 @@ struct SidebarOutlineView: NSViewRepresentable {
 
         outline.dataSource = context.coordinator
         outline.delegate = context.coordinator
+        context.coordinator.outline = outline
+        controller.coordinator = context.coordinator
 
         let scroll = NSScrollView()
         scroll.documentView = outline
@@ -693,39 +857,32 @@ struct SidebarOutlineView: NSViewRepresentable {
         scroll.borderType = .noBorder
         scroll.autohidesScrollers = true
 
-        // Expand the database + top-level schemas by default.
-        DispatchQueue.main.async {
-            outline.reloadData()
-            outline.expandItem(context.coordinator.root)
-            for schema in context.coordinator.root.children {
-                outline.expandItem(schema)
-            }
-        }
+        context.coordinator.apply(content: content, filter: filter)
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let outline = scroll.documentView as? NSOutlineView else { return }
-        propagateExtra(to: context.coordinator)
-        // Snapshot changed?
-        if !snapshotMatchesIndex(context.coordinator.index, snapshot: snapshot) {
-            context.coordinator.root = SidebarNode.build(from: snapshot)
-            context.coordinator.index = SchemaIndex(snapshot: snapshot)
-        }
-        context.coordinator.applyFilter(filterTerm)
-        let active = context.coordinator.activeRoot
-        outline.reloadData()
-        outline.expandItem(active)
-        for schema in active.children {
-            outline.expandItem(schema)
-        }
+        context.coordinator.parent = self
+        controller.coordinator = context.coordinator
+        context.coordinator.apply(content: content, filter: filter)
+    }
+}
+
+/// NSMenuItem that runs a closure — keeps the context menus declarative
+/// without a selector + representedObject pair per action.
+final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(title: String, keyEquivalent: String = "", action handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(fire), keyEquivalent: keyEquivalent)
+        self.target = self
     }
 
-    /// Cheap heuristic: rebuilds only when the database name or per-schema
-    /// table counts change. Saves a full SidebarNode rebuild on every
-    /// filter keystroke.
-    private func snapshotMatchesIndex(_ index: SchemaIndex, snapshot: SchemaSnapshot) -> Bool {
-        index.totalTables == snapshot.schemas.reduce(0) { $0 + $1.tables.count }
+    required init(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    @objc private func fire() {
+        handler()
     }
 }
 
@@ -769,9 +926,32 @@ private final class SidebarCellView: NSTableCellView {
     required init?(coder: NSCoder) { fatalError() }
 
     @MainActor
-    func configure(node: SidebarNode) {
+    func configure(node: SidebarNode, highlight: String) {
         icon.image = NSImage(systemSymbolName: node.symbol, accessibilityDescription: node.displayName)
-        title.stringValue = node.displayName
+        let name = node.displayName
+        if node.isSection {
+            title.attributedStringValue = NSAttributedString(string: name.uppercased(), attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .kern: 0.6,
+            ])
+        } else if !highlight.isEmpty, node.openableTable != nil || node.openableFunction != nil {
+            let attr = NSMutableAttributedString(string: name, attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: NSColor.labelColor,
+            ])
+            for r in CommandMatcher.matchedRanges(in: name, needle: highlight) {
+                attr.addAttributes([
+                    .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+                    .foregroundColor: NSColor.controlAccentColor,
+                ], range: NSRange(r, in: name))
+            }
+            title.attributedStringValue = attr
+        } else {
+            title.font = NSFont.systemFont(ofSize: 12)
+            title.textColor = .labelColor
+            title.stringValue = name
+        }
         if let s = node.secondary {
             secondary.stringValue = s
             secondary.isHidden = false
@@ -782,19 +962,46 @@ private final class SidebarCellView: NSTableCellView {
     }
 }
 
-/// NSOutlineView subclass that delegates right-click menu construction to
-/// the SidebarOutlineView coordinator so we can build per-row context
-/// menus (Open / Copy to… / Export… / Import CSV).
+/// NSOutlineView subclass: per-row context menus through the coordinator,
+/// and keyboard activation (Return opens, Space previews, Esc clears the
+/// filter) on top of the native arrows + type-select.
 final class SidebarOutline: NSOutlineView {
     weak var coordinatorRef: SidebarOutlineView.Coordinator?
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let point = convert(event.locationInWindow, from: nil)
         let row = self.row(at: point)
-        guard row >= 0 else { return nil }
+        guard row >= 0 else { return coordinatorRef?.backgroundMenu() }
         // Select the row that was right-clicked so the menu has visual
         // anchor; this matches Finder behaviour.
         selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         return coordinatorRef?.menu(forRow: row, in: self)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let plain = event.modifierFlags.intersection([.command, .option, .control]).isEmpty
+        if plain, let coord = coordinatorRef {
+            switch event.keyCode {
+            case 36, 76:  // Return / Enter
+                if selectedRow >= 0, let node = item(atRow: selectedRow) as? SidebarNode {
+                    coord.activate(node, in: self)
+                    return
+                }
+            case 49:  // Space
+                if selectedRow >= 0, let node = item(atRow: selectedRow) as? SidebarNode,
+                   node.openableTable != nil {
+                    coord.preview(node)
+                    return
+                }
+            case 53:  // Escape
+                if coord.isFiltering {
+                    coord.parent.onClearFilter?()
+                    return
+                }
+            default:
+                break
+            }
+        }
+        super.keyDown(with: event)
     }
 }

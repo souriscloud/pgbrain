@@ -14,21 +14,37 @@ final class CommandPaletteWindow {
     private var model: CommandPaletteModel?
     private var localKeyMonitor: Any?
     private var globalDismissMonitor: Any?
+    private var mode: Mode = .everything
 
-    /// Open above the frontmost connection window (if any). Closes the
-    /// palette if it's already visible so ⌘K acts as a true toggle.
-    func toggle() {
-        if let panel, panel.isVisible {
-            dismiss()
-            return
-        }
-        present()
+    /// ⌘K / ⌘⇧O search everything; ⌘O (Go to Table) is scoped to
+    /// relations + functions with recents first.
+    enum Mode: Equatable {
+        case everything, goToTable
     }
 
-    func present() {
+    /// Open above the frontmost connection window (if any). Closes the
+    /// palette if it's already visible in the same mode so the shortcut
+    /// acts as a true toggle; a different mode switches in place.
+    func toggle(mode: Mode = .everything) {
+        if let panel, panel.isVisible {
+            let same = self.mode == mode
+            dismiss()
+            if same { return }
+        }
+        present(mode: mode)
+    }
+
+    func present(mode: Mode = .everything) {
+        self.mode = mode
         let service = frontmostService()
-        let items = CommandProviders.items(service: service)
-        let model = CommandPaletteModel(items: items)
+        let model: CommandPaletteModel
+        switch mode {
+        case .everything:
+            model = CommandPaletteModel(items: CommandProviders.items(service: service))
+        case .goToTable:
+            model = CommandPaletteModel(items: CommandProviders.goToItems(service: service),
+                                        placeholder: "Go to table, view, or function…  (schema.name works)")
+        }
         self.model = model
 
         let root = CommandPaletteView(
@@ -153,6 +169,10 @@ final class CommandPaletteWindow {
             case 40 where event.modifierFlags.contains(.command): // ⌘K toggle
                 self.dismiss()
                 return nil
+            case 31 where event.modifierFlags.contains(.command): // ⌘O / ⌘⇧O
+                let wanted: Mode = event.modifierFlags.contains(.shift) ? .everything : .goToTable
+                self.toggle(mode: wanted)
+                return nil
             default:
                 return event
             }
@@ -174,7 +194,7 @@ final class CommandPaletteWindow {
         if let m = globalDismissMonitor { NSEvent.removeMonitor(m); globalDismissMonitor = nil }
     }
 
-    private func frontmostService() -> ConnectionService? {
+    func frontmostService() -> ConnectionService? {
         guard let delegate = AppDelegate.shared else { return nil }
         let key = NSApp.keyWindow ?? NSApp.mainWindow
         if let key, let entry = delegate.windowManager.entries.first(where: { $0.window === key }) {

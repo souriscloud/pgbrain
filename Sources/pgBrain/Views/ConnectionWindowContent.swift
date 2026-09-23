@@ -70,6 +70,29 @@ extension Notification.Name {
     /// / `userInfo["kind"]` ("csv" | "json").
     static let pgbrainExportTable = Notification.Name("cloud.souris.pgbrain.exportTable")
     static let pgbrainImportTable = Notification.Name("cloud.souris.pgbrain.importTable")
+    /// Window-scoped navigation command from the menu bar. `object` is the
+    /// target `WorkspaceState.windowID`; `userInfo["command"]` is one of
+    /// "focusFilter", "reveal".
+    static let pgbrainSidebarCommand = Notification.Name("cloud.souris.pgbrain.sidebarCommand")
+}
+
+/// userInfo key carrying `WorkspaceState.windowID`. Sibling windows (same
+/// connection, different database) share `connection.id`, so posters that
+/// target one specific window add this and receivers check it via `owns`.
+let pgbrainWindowIDKey = "windowID"
+
+extension ConnectionService {
+    /// True when `notif` is addressed to this window: same connection id,
+    /// and — when the poster named a window — the same window.
+    func owns(_ notif: Notification) -> Bool {
+        guard notif.object as? UUID == connection.id else { return false }
+        if let target = notif.userInfo?[pgbrainWindowIDKey] as? UUID { return target == workspace.windowID }
+        return true
+    }
+
+    var navigationScope: NavigationHistoryStore.Scope {
+        NavigationHistoryStore.Scope(connectionID: connection.id, database: connection.database)
+    }
 }
 
 /// Drives the confirmation dialog for destructive maintenance actions
@@ -96,8 +119,14 @@ struct ConnectionWindowContent: View {
     @Bindable var service: ConnectionService
     @State private var copySource: TableNode?
     @State private var showSchemaDiff = false
-    @State private var sidebarFilter: String = ""
-    @State private var sidebarVisible: Bool = true
+    @State private var sidebar = SidebarController()
+    /// Extension members (PostGIS functions, spatial_ref_sys, …) stay out
+    /// of the tree unless the user opts in.
+    @AppStorage("pgbrain.sidebar.showExtensionObjects") private var showExtensionObjects = false
+    @State private var databases: [String] = []
+    @State private var createdDatabase: IdentifiedString?
+    /// Keeps the tree mounted (dimmed) while a refresh is in flight.
+    @State private var hasLoadedSchema = false
     /// Persisted sidebar width — HSplitView never honoured `idealWidth`
     /// reliably (opened far too wide), so we drive the width ourselves.
     @AppStorage("pgbrain.sidebarWidth") private var sidebarWidth: Double = 230
@@ -222,7 +251,13 @@ struct ConnectionWindowContent: View {
             )
         }
         .sheet(isPresented: $showCreateDatabase) {
-            CreateDatabaseSheet(service: service) { showCreateDatabase = false }
+            CreateDatabaseSheet(service: service, onClose: { showCreateDatabase = false }, onCreated: { name in
+                refreshDatabases()
+                // Let the sheet finish dismissing before presenting the alert.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    createdDatabase = IdentifiedString(id: name)
+                }
+            })
         }
         .sheet(isPresented: $showRestoreDatabase) {
             RestoreDatabaseSheet(service: service) { showRestoreDatabase = false }
@@ -303,32 +338,32 @@ struct ConnectionWindowContent: View {
     private var withNotificationFlows: some View {
         withObjectSheets
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainOpenSequenceInspector)) { notif in
-            if let id = notif.object as? UUID, id == service.connection.id {
+            if service.owns(notif) {
                 showSequenceInspector = true
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainOpenNotifyPanel)) { notif in
-            if let id = notif.object as? UUID, id == service.connection.id {
+            if service.owns(notif) {
                 showNotifyPanel = true
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainOpenSnippets)) { notif in
-            if let id = notif.object as? UUID, id == service.connection.id {
+            if service.owns(notif) {
                 showSnippets = true
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainCreateSchema)) { notif in
-            if let id = notif.object as? UUID, id == service.connection.id {
+            if service.owns(notif) {
                 showCreateSchema = true
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainCreateDatabase)) { notif in
-            if let id = notif.object as? UUID, id == service.connection.id {
+            if service.owns(notif) {
                 showCreateDatabase = true
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainRestoreDatabase)) { notif in
-            if let id = notif.object as? UUID, id == service.connection.id {
+            if service.owns(notif) {
                 showRestoreDatabase = true
             }
         }
@@ -359,12 +394,12 @@ struct ConnectionWindowContent: View {
             }
         ))
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainShowERD)) { notif in
-            guard let id = notif.object as? UUID, id == service.connection.id,
+            guard service.owns(notif),
                   let schema = notif.userInfo?["schema"] as? String else { return }
             erdSchema = IdentifiedString(id: schema)
         }
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainEditTableStructure)) { notif in
-            guard let id = notif.object as? UUID, id == service.connection.id,
+            guard service.owns(notif),
                   let schemaName = notif.userInfo?["schema"] as? String,
                   let tableName = notif.userInfo?["table"] as? String,
                   let node = service.schema.schemas.first(where: { $0.name == schemaName })?
@@ -398,7 +433,7 @@ struct ConnectionWindowContent: View {
             )
         }
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainOpenQueryHistory)) { notif in
-            if let id = notif.object as? UUID, id == service.connection.id {
+            if service.owns(notif) {
                 showQueryHistory = true
             }
         }
@@ -406,22 +441,61 @@ struct ConnectionWindowContent: View {
             // ⌘K → "Show Activity Panel" posts this with the target
             // connection ID. Only the window that owns that
             // connection should react.
-            if let id = notif.object as? UUID, id == service.connection.id {
+            if service.owns(notif) {
                 showActivityPanel = true
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainSaveWorkspace)) { notif in
-            if let id = notif.object as? UUID, id == service.connection.id {
+            if service.owns(notif) {
                 workspaceNameDraft = "Workspace \((WorkspaceStore.shared.workspaces(for: service.connection.id).count) + 1)"
                 showSaveWorkspaceDialog = true
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .pgbrainSwitchWorkspace)) { notif in
-            guard let connID = notif.object as? UUID, connID == service.connection.id,
+            guard service.owns(notif),
                   let wsID = notif.userInfo?["workspaceID"] as? UUID,
-                  let ws = WorkspaceStore.shared.workspaces(for: connID).first(where: { $0.id == wsID })
+                  let ws = WorkspaceStore.shared.workspaces(for: service.connection.id).first(where: { $0.id == wsID })
             else { return }
             switchTo(workspace: ws)
+        }
+        .alert(item: $createdDatabase) { db in
+            Alert(
+                title: Text("Database “\(db.value)” created"),
+                message: Text("Open it in a new window?"),
+                primaryButton: .default(Text("Open")) {
+                    AppDelegate.shared?.openConnection(service.connection, database: db.value)
+                },
+                secondaryButton: .cancel(Text("Not Now"))
+            )
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pgbrainSidebarCommand)) { notif in
+            guard notif.object as? UUID == service.workspace.windowID,
+                  let command = notif.userInfo?["command"] as? String else { return }
+            switch command {
+            case "focusFilter":
+                if !service.workspace.sidebarVisible { service.workspace.sidebarVisible = true }
+                DispatchQueue.main.async { sidebar.focusFilter() }
+            case "reveal":
+                if let t = service.workspace.selectedTab?.tableNode { revealInSidebar(t) }
+            default:
+                break
+            }
+        }
+        .onChange(of: service.schema) { _, snapshot in
+            guard service.schemaState == .loaded else { return }
+            reconcileTabs(with: snapshot)
+        }
+        .onChange(of: service.schemaState) { _, state in
+            if state == .loaded {
+                hasLoadedSchema = true
+                reconcileTabs(with: service.schema)
+                if databases.isEmpty { refreshDatabases() }
+            }
+        }
+        .onChange(of: service.workspace.selectedID) { _, _ in
+            if let t = service.workspace.selectedTab?.tableNode {
+                sidebar.reveal(tableID: t.id)
+            }
         }
         .alert("Name this workspace", isPresented: $showSaveWorkspaceDialog) {
             TextField("Workspace name", text: $workspaceNameDraft)
@@ -452,7 +526,7 @@ struct ConnectionWindowContent: View {
     @ViewBuilder
     private var connectedWorkspace: some View {
         HStack(spacing: 0) {
-            if sidebarVisible {
+            if service.workspace.sidebarVisible {
                 sidebarPane
                     .frame(width: CGFloat(sidebarWidth))
                     .transition(.move(edge: .leading).combined(with: .opacity))
@@ -462,7 +536,7 @@ struct ConnectionWindowContent: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(keyboardShortcuts)
-        .animation(.easeInOut(duration: 0.18), value: sidebarVisible)
+        .animation(.easeInOut(duration: 0.18), value: service.workspace.sidebarVisible)
     }
 
     /// 1pt divider with an 8pt grab strip; drag to resize the sidebar
@@ -505,7 +579,7 @@ struct ConnectionWindowContent: View {
             shortcut("w", modifiers: [.command, .shift]) {
                 NSApp.keyWindow?.performClose(nil)
             }
-            shortcut("t", modifiers: .command) { _ = service.workspace.openScratchpad() }
+            shortcut("t", modifiers: .command) { newScratchpadInContext() }
             // Tab navigation — bind multiple aliases so Safari /
             // Chrome / VSCode / JetBrains muscle memory all work.
             shortcut(.rightArrow, modifiers: [.command, .option]) { service.workspace.nextTab() }
@@ -548,7 +622,8 @@ struct ConnectionWindowContent: View {
             }
             // ⌘B toggles the sidebar — VSCode / Code muscle memory.
             shortcut("b", modifiers: .command) {
-                sidebarVisible.toggle()
+                service.workspace.sidebarVisible.toggle()
+                SessionStateStore.shared.scheduleSnapshot()
             }
         }
         .hidden()
@@ -563,8 +638,8 @@ struct ConnectionWindowContent: View {
     /// ⌘W routing: close the current tab first; only close the
     /// window when no tabs are open. Matches Safari / Chrome / Code.
     private func closeCurrentTabOrWindow() {
-        if !service.workspace.tabs.isEmpty {
-            service.workspace.closeCurrentTab()
+        if let id = service.workspace.selectedID {
+            TabCloseGuard.close([id], in: service.workspace)
         } else {
             NSApp.keyWindow?.performClose(nil)
         }
@@ -718,127 +793,237 @@ struct ConnectionWindowContent: View {
         }
     }
 
+    private var hiddenSchemas: Set<String> {
+        SchemaVisibility.shared.hidden(for: service.connection.id)
+    }
+
+    private var sidebarContent: SidebarContent {
+        let scope = service.navigationScope
+        let store = NavigationHistoryStore.shared
+        return SidebarContent(
+            snapshot: visibleSchema,
+            showExtensionObjects: showExtensionObjects,
+            pinned: store.pinned(for: scope),
+            recents: store.recents(for: scope)
+        )
+    }
+
+    private var preferredSchema: String? {
+        let head = service.connection.defaultSearchPath
+            .split(separator: ",").first
+            .map { $0.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
+        return (head?.isEmpty == false && head != "$user") ? head : nil
+    }
+
     @ViewBuilder
     private var sidebarPane: some View {
         VStack(spacing: 0) {
-            switch service.schemaState {
-            case .loaded:
-                sidebarSearchField
-                SidebarOutlineView(
-                    snapshot: visibleSchema,
-                    filterTerm: sidebarFilter,
-                    onOpenTable: { service.workspace.openTable($0) },
-                    onCopyTable: { copySource = $0 },
-                    onShowStructure: { service.workspace.openTable($0, focusPane: .structure) },
-                    onShowDDL: { service.workspace.openTable($0, focusPane: .ddl) },
-                    onMaintenance: { table, action in
-                        if action.isDestructive {
-                            pendingMaintenance = MaintenanceRequest(table: table, action: action)
-                        } else {
-                            runMaintenance(action, on: table)
-                        }
-                    },
-                    onRefreshMatView: { table, concurrently in
-                        Task {
-                            _ = await AdminActions.refreshMaterializedView(
-                                schema: table.schema, name: table.name,
-                                concurrently: concurrently, service: service
-                            )
-                        }
-                    },
-                    onEditComments: { table in
-                        commentsTarget = CommentsTarget(schema: table.schema, table: table.name)
-                    },
-                    onRenameSchema: { name in
-                        renameSchemaTarget = IdentifiedString(id: name)
-                    },
-                    onDropSchema: { name in
-                        dropSchemaTarget = IdentifiedString(id: name)
-                    },
-                    onDuplicateSchema: { name in
-                        duplicateSchemaTarget = IdentifiedString(id: name)
-                    },
-                    onCreateSchema: { showCreateSchema = true },
-                    onNewTable: { schema in tableDesigner = TableDesignerRequest(mode: .create(schema: schema)) },
-                    onFindUsages: { table in
-                        findUsagesTarget = CommentsTarget(schema: table.schema, table: table.name)
-                    },
-                    onOpenFunction: { fn in
-                        functionDesigner = FunctionDesignerRequest(mode: .edit(fn))
-                    },
-                    onNewFunction: { schema in
-                        functionDesigner = FunctionDesignerRequest(mode: .create(schema: schema))
-                    },
-                    onRunFunction: { fn in
-                        functionRunner = FunctionRunnerRequest(function: fn)
-                    },
-                    onTruncate: { table in
-                        truncateTarget = CommentsTarget(schema: table.schema, table: table.name)
-                    },
-                    onGenerateData: { table in
-                        generateDataTarget = table
-                    },
-                    onNewIndex: { table in
-                        newIndexTarget = table
-                    },
-                    onEditView: { table in
-                        editViewTarget = table
-                    },
-                    onShowERD: { name in
-                        erdSchema = IdentifiedString(id: name)
-                    }
+            let showTree = service.schemaState == .loaded || (hasLoadedSchema && service.schemaState == .loading)
+            if showTree {
+                SidebarHeader(
+                    schemaNames: service.schema.schemas.map(\.name),
+                    hidden: hiddenSchemas,
+                    isRefreshing: service.schemaState == .loading,
+                    showExtensionObjects: $showExtensionObjects,
+                    onShowAll: { SchemaVisibility.shared.clear(connectionID: service.connection.id) },
+                    onFocus: { showOnlySchema($0) },
+                    onSetHidden: { SchemaVisibility.shared.setHidden($0, connectionID: service.connection.id) },
+                    onCollapseAll: { sidebar.collapseAll() }
                 )
-            case .loading, .idle:
-                VStack(spacing: Tokens.Spacing.sm) {
-                    ProgressView().controlSize(.small)
-                    Text("Loading schema…").font(.caption).foregroundStyle(.secondary)
+                sidebarSearchField
+                sidebarOutline
+                    .opacity(service.schemaState == .loading ? 0.55 : 1)
+                    .animation(.easeInOut(duration: 0.15), value: service.schemaState)
+                if !hiddenSchemas.isEmpty {
+                    SidebarHiddenFooter(hiddenCount: hiddenSchemas.count) {
+                        SchemaVisibility.shared.clear(connectionID: service.connection.id)
+                    }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .error(let message):
-                VStack(spacing: Tokens.Spacing.sm) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text("Schema load failed")
-                        .font(.callout)
-                    Text(message)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
-                    Button("Retry") { Task { await service.loadSchema() } }
-                        .buttonStyle(.bordered)
+            } else {
+                switch service.schemaState {
+                case .error(let message):
+                    VStack(spacing: Tokens.Spacing.sm) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("Schema load failed")
+                            .font(.callout)
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                        Button("Retry") { Task { await service.loadSchema() } }
+                            .buttonStyle(.bordered)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding()
+                default:
+                    VStack(spacing: Tokens.Spacing.sm) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading schema…").font(.caption).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding()
             }
         }
         .background(Color(nsColor: .underPageBackgroundColor))
     }
 
-    private var sidebarSearchField: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-            TextField("Filter tables", text: $sidebarFilter)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-            if !sidebarFilter.isEmpty {
-                Button {
-                    sidebarFilter = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+    private var sidebarOutline: some View {
+        SidebarOutlineView(
+            content: sidebarContent,
+            filter: SidebarFilterKey(term: service.workspace.sidebarFilter,
+                                     includeColumns: service.workspace.sidebarIncludeColumns),
+            controller: sidebar,
+            workspace: service.workspace,
+            preferredSchema: preferredSchema,
+            onOpenTable: { service.workspace.openTable($0) },
+            onPreviewTable: { service.workspace.openTable($0, preview: true) },
+            onCopyTable: { copySource = $0 },
+            onShowStructure: { service.workspace.openTable($0, focusPane: .structure) },
+            onShowDDL: { service.workspace.openTable($0, focusPane: .ddl) },
+            onMaintenance: { table, action in
+                if action.isDestructive {
+                    pendingMaintenance = MaintenanceRequest(table: table, action: action)
+                } else {
+                    runMaintenance(action, on: table)
                 }
-                .buttonStyle(.plain)
-                .help("Clear filter")
+            },
+            onRefreshMatView: { table, concurrently in
+                Task {
+                    _ = await AdminActions.refreshMaterializedView(
+                        schema: table.schema, name: table.name,
+                        concurrently: concurrently, service: service
+                    )
+                }
+            },
+            onEditComments: { table in
+                commentsTarget = CommentsTarget(schema: table.schema, table: table.name)
+            },
+            onRenameSchema: { name in
+                renameSchemaTarget = IdentifiedString(id: name)
+            },
+            onDropSchema: { name in
+                dropSchemaTarget = IdentifiedString(id: name)
+            },
+            onDuplicateSchema: { name in
+                duplicateSchemaTarget = IdentifiedString(id: name)
+            },
+            onCreateSchema: { showCreateSchema = true },
+            onNewTable: { schema in tableDesigner = TableDesignerRequest(mode: .create(schema: schema)) },
+            onFindUsages: { table in
+                findUsagesTarget = CommentsTarget(schema: table.schema, table: table.name)
+            },
+            onOpenFunction: { fn in
+                functionDesigner = FunctionDesignerRequest(mode: .edit(fn))
+            },
+            onNewFunction: { schema in
+                functionDesigner = FunctionDesignerRequest(mode: .create(schema: schema))
+            },
+            onRunFunction: { fn in
+                functionRunner = FunctionRunnerRequest(function: fn)
+            },
+            onTruncate: { table in
+                truncateTarget = CommentsTarget(schema: table.schema, table: table.name)
+            },
+            onGenerateData: { table in
+                generateDataTarget = table
+            },
+            onNewIndex: { table in
+                newIndexTarget = table
+            },
+            onEditView: { table in
+                editViewTarget = table
+            },
+            onShowERD: { name in
+                erdSchema = IdentifiedString(id: name)
+            },
+            onNewQuery: { schema in
+                service.workspace.openScratchpad(searchPath: schema)
+            },
+            onTogglePin: { table in
+                NavigationHistoryStore.shared.togglePinned(table.id, scope: service.navigationScope)
+            },
+            onHideSchema: { name in
+                SchemaVisibility.shared.setHidden(true, schema: name, connectionID: service.connection.id)
+            },
+            onShowOnlySchema: { showOnlySchema($0) },
+            onClearRecents: {
+                NavigationHistoryStore.shared.clearRecents(scope: service.navigationScope)
+            },
+            onClearFilter: { service.workspace.sidebarFilter = "" },
+            onToggleExtensionObjects: { showExtensionObjects.toggle() }
+        )
+    }
+
+    private var sidebarSearchField: some View {
+        HStack(spacing: 4) {
+            SidebarFilterField(
+                text: Binding(
+                    get: { service.workspace.sidebarFilter },
+                    set: { service.workspace.sidebarFilter = $0; SessionStateStore.shared.scheduleSnapshot(delay: 1.5) }
+                ),
+                controller: sidebar,
+                debounce: service.tableCount > 3000
+            )
+            Toggle(isOn: Binding(
+                get: { service.workspace.sidebarIncludeColumns },
+                set: { service.workspace.sidebarIncludeColumns = $0 }
+            )) {
+                Image(systemName: "list.bullet.indent")
+                    .font(.system(size: 11))
             }
+            .toggleStyle(.button)
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help("Also match column names")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
         .background(Color(nsColor: .windowBackgroundColor))
         .overlay(Divider().opacity(0.4), alignment: .bottom)
+    }
+
+    private func showOnlySchema(_ name: String) {
+        let all = Set(service.schema.schemas.map(\.name))
+        SchemaVisibility.shared.setHidden(all.subtracting([name]), connectionID: service.connection.id)
+    }
+
+    private func revealInSidebar(_ table: TableNode) {
+        if !service.workspace.sidebarVisible { service.workspace.sidebarVisible = true }
+        if SchemaVisibility.shared.isHidden(table.schema, connectionID: service.connection.id) {
+            SchemaVisibility.shared.setHidden(false, schema: table.schema, connectionID: service.connection.id)
+        }
+        if !service.workspace.sidebarFilter.isEmpty { service.workspace.sidebarFilter = "" }
+        DispatchQueue.main.async { sidebar.reveal(tableID: table.id) }
+    }
+
+    /// ⌘T: scope the new scratchpad to the schema selected in the sidebar,
+    /// else to the active table tab's schema, else the connection default.
+    private func newScratchpadInContext() {
+        let schema = sidebar.selectedSchema ?? service.workspace.selectedTab?.tableNode?.schema
+        service.workspace.openScratchpad(searchPath: schema)
+    }
+
+    private func reconcileTabs(with snapshot: SchemaSnapshot) {
+        let result = service.workspace.reconcile(with: snapshot)
+        for r in result.renamed {
+            service.toasts.show(.info, "\(r.from) was renamed to \(r.to) — tab updated")
+        }
+        if result.dropped.count == 1 {
+            service.toasts.show(.info, "\(result.dropped[0]) no longer exists")
+        } else if result.dropped.count > 1 {
+            service.toasts.show(.info, "\(result.dropped.count) open tables no longer exist")
+        }
+    }
+
+    private func refreshDatabases() {
+        guard let client = service.client else { return }
+        Task {
+            if let list = try? await DatabaseCatalog.fetchDatabases(client: client) {
+                databases = list
+            }
+        }
     }
 
     // MARK: - Window chrome bar (the custom title bar)
@@ -906,7 +1091,13 @@ struct ConnectionWindowContent: View {
             }
             // Live vitals: database · size · table count, on the same line.
             HStack(spacing: 4) {
-                Text(appearance.connection.database.isEmpty ? appearance.connection.host : appearance.connection.database)
+                DatabaseSwitcherMenu(
+                    service: service,
+                    databases: databases,
+                    foreground: onChromeSecondary,
+                    onRefresh: { refreshDatabases() },
+                    onNewDatabase: { showCreateDatabase = true }
+                )
                 if let info = service.serverInfo {
                     Text("·").opacity(0.5)
                     Text(info.databaseSize).contentTransition(.numericText())
@@ -1085,8 +1276,14 @@ struct ConnectionWindowContent: View {
     @ViewBuilder
     private var workspacePane: some View {
         VStack(spacing: 0) {
-            TabStripView(workspace: service.workspace, appearance: appearance)
+            TabStripView(workspace: service.workspace, appearance: appearance,
+                         onReveal: { revealInSidebar($0) })
             Divider()
+            if service.workspace.selectedTab != nil {
+                BreadcrumbBar(service: service, workspace: service.workspace, databases: databases,
+                              onGoToTable: { CommandPaletteWindow.shared.present(mode: .goToTable) })
+                Divider().opacity(0.5)
+            }
             if let selected = service.workspace.selectedTab {
                 switch selected.kind {
                 case .table(let table):
@@ -1109,7 +1306,7 @@ struct ConnectionWindowContent: View {
                 .foregroundStyle(.secondary)
             Text("Pick a table from the sidebar")
                 .font(.headline)
-            Text("Double-click any table or view to load its first 1,000 rows, or press ⌘N to open a SQL scratchpad.")
+            Text("Click a table to preview it, double-click or press Return to keep it open. ⌘O jumps to any table, ⌘T opens a SQL scratchpad.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -1310,7 +1507,7 @@ private struct TableActionsModifier: ViewModifier {
     let onMaintenance: (TableNode, AdminActions.Maintenance) -> Void
 
     private func match(_ notif: Notification) -> (schema: String, table: String)? {
-        guard let id = notif.object as? UUID, id == service.connection.id,
+        guard service.owns(notif),
               let schema = notif.userInfo?["schema"] as? String,
               let table = notif.userInfo?["table"] as? String else { return nil }
         return (schema, table)
@@ -1323,10 +1520,10 @@ private struct TableActionsModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .onReceive(NotificationCenter.default.publisher(for: .pgbrainShowSchemaDiff)) { notif in
-                if let id = notif.object as? UUID, id == service.connection.id { showSchemaDiff = true }
+                if service.owns(notif) { showSchemaDiff = true }
             }
             .onReceive(NotificationCenter.default.publisher(for: .pgbrainNewTable)) { notif in
-                if let id = notif.object as? UUID, id == service.connection.id {
+                if service.owns(notif) {
                     tableDesigner = TableDesignerRequest(mode: .create(schema: notif.userInfo?["schema"] as? String))
                 }
             }
@@ -1352,22 +1549,22 @@ private struct TableActionsModifier: ViewModifier {
                 onMaintenance(n, action)
             }
             .onReceive(NotificationCenter.default.publisher(for: .pgbrainRenameSchema)) { notif in
-                guard let id = notif.object as? UUID, id == service.connection.id,
+                guard service.owns(notif),
                       let schema = notif.userInfo?["schema"] as? String else { return }
                 renameSchemaTarget = IdentifiedString(id: schema)
             }
             .onReceive(NotificationCenter.default.publisher(for: .pgbrainDropSchema)) { notif in
-                guard let id = notif.object as? UUID, id == service.connection.id,
+                guard service.owns(notif),
                       let schema = notif.userInfo?["schema"] as? String else { return }
                 dropSchemaTarget = IdentifiedString(id: schema)
             }
             .onReceive(NotificationCenter.default.publisher(for: .pgbrainDuplicateSchema)) { notif in
-                guard let id = notif.object as? UUID, id == service.connection.id,
+                guard service.owns(notif),
                       let schema = notif.userInfo?["schema"] as? String else { return }
                 duplicateSchemaTarget = IdentifiedString(id: schema)
             }
             .onReceive(NotificationCenter.default.publisher(for: .pgbrainPgDump)) { notif in
-                guard let id = notif.object as? UUID, id == service.connection.id,
+                guard service.owns(notif),
                       let raw = notif.userInfo?["format"] as? String,
                       let format = PgDumpCLI.Format(rawValue: raw) else { return }
                 onPgDump(format)
@@ -1393,18 +1590,18 @@ private struct FunctionFlowsModifier: ViewModifier {
                                    onClose: { functionRunner = nil })
             }
             .onReceive(NotificationCenter.default.publisher(for: .pgbrainEditFunction)) { notif in
-                guard let id = notif.object as? UUID, id == service.connection.id,
+                guard service.owns(notif),
                       let schema = notif.userInfo?["schema"] as? String,
                       let name = notif.userInfo?["name"] as? String,
                       let fn = lookup(schema: schema, name: name) else { return }
                 functionDesigner = FunctionDesignerRequest(mode: .edit(fn))
             }
             .onReceive(NotificationCenter.default.publisher(for: .pgbrainNewFunction)) { notif in
-                guard let id = notif.object as? UUID, id == service.connection.id else { return }
+                guard service.owns(notif) else { return }
                 functionDesigner = FunctionDesignerRequest(mode: .create(schema: notif.userInfo?["schema"] as? String))
             }
             .onReceive(NotificationCenter.default.publisher(for: .pgbrainRunFunction)) { notif in
-                guard let id = notif.object as? UUID, id == service.connection.id,
+                guard service.owns(notif),
                       let schema = notif.userInfo?["schema"] as? String,
                       let name = notif.userInfo?["name"] as? String,
                       let fn = lookup(schema: schema, name: name) else { return }

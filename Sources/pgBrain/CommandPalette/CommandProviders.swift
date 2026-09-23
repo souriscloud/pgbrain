@@ -28,6 +28,82 @@ enum CommandProviders {
         return out
     }
 
+    // MARK: - Go to Table (⌘O)
+
+    /// Relations + functions only. Recently opened relations rank first;
+    /// objects in hidden schemas stay reachable but sink below the rest.
+    static func goToItems(service: ConnectionService?) -> [CommandItem] {
+        guard let service else { return [] }
+        return relationItems(service: service) + functionJumpItems(service: service)
+    }
+
+    private static func relationItems(service: ConnectionService) -> [CommandItem] {
+        let hidden = SchemaVisibility.shared.hidden(for: service.connection.id)
+        let recents = NavigationHistoryStore.shared.recents(for: service.navigationScope)
+        var recentRank: [String: Int] = [:]
+        for (i, id) in recents.enumerated() { recentRank[id] = recents.count - i }
+        var out: [CommandItem] = []
+        for schema in service.schema.schemas {
+            let isHidden = hidden.contains(schema.name)
+            for table in schema.tables {
+                let captured = table
+                var bias = 0
+                if let r = recentRank[table.id] { bias += 40 + r * 4 }
+                if isHidden { bias -= 60 }
+                if table.isExtensionOwned { bias -= 30 }
+                var subtitle = "\(schema.name) · \(table.kindLabel)"
+                if isHidden { subtitle += " · hidden schema" }
+                if recentRank[table.id] != nil { subtitle += " · recent" }
+                out.append(CommandItem(
+                    id: "table.\(schema.name).\(table.name)",
+                    icon: table.symbolName,
+                    title: table.name,
+                    subtitle: subtitle,
+                    category: .table,
+                    shortcut: nil,
+                    action: { service.workspace.openTable(captured) },
+                    qualifier: schema.name,
+                    rankBias: bias
+                ))
+            }
+        }
+        return out
+    }
+
+    private static func functionJumpItems(service: ConnectionService) -> [CommandItem] {
+        let hidden = SchemaVisibility.shared.hidden(for: service.connection.id)
+        var out: [CommandItem] = []
+        for schema in service.schema.schemas {
+            let isHidden = hidden.contains(schema.name)
+            for fn in schema.functions {
+                let schemaName = schema.name, fnName = fn.name, args = fn.arguments
+                out.append(CommandItem(
+                    id: "goto.function.\(fn.id)",
+                    icon: "function",
+                    title: fn.name,
+                    subtitle: "\(schema.name) · \(fn.kind.rawValue)\(fn.arguments)" + (isHidden ? " · hidden schema" : ""),
+                    category: .function,
+                    shortcut: nil,
+                    action: {
+                        CommandProviders.post(.pgbrainEditFunction, service: service,
+                             userInfo: ["schema": schemaName, "name": fnName, "args": args])
+                    },
+                    qualifier: schema.name,
+                    rankBias: (isHidden ? -60 : 0) + (fn.isExtensionOwned ? -30 : 0)
+                ))
+            }
+        }
+        return out
+    }
+
+    /// Window-scoped post: sibling windows share the connection id, so the
+    /// window id rides along and `ConnectionService.owns` filters on it.
+    static func post(_ name: Notification.Name, service: ConnectionService, userInfo: [String: Any] = [:]) {
+        var info = userInfo
+        info[pgbrainWindowIDKey] = service.workspace.windowID
+        NotificationCenter.default.post(name: name, object: service.connection.id, userInfo: info)
+    }
+
     // MARK: - Front table-tab actions
 
     /// Contextual actions for the table currently open in the front tab —
@@ -39,10 +115,9 @@ enum CommandProviders {
         let schema = node.schema, name = node.name
         let qn = "\(schema).\(name)"
 
-        func post(_ id: String, _ title: String, _ icon: String, _ note: Notification.Name) -> CommandItem {
+        func postItem(_ id: String, _ title: String, _ icon: String, _ note: Notification.Name) -> CommandItem {
             CommandItem(id: id, icon: icon, title: title, subtitle: qn, category: .table, shortcut: nil, action: {
-                NotificationCenter.default.post(name: note, object: service.connection.id,
-                                                userInfo: ["schema": schema, "table": name])
+                CommandProviders.post(note, service: service, userInfo: ["schema": schema, "table": name])
             })
         }
 
@@ -53,36 +128,33 @@ enum CommandProviders {
             CommandItem(id: "fronttable.ddl", icon: "doc.plaintext", title: "Show CREATE SQL",
                         subtitle: qn, category: .table, shortcut: nil,
                         action: { service.workspace.openTable(node, focusPane: .ddl) }),
-            post("fronttable.findUsages", "Find Usages…", "magnifyingglass", .pgbrainFindUsages),
-            post("fronttable.comments", "Edit Comments…", "text.bubble", .pgbrainEditComments),
+            postItem("fronttable.findUsages", "Find Usages…", "magnifyingglass", .pgbrainFindUsages),
+            postItem("fronttable.comments", "Edit Comments…", "text.bubble", .pgbrainEditComments),
         ]
         // Export works for any relation; geometry/views included.
         for fmt in Exporter.Format.allCases {
             out.append(CommandItem(id: "fronttable.export.\(fmt.rawValue)", icon: "square.and.arrow.up",
                                    title: "Export Table as \(fmt.rawValue.uppercased())…", subtitle: qn,
                                    category: .table, shortcut: nil, action: {
-                NotificationCenter.default.post(name: .pgbrainExportTable, object: service.connection.id,
-                                                userInfo: ["format": fmt.rawValue])
+                CommandProviders.post(.pgbrainExportTable, service: service, userInfo: ["format": fmt.rawValue])
             }))
         }
         if node.kind == .table {
-            out.append(post("fronttable.newIndex", "New Index…", "key", .pgbrainNewIndex))
-            out.append(post("fronttable.generateData", "Generate Data…", "wand.and.stars", .pgbrainGenerateData))
-            out.append(post("fronttable.truncate", "Truncate…", "trash", .pgbrainTruncateTable))
+            out.append(postItem("fronttable.newIndex", "New Index…", "key", .pgbrainNewIndex))
+            out.append(postItem("fronttable.generateData", "Generate Data…", "wand.and.stars", .pgbrainGenerateData))
+            out.append(postItem("fronttable.truncate", "Truncate…", "trash", .pgbrainTruncateTable))
             for kind in ["csv", "json"] {
                 out.append(CommandItem(id: "fronttable.import.\(kind)", icon: "square.and.arrow.down",
                                        title: "Import \(kind.uppercased()) into Table…", subtitle: qn,
                                        category: .table, shortcut: nil, action: {
-                    NotificationCenter.default.post(name: .pgbrainImportTable, object: service.connection.id,
-                                                    userInfo: ["kind": kind])
+                    CommandProviders.post(.pgbrainImportTable, service: service, userInfo: ["kind": kind])
                 }))
             }
             for m in AdminActions.Maintenance.allCases {
                 out.append(CommandItem(id: "fronttable.maint.\(m.rawValue)", icon: "wrench.and.screwdriver",
                                        title: "\(m.label) Table", subtitle: qn,
                                        category: .table, shortcut: nil, action: {
-                    NotificationCenter.default.post(name: .pgbrainMaintenance, object: service.connection.id,
-                                                    userInfo: ["schema": schema, "table": name, "action": m.rawValue])
+                    CommandProviders.post(.pgbrainMaintenance, service: service, userInfo: ["schema": schema, "table": name, "action": m.rawValue])
                 }))
             }
         }
@@ -102,8 +174,7 @@ enum CommandProviders {
                 shortcut: nil,
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
-                    NotificationCenter.default.post(name: .pgbrainPgDump, object: service.connection.id,
-                                                    userInfo: ["format": fmt.rawValue])
+                    CommandProviders.post(.pgbrainPgDump, service: service, userInfo: ["format": fmt.rawValue])
                 }
             )
         }
@@ -116,7 +187,7 @@ enum CommandProviders {
             shortcut: nil,
             action: {
                 AppDelegate.shared?.openConnection(service.connection)
-                NotificationCenter.default.post(name: .pgbrainRestoreDatabase, object: service.connection.id)
+                CommandProviders.post(.pgbrainRestoreDatabase, service: service)
             }
         ))
         return out
@@ -133,17 +204,17 @@ enum CommandProviders {
             out.append(CommandItem(id: "schemaadmin.rename.\(name)", icon: "pencil",
                                    title: "Rename Schema: \(name)…", subtitle: nil, category: .schema, shortcut: nil, action: {
                 AppDelegate.shared?.openConnection(service.connection)
-                NotificationCenter.default.post(name: .pgbrainRenameSchema, object: connID, userInfo: ["schema": name])
+                CommandProviders.post(.pgbrainRenameSchema, service: service, userInfo: ["schema": name])
             }))
             out.append(CommandItem(id: "schemaadmin.duplicate.\(name)", icon: "doc.on.doc",
                                    title: "Duplicate Schema: \(name)…", subtitle: nil, category: .schema, shortcut: nil, action: {
                 AppDelegate.shared?.openConnection(service.connection)
-                NotificationCenter.default.post(name: .pgbrainDuplicateSchema, object: connID, userInfo: ["schema": name])
+                CommandProviders.post(.pgbrainDuplicateSchema, service: service, userInfo: ["schema": name])
             }))
             out.append(CommandItem(id: "schemaadmin.drop.\(name)", icon: "trash",
                                    title: "Drop Schema: \(name)…", subtitle: nil, category: .schema, shortcut: nil, action: {
                 AppDelegate.shared?.openConnection(service.connection)
-                NotificationCenter.default.post(name: .pgbrainDropSchema, object: connID, userInfo: ["schema": name])
+                CommandProviders.post(.pgbrainDropSchema, service: service, userInfo: ["schema": name])
             }))
             let isHidden = hidden.contains(name)
             out.append(CommandItem(id: "schemaadmin.vis.\(name)", icon: isHidden ? "eye" : "eye.slash",
@@ -309,6 +380,33 @@ enum CommandProviders {
                 action: { _ = service.workspace.openScratchpad() }
             ),
             CommandItem(
+                id: "action.goToTable",
+                icon: "arrow.right.doc.on.clipboard",
+                title: "Go to Table…",
+                subtitle: "Jump to a table, view, or function",
+                category: .action,
+                shortcut: "⌘O",
+                action: { CommandPaletteWindow.shared.present(mode: .goToTable) }
+            ),
+            CommandItem(
+                id: "action.navigateBack",
+                icon: "chevron.left",
+                title: "Navigate Back",
+                subtitle: "Previous tab in this window's history",
+                category: .action,
+                shortcut: "⌘[",
+                action: { service.workspace.goBack() }
+            ),
+            CommandItem(
+                id: "action.navigateForward",
+                icon: "chevron.right",
+                title: "Navigate Forward",
+                subtitle: "Next tab in this window's history",
+                category: .action,
+                shortcut: "⌘]",
+                action: { service.workspace.goForward() }
+            ),
+            CommandItem(
                 id: "action.reloadSchema",
                 icon: "arrow.clockwise",
                 title: "Reload Schema",
@@ -326,7 +424,7 @@ enum CommandProviders {
                 shortcut: nil,
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
-                    NotificationCenter.default.post(name: .pgbrainOpenActivityPanel, object: service.connection.id)
+                    CommandProviders.post(.pgbrainOpenActivityPanel, service: service)
                 }
             ),
             CommandItem(
@@ -338,7 +436,7 @@ enum CommandProviders {
                 shortcut: nil,
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
-                    NotificationCenter.default.post(name: .pgbrainOpenQueryHistory, object: service.connection.id)
+                    CommandProviders.post(.pgbrainOpenQueryHistory, service: service)
                 }
             ),
             CommandItem(
@@ -350,7 +448,7 @@ enum CommandProviders {
                 shortcut: nil,
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
-                    NotificationCenter.default.post(name: .pgbrainOpenSequenceInspector, object: service.connection.id)
+                    CommandProviders.post(.pgbrainOpenSequenceInspector, service: service)
                 }
             ),
             CommandItem(
@@ -362,7 +460,7 @@ enum CommandProviders {
                 shortcut: nil,
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
-                    NotificationCenter.default.post(name: .pgbrainOpenNotifyPanel, object: service.connection.id)
+                    CommandProviders.post(.pgbrainOpenNotifyPanel, service: service)
                 }
             ),
             CommandItem(
@@ -374,7 +472,7 @@ enum CommandProviders {
                 shortcut: nil,
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
-                    NotificationCenter.default.post(name: .pgbrainOpenSnippets, object: service.connection.id)
+                    CommandProviders.post(.pgbrainOpenSnippets, service: service)
                 }
             ),
             CommandItem(
@@ -386,7 +484,7 @@ enum CommandProviders {
                 shortcut: nil,
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
-                    NotificationCenter.default.post(name: .pgbrainCreateSchema, object: service.connection.id)
+                    CommandProviders.post(.pgbrainCreateSchema, service: service)
                 }
             ),
             CommandItem(
@@ -398,7 +496,7 @@ enum CommandProviders {
                 shortcut: nil,
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
-                    NotificationCenter.default.post(name: .pgbrainNewTable, object: service.connection.id)
+                    CommandProviders.post(.pgbrainNewTable, service: service)
                 }
             ),
             CommandItem(
@@ -410,7 +508,7 @@ enum CommandProviders {
                 shortcut: nil,
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
-                    NotificationCenter.default.post(name: .pgbrainShowSchemaDiff, object: service.connection.id)
+                    CommandProviders.post(.pgbrainShowSchemaDiff, service: service)
                 }
             ),
             CommandItem(
@@ -422,7 +520,7 @@ enum CommandProviders {
                 shortcut: nil,
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
-                    NotificationCenter.default.post(name: .pgbrainNewFunction, object: service.connection.id)
+                    CommandProviders.post(.pgbrainNewFunction, service: service)
                 }
             ),
             CommandItem(
@@ -434,7 +532,7 @@ enum CommandProviders {
                 shortcut: nil,
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
-                    NotificationCenter.default.post(name: .pgbrainCreateDatabase, object: service.connection.id)
+                    CommandProviders.post(.pgbrainCreateDatabase, service: service)
                 }
             ),
             CommandItem(
@@ -445,7 +543,7 @@ enum CommandProviders {
                 category: .action,
                 shortcut: nil,
                 action: {
-                    NotificationCenter.default.post(name: .pgbrainSaveWorkspace, object: service.connection.id)
+                    CommandProviders.post(.pgbrainSaveWorkspace, service: service)
                 }
             ),
         ]
@@ -460,11 +558,7 @@ enum CommandProviders {
                 category: .action,
                 shortcut: nil,
                 action: {
-                    NotificationCenter.default.post(
-                        name: .pgbrainSwitchWorkspace,
-                        object: service.connection.id,
-                        userInfo: ["workspaceID": ws.id]
-                    )
+                    CommandProviders.post(.pgbrainSwitchWorkspace, service: service, userInfo: ["workspaceID": ws.id])
                 }
             ))
         }
@@ -548,7 +642,6 @@ enum CommandProviders {
               let active = service.workspace.tabs.first(where: { $0.id == selID }),
               case .table(let node) = active.kind
         else { return [] }
-        let cid = service.connection.id
 
         func cmd(_ mode: String, _ title: String, _ icon: String) -> CommandItem {
             CommandItem(
@@ -559,11 +652,7 @@ enum CommandProviders {
                 category: .action,
                 shortcut: nil,
                 action: {
-                    NotificationCenter.default.post(
-                        name: .pgbrainSetTableViewMode,
-                        object: cid,
-                        userInfo: ["mode": mode]
-                    )
+                    CommandProviders.post(.pgbrainSetTableViewMode, service: service, userInfo: ["mode": mode])
                 }
             )
         }
@@ -582,11 +671,7 @@ enum CommandProviders {
                 category: .action,
                 shortcut: nil,
                 action: {
-                    NotificationCenter.default.post(
-                        name: .pgbrainEditTableStructure,
-                        object: cid,
-                        userInfo: ["schema": node.schema, "table": node.name]
-                    )
+                    CommandProviders.post(.pgbrainEditTableStructure, service: service, userInfo: ["schema": node.schema, "table": node.name])
                 }
             ))
         }
@@ -608,8 +693,8 @@ enum CommandProviders {
             let id = tab.id
             return CommandItem(
                 id: "tab.\(id.uuidString)",
-                icon: tab.kind.iconName,
-                title: tab.title,
+                icon: tab.iconName,
+                title: service.workspace.displayTitle(for: tab),
                 subtitle: "Switch to open tab",
                 category: .tab,
                 shortcut: nil,
@@ -620,23 +705,10 @@ enum CommandProviders {
 
     // MARK: - Tables
 
+    /// Same relation list as Go to Table, so hidden schemas stay reachable
+    /// from ⌘K too — just ranked lower.
     private static func tables(service: ConnectionService) -> [CommandItem] {
-        var out: [CommandItem] = []
-        for schema in service.visibleSchema.schemas {
-            for table in schema.tables {
-                let captured = table
-                out.append(CommandItem(
-                    id: "table.\(schema.name).\(table.name)",
-                    icon: "tablecells",
-                    title: table.name,
-                    subtitle: "\(schema.name) · table",
-                    category: .table,
-                    shortcut: nil,
-                    action: { service.workspace.openTable(captured) }
-                ))
-            }
-        }
-        return out
+        relationItems(service: service)
     }
 
     // MARK: - ERD per schema
@@ -653,10 +725,7 @@ enum CommandProviders {
                 shortcut: nil,
                 action: {
                     AppDelegate.shared?.openConnection(service.connection)
-                    NotificationCenter.default.post(
-                        name: .pgbrainShowERD, object: service.connection.id,
-                        userInfo: ["schema": name]
-                    )
+                    CommandProviders.post(.pgbrainShowERD, service: service, userInfo: ["schema": name])
                 }
             )
         }
@@ -681,11 +750,7 @@ enum CommandProviders {
                     shortcut: nil,
                     action: {
                         AppDelegate.shared?.openConnection(service.connection)
-                        NotificationCenter.default.post(
-                            name: .pgbrainEditFunction,
-                            object: service.connection.id,
-                            userInfo: ["schema": schemaName, "name": fnName, "args": args]
-                        )
+                        CommandProviders.post(.pgbrainEditFunction, service: service, userInfo: ["schema": schemaName, "name": fnName, "args": args])
                     }
                 ))
                 out.append(CommandItem(
@@ -697,11 +762,7 @@ enum CommandProviders {
                     shortcut: nil,
                     action: {
                         AppDelegate.shared?.openConnection(service.connection)
-                        NotificationCenter.default.post(
-                            name: .pgbrainRunFunction,
-                            object: service.connection.id,
-                            userInfo: ["schema": schemaName, "name": fnName, "args": args]
-                        )
+                        CommandProviders.post(.pgbrainRunFunction, service: service, userInfo: ["schema": schemaName, "name": fnName, "args": args])
                     }
                 ))
             }
@@ -744,11 +805,3 @@ enum CommandProviders {
     }
 }
 
-private extension WorkspaceState.TabKind {
-    var iconName: String {
-        switch self {
-        case .table:      "tablecells"
-        case .scratchpad: "doc.text"
-        }
-    }
-}

@@ -56,7 +56,11 @@ struct SchemaNode: Equatable, Identifiable, Sendable {
     /// from `pg_proc` on schema load (skipping anything in
     /// `pg_catalog` / `information_schema`).
     var functions: [FunctionNode] = []
+    /// Schema created by an extension script (`pg_depend.deptype = 'e'`).
+    var isExtensionOwned: Bool = false
     var id: String { name }
+
+    var isEmpty: Bool { tables.isEmpty && functions.isEmpty }
 }
 
 /// A user-defined function or procedure. Just enough metadata to drive
@@ -77,6 +81,9 @@ struct FunctionNode: Equatable, Identifiable, Sendable {
     /// Pretty-printed return type (`integer`, `SETOF text`). Empty for
     /// procedures.
     var returnType: String
+    /// Member of an extension (PostGIS ships hundreds of these into
+    /// `public`); the sidebar hides them unless the user opts in.
+    var isExtensionOwned: Bool = false
     var id: String { "\(schema).\(name)(\(arguments))" }
 
     var signature: String { "\(name)\(arguments)" }
@@ -101,8 +108,49 @@ struct TableNode: Equatable, Identifiable, Sendable {
     /// are skipped for v1 — they'd need every key column's cell value
     /// gathered to navigate cleanly.
     var foreignKeys: [ForeignKey] = []
+    /// Finer relkind detail. Kept separate from `kind` so the many
+    /// exhaustive `switch kind` sites keep compiling — partitioned and
+    /// foreign tables behave like plain tables everywhere except icons.
+    var flavor: Flavor = .plain
+    /// `pg_class.oid`, 0 when unknown. Lets open tabs follow a rename
+    /// across a schema reload.
+    var oid: Int = 0
+    /// `schema.name` of the partitioned parent when this relation is a
+    /// partition; the sidebar nests it under that parent.
+    var partitionOf: String? = nil
+    var isExtensionOwned: Bool = false
+
+    enum Flavor: String, Equatable, Sendable {
+        case plain, partitioned, foreign
+    }
 
     var id: String { "\(schema).\(name)" }
+
+    var symbolName: String {
+        switch kind {
+        case .view: return "rectangle.stack"
+        case .materializedView: return "rectangle.stack.fill"
+        case .table:
+            switch flavor {
+            case .plain: return "tablecells"
+            case .partitioned: return "tablecells.fill"
+            case .foreign: return "externaldrive.connected.to.line.below"
+            }
+        }
+    }
+
+    var kindLabel: String {
+        switch kind {
+        case .view: return "view"
+        case .materializedView: return "matview"
+        case .table:
+            switch flavor {
+            case .plain: return "table"
+            case .partitioned: return "partitioned"
+            case .foreign: return "foreign"
+            }
+        }
+    }
     var qualifiedName: String { "\(schema).\(name)" }
 
     /// Editing is only meaningful on real tables that have a PK we can target

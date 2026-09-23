@@ -26,6 +26,43 @@ struct pgBrainApp: App {
                 }
                 .keyboardShortcut("k", modifiers: [.command])
             }
+            // Window-scoped navigation. Routed to the key connection window's
+            // workspace; no-ops when the key window isn't a connection.
+            CommandMenu("Navigate") {
+                Button("Go to Table…") {
+                    CommandPaletteWindow.shared.toggle(mode: .goToTable)
+                }
+                .keyboardShortcut("o", modifiers: [.command])
+                Button("Go to Anything…") {
+                    CommandPaletteWindow.shared.toggle(mode: .everything)
+                }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
+                Divider()
+                Button("Back") {
+                    AppDelegate.shared?.windowManager.keyService?.workspace.goBack()
+                }
+                .keyboardShortcut("[", modifiers: [.command])
+                Button("Forward") {
+                    AppDelegate.shared?.windowManager.keyService?.workspace.goForward()
+                }
+                .keyboardShortcut("]", modifiers: [.command])
+                Divider()
+                Button("Filter Sidebar") { sidebarCommand("focusFilter") }
+                    .keyboardShortcut("f", modifiers: [.command, .option])
+                Button("Reveal Active Tab in Sidebar") { sidebarCommand("reveal") }
+                    .keyboardShortcut("j", modifiers: [.command, .shift])
+                Button("Pin Active Table to Sidebar") {
+                    guard let service = AppDelegate.shared?.windowManager.keyService,
+                          let table = service.workspace.selectedTab?.tableNode else { return }
+                    NavigationHistoryStore.shared.togglePinned(table.id, scope: service.navigationScope)
+                }
+                .keyboardShortcut("d", modifiers: [.command])
+                Button("Keep Preview Tab Open") {
+                    guard let workspace = AppDelegate.shared?.windowManager.keyService?.workspace,
+                          let id = workspace.selectedID else { return }
+                    workspace.keepTab(id: id)
+                }
+            }
             // View → editor zoom. Lives live across every open scratchpad.
             CommandGroup(after: .sidebar) {
                 Button("Increase Font Size") {
@@ -55,5 +92,12 @@ struct pgBrainApp: App {
                 }
             }
         }
+    }
+
+    @MainActor
+    private func sidebarCommand(_ command: String) {
+        guard let workspace = AppDelegate.shared?.windowManager.keyService?.workspace else { return }
+        NotificationCenter.default.post(name: .pgbrainSidebarCommand, object: workspace.windowID,
+                                        userInfo: ["command": command])
     }
 }

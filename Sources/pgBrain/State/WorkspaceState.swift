@@ -3,6 +3,10 @@ import Observation
 
 /// Per-connection-window tab state. Tabs are either a read-only table view
 /// (iter-3) or a SQL scratchpad with inline result blocks (iter-4).
+///
+/// Also owns the window's navigation model: preview/pinned tabs, the
+/// back/forward history of tab activations, and the sidebar UI state that
+/// session restore persists per window.
 @MainActor
 @Observable
 final class WorkspaceState {
@@ -41,7 +45,9 @@ final class WorkspaceState {
         /// `.table` tabs with a dirty edit buffer right now. Kept on
         /// `Tab` so the strip can render it without reaching into the
         /// per-tab content view.
-        var hasPendingChanges: Bool = false
+        var hasPendingChanges: Bool = false {
+            didSet { if hasPendingChanges { isPreview = false } }
+        }
         /// Optional color accent for the tab chip. `nil` = no tint;
         /// otherwise paints the active-tab underline + a soft background
         /// in the picked color. Persisted across session restore.
@@ -63,8 +69,21 @@ final class WorkspaceState {
         /// Persisted raw WHERE / ORDER BY clauses for `.table` tabs —
         /// just the bodies, no leading keyword. Empty = no clause.
         /// Survives session restore via `SessionState.Tab`.
-        var tableWhereClause: String = ""
-        var tableOrderByClause: String = ""
+        /// Filtering is an explicit action, so it promotes a preview tab.
+        var tableWhereClause: String = "" {
+            didSet { if tableWhereClause != oldValue, !tableWhereClause.isEmpty { isPreview = false } }
+        }
+        var tableOrderByClause: String = "" {
+            didSet { if tableOrderByClause != oldValue, !tableOrderByClause.isEmpty { isPreview = false } }
+        }
+        /// Single-click "preview" tab (italic title). At most one per
+        /// window; the next preview replaces it until something pins it.
+        var isPreview: Bool = false
+        /// User-pinned tab: kept at the front of the strip and skipped by
+        /// Close Others / Close to the Right / Close All.
+        var isPinned: Bool = false
+        /// The table behind this tab vanished on the last schema reload.
+        var isStale: Bool = false
 
         init(kind: TabKind, title: String) {
             self.kind = kind
@@ -72,10 +91,33 @@ final class WorkspaceState {
         }
 
         static func == (lhs: Tab, rhs: Tab) -> Bool { lhs.id == rhs.id }
+
+        var tableNode: TableNode? {
+            if case .table(let t) = kind { return t } else { return nil }
+        }
     }
 
+    /// One back/forward stop. `whereClause` is only captured for explicit
+    /// navigations (FK jumps, back/forward themselves) so plain tab
+    /// switching never rewrites a filter the user typed in the meantime.
+    struct NavigationEntry: Equatable {
+        let tabID: UUID
+        var whereClause: String?
+    }
+
+    static let historyLimit = 100
+
+    /// Distinguishes sibling windows of the same connection (one per
+    /// database) when routing window-scoped notifications.
+    let windowID = UUID()
+
     private(set) var tabs: [Tab] = []
-    var selectedID: UUID?
+    var selectedID: UUID? {
+        didSet { recordAutomaticHistory(from: oldValue) }
+    }
+    private(set) var backStack: [NavigationEntry] = []
+    private(set) var forwardStack: [NavigationEntry] = []
+    @ObservationIgnored private var suppressHistory = false
     @ObservationIgnored private var scratchpadCounter = 0
     /// Default `search_path` new scratchpads adopt. Set by the owning
     /// `ConnectionService` from `Connection.defaultSearchPath`. Empty =
@@ -85,10 +127,30 @@ final class WorkspaceState {
     /// `ConnectionService` uses this to prune its loader cache, so
     /// closed-tab loaders + edit buffers don't leak.
     @ObservationIgnored var onTabClosed: ((UUID) -> Void)?
+    /// Fires whenever a table is opened or re-focused via `openTable`;
+    /// the window wires it to the recents store.
+    @ObservationIgnored var onTableOpened: ((TableNode) -> Void)?
+
+    // MARK: Sidebar UI state (per window, persisted by SessionState)
+
+    var sidebarVisible: Bool = true
+    var sidebarFilter: String = ""
+    var sidebarIncludeColumns: Bool = false
+    /// Stable sidebar node ids the user has expanded. nil = never set,
+    /// so the sidebar applies its first-connect default.
+    @ObservationIgnored var expandedSidebarNodes: Set<String>?
 
     var selectedTab: Tab? {
         guard let id = selectedID else { return nil }
         return tabs.first(where: { $0.id == id })
+    }
+
+    var previewTab: Tab? { tabs.first(where: \.isPreview) }
+    var canGoBack: Bool { backStack.contains { id in tabs.contains { $0.id == id.tabID } } }
+    var canGoForward: Bool { forwardStack.contains { id in tabs.contains { $0.id == id.tabID } } }
+
+    func tab(showing tableID: String) -> Tab? {
+        tabs.first { $0.tableNode?.id == tableID }
     }
 
     /// Open `table` in a new tab, or focus the existing tab if one already
@@ -97,28 +159,43 @@ final class WorkspaceState {
     /// `requestedPane` poked (TableTabView watches and switches), a new
     /// tab carries the request along so its first render lands on the
     /// asked-for pane.
-    func openTable(_ table: TableNode, focusPane: TablePane = .data) {
-        if let existing = tabs.first(where: {
-            if case let .table(t) = $0.kind { return t.id == table.id } else { return false }
-        }) {
+    ///
+    /// `preview: true` (sidebar single-click) reuses the window's preview
+    /// tab instead of adding one; any non-preview open of an existing
+    /// preview tab pins it.
+    func openTable(_ table: TableNode, focusPane: TablePane = .data, preview: Bool = false) {
+        defer { onTableOpened?(table) }
+        if let existing = tab(showing: table.id) {
             existing.requestedPane = focusPane
+            if !preview { existing.isPreview = false }
             selectedID = existing.id
             return
         }
         let tab = Tab(kind: .table(table), title: table.qualifiedName)
         tab.requestedPane = focusPane
-        tabs.append(tab)
-        selectedID = tab.id
+        tab.isPreview = preview
+        if preview, let idx = tabs.firstIndex(where: { $0.isPreview && !$0.hasPendingChanges }) {
+            let old = tabs[idx]
+            tabs[idx] = tab
+            pruneHistory(removing: old.id)
+            selectedID = tab.id
+            onTabClosed?(old.id)
+        } else {
+            tabs.append(tab)
+            selectedID = tab.id
+        }
         SessionStateStore.shared.scheduleSnapshot()
     }
 
     /// Always opens a fresh scratchpad — unlike table tabs we don't dedupe,
     /// since users may want multiple independent notebooks side by side.
+    /// `searchPath` scopes it to a schema ("New query here"); nil falls
+    /// back to the connection default.
     @discardableResult
-    func openScratchpad() -> Notebook {
+    func openScratchpad(searchPath: String? = nil) -> Notebook {
         scratchpadCounter += 1
         let pad = Notebook(title: "Query \(scratchpadCounter)")
-        let trimmed = defaultSearchPath.trimmingCharacters(in: .whitespaces)
+        let trimmed = (searchPath ?? defaultSearchPath).trimmingCharacters(in: .whitespaces)
         if !trimmed.isEmpty { pad.searchPath = trimmed }
         let tab = Tab(kind: .scratchpad(pad), title: pad.title)
         tabs.append(tab)
@@ -130,12 +207,68 @@ final class WorkspaceState {
     func closeTab(id: UUID) {
         guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
         tabs.remove(at: idx)
+        pruneHistory(removing: id)
         if selectedID == id {
-            selectedID = tabs.indices.contains(idx) ? tabs[idx].id
-                : (tabs.last?.id)
+            selectedID = tabs.indices.contains(idx) ? tabs[idx].id : tabs.last?.id
         }
         onTabClosed?(id)
         SessionStateStore.shared.scheduleSnapshot()
+    }
+
+    func closeTabs(_ ids: [UUID]) {
+        for id in ids { closeTab(id: id) }
+    }
+
+    // MARK: - Bulk-close targets (pinned tabs are never included)
+
+    func idsToCloseOthers(keeping id: UUID) -> [UUID] {
+        tabs.filter { $0.id != id && !$0.isPinned }.map(\.id)
+    }
+
+    func idsToCloseRight(of id: UUID) -> [UUID] {
+        guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return [] }
+        return tabs[(idx + 1)...].filter { !$0.isPinned }.map(\.id)
+    }
+
+    func idsToCloseAll() -> [UUID] {
+        tabs.filter { !$0.isPinned }.map(\.id)
+    }
+
+    func dirtyTabs(among ids: [UUID]) -> [Tab] {
+        let set = Set(ids)
+        return tabs.filter { set.contains($0.id) && $0.hasPendingChanges }
+    }
+
+    // MARK: - Pin / preview
+
+    /// Pinned tabs form a block at the front of the strip, in pin order.
+    func togglePinned(id: UUID) {
+        guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
+        let tab = tabs.remove(at: idx)
+        tab.isPinned.toggle()
+        if tab.isPinned { tab.isPreview = false }
+        let pinnedCount = tabs.filter(\.isPinned).count
+        tabs.insert(tab, at: pinnedCount)
+        SessionStateStore.shared.scheduleSnapshot()
+    }
+
+    /// Promote a preview tab to a regular one (double-click on its chip,
+    /// or any explicit action on it).
+    func keepTab(id: UUID) {
+        guard let tab = tabs.first(where: { $0.id == id }), tab.isPreview else { return }
+        tab.isPreview = false
+        SessionStateStore.shared.scheduleSnapshot()
+    }
+
+    /// Short chip label: the bare table name unless another open tab shows
+    /// a same-named table from a different schema. Custom titles win.
+    func displayTitle(for tab: Tab) -> String {
+        guard case .table(let t) = tab.kind, tab.title == t.qualifiedName else { return tab.title }
+        let collides = tabs.contains { other in
+            guard other.id != tab.id, case .table(let o) = other.kind else { return false }
+            return o.name == t.name && o.schema != t.schema
+        }
+        return collides ? t.qualifiedName : t.name
     }
 
     // MARK: - Keyboard-driven tab navigation
@@ -183,6 +316,165 @@ final class WorkspaceState {
         let tab = tabs.remove(at: from)
         let insertAt = from < to ? to - 1 : to
         tabs.insert(tab, at: insertAt)
+        tab.isPreview = false
         SessionStateStore.shared.scheduleSnapshot()
+    }
+
+    // MARK: - Back / forward navigation
+
+    /// Open (or focus) `table` as an explicit navigation step: the current
+    /// location — including its WHERE clause — is pushed onto the back
+    /// stack, so ⌘[ returns to exactly where the user was. When `where` is
+    /// non-nil it replaces the target tab's WHERE clause and, for an
+    /// already-mounted tab, pulses `requestedFilterReload`.
+    ///
+    /// This is the entry point for FK ⌘-click jumps.
+    @discardableResult
+    func navigate(toTable table: TableNode, where clause: String? = nil,
+                  focusPane: TablePane = .data) -> Tab {
+        if let current = selectedTab {
+            push(historyEntry(for: current), onto: &backStack)
+            forwardStack.removeAll()
+        }
+        let existed = tab(showing: table.id) != nil
+        suppressHistory = true
+        openTable(table, focusPane: focusPane, preview: false)
+        suppressHistory = false
+        let target = selectedTab ?? tabs[tabs.count - 1]
+        if let clause {
+            target.tableWhereClause = clause
+            if existed { target.requestedFilterReload = true }
+        }
+        return target
+    }
+
+    func goBack() { step(from: &backStack, to: &forwardStack) }
+    func clearHistory() {
+        backStack.removeAll()
+        forwardStack.removeAll()
+    }
+    func goForward() { step(from: &forwardStack, to: &backStack) }
+
+    private func step(from source: inout [NavigationEntry], to dest: inout [NavigationEntry]) {
+        while let entry = source.popLast() {
+            guard let tab = tabs.first(where: { $0.id == entry.tabID }) else { continue }
+            let current = selectedTab
+            if current?.id == entry.tabID,
+               entry.whereClause == nil || entry.whereClause == current?.tableWhereClause { continue }
+            if let current { push(historyEntry(for: current), onto: &dest) }
+            suppressHistory = true
+            selectedID = tab.id
+            suppressHistory = false
+            if let clause = entry.whereClause, tab.tableNode != nil, tab.tableWhereClause != clause {
+                tab.tableWhereClause = clause
+                tab.requestedFilterReload = true
+            }
+            return
+        }
+    }
+
+    private func historyEntry(for tab: Tab) -> NavigationEntry {
+        NavigationEntry(tabID: tab.id, whereClause: tab.tableNode == nil ? nil : tab.tableWhereClause)
+    }
+
+    private func push(_ entry: NavigationEntry, onto stack: inout [NavigationEntry]) {
+        if stack.last == entry { return }
+        stack.append(entry)
+        if stack.count > Self.historyLimit { stack.removeFirst(stack.count - Self.historyLimit) }
+    }
+
+    private func recordAutomaticHistory(from old: UUID?) {
+        guard !suppressHistory, let old, old != selectedID,
+              tabs.contains(where: { $0.id == old }) else { return }
+        if backStack.last?.tabID == old { return }
+        push(NavigationEntry(tabID: old, whereClause: nil), onto: &backStack)
+        forwardStack.removeAll()
+    }
+
+    private func pruneHistory(removing id: UUID) {
+        backStack.removeAll { $0.tabID == id }
+        forwardStack.removeAll { $0.tabID == id }
+    }
+
+    // MARK: - Schema reload reconciliation
+
+    struct ReconcileResult: Equatable {
+        var renamed: [(from: String, to: String)] = []
+        var dropped: [String] = []
+
+        static func == (l: ReconcileResult, r: ReconcileResult) -> Bool {
+            l.dropped == r.dropped && l.renamed.map(\.from) == r.renamed.map(\.from)
+                && l.renamed.map(\.to) == r.renamed.map(\.to)
+        }
+    }
+
+    /// Re-point open table tabs at the freshly loaded snapshot. Tabs whose
+    /// relation was renamed (same oid) are replaced by a fresh tab so the
+    /// per-tab loader cache can't keep querying the old name; tabs whose
+    /// relation vanished are closed when they were only previews and
+    /// marked stale otherwise (they may hold unapplied edits).
+    @discardableResult
+    func reconcile(with snapshot: SchemaSnapshot) -> ReconcileResult {
+        var result = ReconcileResult()
+        guard !snapshot.schemas.isEmpty, tabs.contains(where: { $0.tableNode != nil }) else { return result }
+        var byID: [String: TableNode] = [:]
+        var byOID: [Int: TableNode] = [:]
+        for s in snapshot.schemas {
+            for t in s.tables {
+                byID[t.id] = t
+                if t.oid != 0 { byOID[t.oid] = t }
+            }
+        }
+        var toClose: [UUID] = []
+        for (idx, tab) in tabs.enumerated() {
+            guard case .table(let old) = tab.kind else { continue }
+            if let fresh = byID[old.id] {
+                tab.isStale = false
+                if Self.relationChanged(old, fresh) {
+                    var merged = fresh
+                    if merged.columns.isEmpty { merged.columns = old.columns }
+                    tab.kind = .table(merged)
+                }
+            } else if old.oid != 0, let renamed = byOID[old.oid] {
+                let replacement = Tab(kind: .table(renamed),
+                                      title: tab.title == old.qualifiedName ? renamed.qualifiedName : tab.title)
+                replacement.tableWhereClause = tab.tableWhereClause
+                replacement.tableOrderByClause = tab.tableOrderByClause
+                replacement.color = tab.color
+                replacement.isPinned = tab.isPinned
+                replacement.isPreview = tab.isPreview
+                tabs[idx] = replacement
+                for i in backStack.indices where backStack[i].tabID == tab.id {
+                    backStack[i] = NavigationEntry(tabID: replacement.id, whereClause: backStack[i].whereClause)
+                }
+                for i in forwardStack.indices where forwardStack[i].tabID == tab.id {
+                    forwardStack[i] = NavigationEntry(tabID: replacement.id, whereClause: forwardStack[i].whereClause)
+                }
+                if selectedID == tab.id {
+                    suppressHistory = true
+                    selectedID = replacement.id
+                    suppressHistory = false
+                }
+                onTabClosed?(tab.id)
+                result.renamed.append((old.qualifiedName, renamed.qualifiedName))
+            } else {
+                if !tab.isStale { result.dropped.append(old.qualifiedName) }
+                if tab.isPreview && !tab.hasPendingChanges {
+                    toClose.append(tab.id)
+                } else {
+                    tab.isStale = true
+                }
+            }
+        }
+        closeTabs(toClose)
+        if !result.renamed.isEmpty { SessionStateStore.shared.scheduleSnapshot() }
+        return result
+    }
+
+    /// Column lists are ignored: phase-2 enrichment fills them in on every
+    /// load and swapping the node for that alone would re-render every tab.
+    private static func relationChanged(_ a: TableNode, _ b: TableNode) -> Bool {
+        a.kind != b.kind || a.flavor != b.flavor || a.primaryKey != b.primaryKey
+            || a.foreignKeys != b.foreignKeys || a.oid != b.oid
     }
 }

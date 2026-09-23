@@ -5,6 +5,7 @@ import SwiftUI
 @Observable
 final class CommandPaletteModel {
     let items: [CommandItem]
+    let placeholder: String
     var query: String = ""
     var selectionIndex: Int = 0
 
@@ -12,8 +13,9 @@ final class CommandPaletteModel {
         CommandMatcher.filter(items, query: query)
     }
 
-    init(items: [CommandItem]) {
+    init(items: [CommandItem], placeholder: String = "Type a command, table, or schema…") {
         self.items = items
+        self.placeholder = placeholder
     }
 
     func selected() -> CommandItem? {
@@ -89,7 +91,7 @@ struct CommandPaletteView: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 18, weight: .regular))
                 .foregroundStyle(.secondary)
-            TextField("Type a command, table, or schema…", text: $model.query)
+            TextField(model.placeholder, text: $model.query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 18, weight: .regular))
                 .focused($searchFocused)
