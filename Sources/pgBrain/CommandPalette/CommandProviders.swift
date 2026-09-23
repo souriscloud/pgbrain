@@ -32,6 +32,12 @@ enum CommandProviders {
 
     /// Relations + functions only. Recently opened relations rank first;
     /// objects in hidden schemas stay reachable but sink below the rest.
+    /// Mirrors the sidebar's "Show extension objects" toggle: PostGIS alone
+    /// adds hundreds of st_* functions that would swamp every search.
+    private static var showExtensionObjects: Bool {
+        UserDefaults.standard.bool(forKey: "pgbrain.sidebar.showExtensionObjects")
+    }
+
     static func goToItems(service: ConnectionService?) -> [CommandItem] {
         guard let service else { return [] }
         return relationItems(service: service) + functionJumpItems(service: service)
@@ -43,10 +49,11 @@ enum CommandProviders {
         var recentRank: [String: Int] = [:]
         for (i, id) in recents.enumerated() { recentRank[id] = recents.count - i }
         var out: [CommandItem] = []
+        let showExt = showExtensionObjects
         for schema in service.schema.schemas {
             let isHidden = hidden.contains(schema.name)
             // Partitions are reached through their parent, as in the sidebar.
-            for table in schema.tables where table.partitionOf == nil {
+            for table in schema.tables where table.partitionOf == nil && (showExt || !table.isExtensionOwned) {
                 let captured = table
                 var bias = 0
                 if let r = recentRank[table.id] { bias += 40 + r * 4 }
@@ -73,10 +80,11 @@ enum CommandProviders {
 
     private static func functionJumpItems(service: ConnectionService) -> [CommandItem] {
         let hidden = SchemaVisibility.shared.hidden(for: service.connection.id)
+        let showExt = showExtensionObjects
         var out: [CommandItem] = []
         for schema in service.schema.schemas {
             let isHidden = hidden.contains(schema.name)
-            for fn in schema.functions {
+            for fn in schema.functions where showExt || !fn.isExtensionOwned {
                 let schemaName = schema.name, fnName = fn.name, args = fn.arguments
                 out.append(CommandItem(
                     id: "goto.function.\(fn.id)",
