@@ -32,9 +32,14 @@ struct TypedValueEditor: View {
     @State private var exprText: String = ""
     @State private var jsonText: String = ""
     @State private var jsonTree = false
-    @State private var date: Date = Date()
     @State private var bool: Bool = true
     @State private var enumSel: String = ""
+    /// The literal the editor was opened with, and what the drafts turned it
+    /// into. While the drafts still produce `hydratedDraftLiteral` the user
+    /// hasn't changed anything, so the original text is published verbatim —
+    /// a `t` stays `t`, jsonb spacing survives, timestamps keep microseconds.
+    @State private var hydratedLiteral: String?
+    @State private var hydratedDraftLiteral: String?
 
     private enum Mode: Hashable { case value, expression, null, defaultKeyword }
 
@@ -146,20 +151,8 @@ struct TypedValueEditor: View {
             .pickerStyle(.segmented).labelsHidden()
             .onChange(of: bool) { _, _ in publish() }
 
-        case .date:
-            DatePicker("", selection: $date, displayedComponents: .date)
-                .labelsHidden().datePickerStyle(.field)
-                .onChange(of: date) { _, _ in publish() }
-
-        case .time:
-            DatePicker("", selection: $date, displayedComponents: .hourAndMinute)
-                .labelsHidden().datePickerStyle(.field)
-                .onChange(of: date) { _, _ in publish() }
-
-        case .timestamp:
-            DatePicker("", selection: $date, displayedComponents: [.date, .hourAndMinute])
-                .labelsHidden().datePickerStyle(.field)
-                .onChange(of: date) { _, _ in publish() }
+        case .date, .time, .timestamp:
+            temporalEditor
 
         case .enumType(let labels):
             Picker("", selection: $enumSel) {
@@ -201,6 +194,63 @@ struct TypedValueEditor: View {
 
         case .text, .unknown:
             plainField(monospaced: false, placeholder: "")
+        }
+    }
+
+    private var temporalKind: PGTemporal.Kind {
+        if let k = PGTemporal.Kind.from(typeName: typeName) { return k }
+        switch kind {
+        case .date: return .date
+        case .time: return .time(tz: false)
+        case .timestamp(let tz): return .timestamp(tz: tz)
+        default: return .timestamp(tz: false)
+        }
+    }
+
+    /// Text is the source of truth so nothing the picker can't represent
+    /// (seconds, microseconds, offsets, BC, infinity) is lost; the picker
+    /// only rewrites the components it shows.
+    private var temporalEditor: some View {
+        let k = temporalKind
+        let parsed = PGTemporal.parse(text, kind: k)
+        let pickerBinding = Binding<Date>(
+            get: { parsed?.pickerDate(kind: k) ?? PGTemporal.now(kind: k).pickerDate(kind: k) ?? Date() },
+            set: { newDate in
+                let base = PGTemporal.parse(text, kind: k) ?? PGTemporal.now(kind: k)
+                text = base.merging(pickerDate: newDate, kind: k).format(kind: k)
+            }
+        )
+        let components: DatePickerComponents = {
+            switch k {
+            case .date: return .date
+            case .time: return .hourAndMinute
+            case .timestamp: return [.date, .hourAndMinute]
+            }
+        }()
+        let zone = (parsed ?? PGTemporal.now(kind: k)).pickerTimeZone
+        return HStack(spacing: 6) {
+            plainField(monospaced: true, placeholder: temporalPlaceholder(k))
+                .overlay(alignment: .trailing) {
+                    if !text.isEmpty && parsed == nil {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange).font(.caption)
+                            .padding(.trailing, 6)
+                            .help("Not a recognised \(typeName) value — sent to the server as typed")
+                    }
+                }
+            DatePicker("", selection: pickerBinding, displayedComponents: components)
+                .labelsHidden().datePickerStyle(.field)
+                .environment(\.timeZone, zone)
+                .disabled(!text.isEmpty && parsed?.pickerDate(kind: k) == nil)
+                .fixedSize()
+        }
+    }
+
+    private func temporalPlaceholder(_ k: PGTemporal.Kind) -> String {
+        switch k {
+        case .date: return "2024-01-31"
+        case .time(let tz): return tz ? "13:45:00.123456+01" : "13:45:00.123456"
+        case .timestamp(let tz): return tz ? "2024-01-31 13:45:00.123456+01" : "2024-01-31 13:45:00.123456"
         }
     }
 
@@ -306,16 +356,18 @@ struct TypedValueEditor: View {
         case .expression:
             value = .expression(exprText)
         case .value:
-            value = .literal(literalFromDraft())
+            let draft = literalFromDraft()
+            if let hydratedLiteral, draft == hydratedDraftLiteral {
+                value = .literal(hydratedLiteral)
+            } else {
+                value = .literal(draft)
+            }
         }
     }
 
     private func literalFromDraft() -> String {
         switch kind {
         case .boolean:        return bool ? "true" : "false"
-        case .date:           return Self.format(date, "yyyy-MM-dd")
-        case .time:           return Self.format(date, "HH:mm:ss")
-        case .timestamp:      return Self.format(date, "yyyy-MM-dd HH:mm:ss")
         case .enumType:       return enumSel
         case .json:           return JSONFormatter.compact(jsonText) ?? jsonText
         default:              return text
@@ -334,6 +386,8 @@ struct TypedValueEditor: View {
         case .literal(let s):
             mode = .value
             seedDrafts(from: s)
+            hydratedLiteral = s
+            hydratedDraftLiteral = literalFromDraft()
         }
     }
 
@@ -342,8 +396,6 @@ struct TypedValueEditor: View {
         switch kind {
         case .boolean:
             bool = Self.parseBool(raw) ?? true
-        case .date, .time, .timestamp:
-            date = Self.parseDate(raw) ?? Date()
         case .enumType(let labels):
             enumSel = labels.contains(raw) ? raw : (labels.first ?? raw)
         case .json:
@@ -354,20 +406,6 @@ struct TypedValueEditor: View {
     }
 
     // MARK: - Parse / format helpers
-
-    private static func format(_ d: Date, _ fmt: String) -> String {
-        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = fmt
-        return f.string(from: d)
-    }
-
-    private static func parseDate(_ raw: String) -> Date? {
-        let formats = ["yyyy-MM-dd HH:mm:ssZ", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd", "HH:mm:ss", "HH:mm"]
-        for fmt in formats {
-            let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = fmt
-            if let d = f.date(from: raw) { return d }
-        }
-        return nil
-    }
 
     private static func parseBool(_ raw: String) -> Bool? {
         switch raw.lowercased() {
