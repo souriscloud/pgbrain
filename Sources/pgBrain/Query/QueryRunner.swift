@@ -166,6 +166,11 @@ enum QueryRunner {
                 }
                 let result = try await runOnConnection(sql, on: connection, limit: limit)
                 await gate.close()
+                // A pooled BEGIN can't span statements; end it here rather
+                // than hand the open transaction to the pool's next caller.
+                if PooledTransaction.opensTransaction(sql) {
+                    await PooledTransaction.rollbackOrDiscard(connection)
+                }
                 if searchPath != nil {
                     _ = try? await connection.query(PostgresQuery(unsafeSQL: "RESET search_path"), logger: pgbrainQuietLogger)
                 }
@@ -374,5 +379,73 @@ final class CancelGate: Sendable {
             return s.inFlight
         }
         await pending?.value
+    }
+}
+
+/// Transactions on pooled connections. PostgresNIO hands a leased connection
+/// back to the pool whatever state it's in, so a transaction left open or
+/// aborted would leak into the next caller — any path that can't prove the
+/// transaction ended closes the connection instead, and the pool drops it.
+enum PooledTransaction {
+    /// BEGIN, `body`, COMMIT on one leased connection, with the same gated
+    /// pg_cancel_backend wiring as `QueryRunner.run`.
+    static func run<T: Sendable>(
+        client: PostgresClient,
+        operationID: UUID? = nil,
+        tracker: OperationsCenter? = nil,
+        _ body: (PostgresConnection) async throws -> T
+    ) async throws -> T {
+        try await client.withConnection { connection in
+            let gate = CancelGate()
+            if let opID = operationID, let tracker {
+                let pid = try await OperationsHelpers.fetchBackendPID(connection, logger: pgbrainQuietLogger)
+                let cancelHandler: @Sendable () async -> Void = { [weak client] in
+                    guard let client else { return }
+                    await gate.fire {
+                        _ = try? await client.withConnection { sister in
+                            _ = try await sister.query(
+                                PostgresQuery(unsafeSQL: "SELECT pg_cancel_backend(\(pid))"),
+                                logger: pgbrainQuietLogger
+                            )
+                        }
+                    }
+                }
+                Task { @MainActor in
+                    tracker.attachCancellation(toOperationID: opID, pid: pid, handler: cancelHandler)
+                }
+            }
+            do {
+                _ = try await connection.query(PostgresQuery(unsafeSQL: "BEGIN"), logger: pgbrainQuietLogger)
+                let value = try await body(connection)
+                await gate.close()
+                _ = try await connection.query(PostgresQuery(unsafeSQL: "COMMIT"), logger: pgbrainQuietLogger)
+                return value
+            } catch {
+                await gate.close()
+                await rollbackOrDiscard(connection)
+                throw error
+            }
+        }
+    }
+
+    /// ROLLBACK, or — if even that fails (dead socket, cancelled task, broken
+    /// protocol state) — close the connection so it can't return to the pool
+    /// with a transaction still open. ROLLBACK outside a transaction only
+    /// warns, so this is safe after a failed COMMIT too.
+    static func rollbackOrDiscard(_ connection: PostgresConnection) async {
+        do {
+            _ = try await connection.query(PostgresQuery(unsafeSQL: "ROLLBACK"), logger: pgbrainQuietLogger)
+        } catch {
+            Log.postgres.error("ROLLBACK failed on a pooled connection; closing it: \(String(describing: error), privacy: .public)")
+            try? await connection.close()
+        }
+    }
+
+    /// Statements that leave a transaction block open when run on their own.
+    static func opensTransaction(_ sql: String) -> Bool {
+        let tokens = SQLSafety.tokens(in: sql).prefix(2).map { $0.lowercased() }
+        guard let first = tokens.first else { return false }
+        if first == "begin" { return true }
+        return first == "start" && tokens.dropFirst().first == "transaction"
     }
 }

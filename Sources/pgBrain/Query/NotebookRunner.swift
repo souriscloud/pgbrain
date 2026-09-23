@@ -369,38 +369,43 @@ enum NotebookRunner {
         var failedAt = plans.count
         do {
             try await client.withConnection { conn in
-                _ = try await conn.query(PostgresQuery(unsafeSQL: "BEGIN"), logger: pgbrainQuietLogger)
-                if let sp = searchPath {
-                    _ = try await conn.query(
-                        PostgresQuery(unsafeSQL: "SET LOCAL search_path TO \(SQLIdent.quote(sp))"),
-                        logger: pgbrainQuietLogger
-                    )
-                }
-                for (i, (sql, result)) in zip(plans, results).enumerated() {
-                    let started = Date()
-                    do {
-                        let qr = try await QueryRunner.runOnConnection(sql, on: conn)
-                        await MainActor.run {
-                            result.status = .success(qr)
-                            result.finishedAt = Date()
-                        }
-                        record(sql, started: started, service: service, success: true, error: nil, rows: qr.rowsAffected)
-                    } catch {
-                        let msg = PostgresErrorMessage.describe(error)
-                        failureMessage = msg
-                        failedAt = i
-                        await MainActor.run {
-                            result.status = .failure(msg)
-                            result.finishedAt = Date()
-                        }
-                        record(sql, started: started, service: service, success: false, error: msg, rows: nil)
-                        break
+                do {
+                    _ = try await conn.query(PostgresQuery(unsafeSQL: "BEGIN"), logger: pgbrainQuietLogger)
+                    if let sp = searchPath {
+                        _ = try await conn.query(
+                            PostgresQuery(unsafeSQL: "SET LOCAL search_path TO \(SQLIdent.quote(sp))"),
+                            logger: pgbrainQuietLogger
+                        )
                     }
-                }
-                if failureMessage == nil {
-                    _ = try await conn.query(PostgresQuery(unsafeSQL: "COMMIT"), logger: pgbrainQuietLogger)
-                } else {
-                    _ = try? await conn.query(PostgresQuery(unsafeSQL: "ROLLBACK"), logger: pgbrainQuietLogger)
+                    for (i, (sql, result)) in zip(plans, results).enumerated() {
+                        let started = Date()
+                        do {
+                            let qr = try await QueryRunner.runOnConnection(sql, on: conn)
+                            await MainActor.run {
+                                result.status = .success(qr)
+                                result.finishedAt = Date()
+                            }
+                            record(sql, started: started, service: service, success: true, error: nil, rows: qr.rowsAffected)
+                        } catch {
+                            let msg = PostgresErrorMessage.describe(error)
+                            failureMessage = msg
+                            failedAt = i
+                            await MainActor.run {
+                                result.status = .failure(msg)
+                                result.finishedAt = Date()
+                            }
+                            record(sql, started: started, service: service, success: false, error: msg, rows: nil)
+                            break
+                        }
+                    }
+                    if failureMessage == nil {
+                        _ = try await conn.query(PostgresQuery(unsafeSQL: "COMMIT"), logger: pgbrainQuietLogger)
+                    } else {
+                        await PooledTransaction.rollbackOrDiscard(conn)
+                    }
+                } catch {
+                    await PooledTransaction.rollbackOrDiscard(conn)
+                    throw error
                 }
             }
             for r in results.dropFirst(failedAt + 1) {
