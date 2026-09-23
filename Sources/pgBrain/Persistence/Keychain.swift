@@ -95,6 +95,38 @@ enum Keychain {
         return migrateLegacy(account: account)
     }
 
+    enum PasswordStatus: Equatable, Sendable {
+        case found
+        case notFound
+        /// The item may exist but couldn't be read (locked keychain, access
+        /// denied, prompt dismissed).
+        case error(OSStatus)
+    }
+
+    /// Like `password(for:)`, but tells "no item" apart from "couldn't read",
+    /// for callers that would otherwise overwrite a password they failed to see.
+    static func passwordStatus(for connectionID: UUID) -> PasswordStatus {
+        let account = connectionID.uuidString
+        let (status, data) = read(service: service, account: account)
+        return classify(status: status, data: data) {
+            let (legacyStatus, legacyData) = read(service: legacyService, account: account)
+            let legacy = classify(status: legacyStatus, data: legacyData, legacy: { .notFound })
+            if legacy == .found { _ = migrateLegacy(account: account) }
+            return legacy
+        }
+    }
+
+    static func classify(status: OSStatus, data: Data?, legacy: () -> PasswordStatus) -> PasswordStatus {
+        switch status {
+        case errSecSuccess:
+            return data == nil ? .error(status) : .found
+        case errSecItemNotFound:
+            return legacy()
+        default:
+            return .error(status)
+        }
+    }
+
     /// Off-main convenience for UI code.
     static func passwordAsync(for connectionID: UUID) async -> String? {
         await Task.detached(priority: .userInitiated) { password(for: connectionID) }.value

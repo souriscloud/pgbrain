@@ -9,6 +9,13 @@ final class ConnectionStore {
 
     private(set) var connections: [Connection] = []
 
+    /// Why saving is refused, or nil when saves are allowed. Set when the
+    /// file exists but couldn't be read, or when it needed a backup that
+    /// failed — rewriting it then would silently destroy the user's list.
+    private(set) var saveBlockedReason: String?
+    var saveBlocked: Bool { saveBlockedReason != nil }
+    private var needsBackupBeforeSave = false
+
     private let url: URL
 
     private init() {
@@ -58,15 +65,45 @@ final class ConnectionStore {
     }
 
     func load() {
-        guard let data = try? Data(contentsOf: url) else {
+        saveBlockedReason = nil
+        needsBackupBeforeSave = false
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
             connections = []
+            if Self.isFileMissing(error) { return }
+            saveBlockedReason = "connections.json couldn't be read (\(error.localizedDescription)). Changes won't be saved until pgBrain can read it."
+            Log.persistence.error("connections.json unreadable, saving disabled: \(String(describing: error), privacy: .public)")
             return
         }
         let result = Self.decode(data)
         connections = result.connections
         if result.fileUnreadable || result.droppedCount > 0 {
             Log.persistence.error("connections.json: \(result.droppedCount, privacy: .public) undecodable entries, unreadable=\(result.fileUnreadable, privacy: .public); backing up before any rewrite")
-            backUpCurrentFile()
+            needsBackupBeforeSave = true
+            ensureBackupBeforeSave()
+        }
+    }
+
+    nonisolated static func isFileMissing(_ error: any Error) -> Bool {
+        let ns = error as NSError
+        if ns.domain == NSCocoaErrorDomain, ns.code == NSFileReadNoSuchFileError { return true }
+        if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError,
+           underlying.domain == NSPOSIXErrorDomain, underlying.code == Int(ENOENT) {
+            return true
+        }
+        return ns.domain == NSPOSIXErrorDomain && ns.code == Int(ENOENT)
+    }
+
+    /// Saves stay blocked until the damaged file has been copied aside.
+    private func ensureBackupBeforeSave() {
+        guard needsBackupBeforeSave else { return }
+        if !FileManager.default.fileExists(atPath: url.path) || backUpCurrentFile() != nil {
+            needsBackupBeforeSave = false
+            saveBlockedReason = nil
+        } else {
+            saveBlockedReason = "connections.json is damaged and couldn't be backed up. Changes won't be saved until a backup succeeds."
         }
     }
 
@@ -101,6 +138,11 @@ final class ConnectionStore {
     }()
 
     func save() {
+        ensureBackupBeforeSave()
+        if let reason = saveBlockedReason {
+            Log.persistence.error("connections not saved: \(reason, privacy: .public)")
+            return
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         do {
@@ -155,11 +197,20 @@ final class ConnectionStore {
 
     /// Fill Keychain passwords from parsed `~/.pgpass` entries for saved
     /// connections that don't have one yet. Existing passwords are never
-    /// overwritten. Returns how many connections got a password.
+    /// overwritten — and a Keychain that can't be read (locked, access
+    /// denied) counts as "has one", not "missing". Returns how many
+    /// connections got a password.
     @discardableResult
     func fillPasswords(from pgpass: [ConnInfoParser.PgPassEntry],
-                       hasPassword: (UUID) -> Bool = { Keychain.password(for: $0) != nil },
+                       passwordStatus: (UUID) -> Keychain.PasswordStatus = { Keychain.passwordStatus(for: $0) },
                        store: (String, UUID) throws -> Void = { try Keychain.setPassword($0, for: $1) }) -> Int {
+        fillPasswords(from: pgpass, hasPassword: { passwordStatus($0) != .notFound }, store: store)
+    }
+
+    @discardableResult
+    func fillPasswords(from pgpass: [ConnInfoParser.PgPassEntry],
+                       hasPassword: (UUID) -> Bool,
+                       store: (String, UUID) throws -> Void) -> Int {
         var filled = 0
         for c in connections where !hasPassword(c.id) {
             guard let pw = ConnInfoParser.pgpassLookup(pgpass, host: c.host, port: c.port,
