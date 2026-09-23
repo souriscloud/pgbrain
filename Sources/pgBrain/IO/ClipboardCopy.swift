@@ -64,7 +64,7 @@ enum ClipboardCopy {
                     let kind = ColumnTypeKind.from(typeName: page.columns[i].typeName)
                     switch kind {
                     case .integer, .number:
-                        rendered = value
+                        rendered = Exporter.isJSONNumber(value) ? value : jsonString(value)
                     case .bool:
                         switch value.lowercased() {
                         case "t", "true", "1": rendered = "true"
@@ -92,7 +92,10 @@ enum ClipboardCopy {
         lines.append(page.columns.map { field($0.name, quoteForCSV: needsQuote) }.joined(separator: separator))
         for row in page.rows {
             let cells = (0..<page.columns.count).map { i -> String in
-                field(i < row.count ? (row[i] ?? "") : "", quoteForCSV: needsQuote)
+                let value = i < row.count ? row[i] : nil
+                // Same convention as the CSV exporter: NULL → empty, '' → "".
+                if needsQuote, value == "" { return "\"\"" }
+                return field(value ?? "", quoteForCSV: needsQuote)
             }
             lines.append(cells.joined(separator: separator))
         }
@@ -109,9 +112,14 @@ enum ClipboardCopy {
     private static func field(_ s: String, quoteForCSV: Bool) -> String {
         guard quoteForCSV else {
             // TSV: tabs/newlines would break the grid — strip to spaces.
-            return s.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ")
+            var out = String.UnicodeScalarView()
+            for scalar in s.unicodeScalars {
+                out.append(scalar == "\t" || scalar == "\n" || scalar == "\r" ? " " : scalar)
+            }
+            return String(out)
         }
-        if s.contains(where: { $0 == "," || $0 == "\"" || $0 == "\n" || $0 == "\r" }) {
+        // Scalars, not Characters: "\r\n" is one Character and matches neither.
+        if s.unicodeScalars.contains(where: { $0 == "," || $0 == "\"" || $0 == "\n" || $0 == "\r" }) {
             return "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
         }
         return s
