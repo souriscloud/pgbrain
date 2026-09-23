@@ -105,9 +105,28 @@ enum SQLFormatter {
                 continue
             }
 
+            if case .comment = tok.kind {
+                let text = ns.substring(with: tok.range)
+                output.append(text)
+                if text.hasPrefix("--") {
+                    // A line comment runs to end of line: anything emitted
+                    // after it on the same line would be swallowed into it.
+                    output.append("\n")
+                } else if i + 1 < tokens.count {
+                    appendSpace()
+                }
+                i += 1
+                continue
+            }
+
             // Default: append the raw substring for anything else
             // (identifiers, strings, numbers, punctuation, operators).
             output.append(ns.substring(with: tok.range))
+            // `$1` lexes as `$` + number; a space between would change it.
+            if case .op("$") = tok.kind, i + 1 < tokens.count, case .number = tokens[i + 1].kind {
+                i += 1
+                continue
+            }
             // Heuristic spacer — don't add a trailing space if the next
             // token is punctuation that wants to hug.
             let nextWantsSpace = (i + 1 < tokens.count) ? wantsLeadingSpace(tokens[i + 1]) : false
