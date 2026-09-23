@@ -30,9 +30,7 @@ struct TableTabView: View {
         self.table = table
         self.tab = tab
         self.service = service
-        let loader = service.loader(for: tab, table: table)
-        loader.tab = tab
-        _loader = State(initialValue: loader)
+        _loader = State(initialValue: service.loader(for: tab, table: table))
         _inspector = State(initialValue: service.inspector(for: tab, table: table))
     }
 
@@ -442,6 +440,7 @@ private struct TableTabLifecycle: ViewModifier {
         content
             .task(id: view.table.id) { await view.firstLoad() }
             .onAppear {
+                if loader.tab !== tab { loader.tab = tab }
                 view.consumeRequestedPane()
                 view.consumeFilterReload()
             }

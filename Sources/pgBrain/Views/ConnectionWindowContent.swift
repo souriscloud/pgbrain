@@ -1007,6 +1007,7 @@ struct ConnectionWindowContent: View {
 
     private func reconcileTabs(with snapshot: SchemaSnapshot) {
         let result = service.workspace.reconcile(with: snapshot)
+        service.syncLoadersWithTabs()
         for r in result.renamed {
             service.toasts.show(.info, "\(r.from) was renamed to \(r.to) — tab updated")
         }
@@ -1292,7 +1293,7 @@ struct ConnectionWindowContent: View {
                 switch selected.kind {
                 case .table(let table):
                     TableTabView(table: table, tab: selected, service: service)
-                        .id(table.id)
+                        .id(selected.id)
                 case .scratchpad(let pad):
                     NotebookView(notebook: pad, service: service)
                         .id(pad.id)
