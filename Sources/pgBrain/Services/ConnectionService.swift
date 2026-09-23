@@ -55,7 +55,7 @@ final class ConnectionService {
     /// page stays in memory and the user only re-fetches when they
     /// hit the refresh button or ⌘R explicitly.
     @ObservationIgnored private var loaderCache: [UUID: RowsLoader] = [:]
-    @ObservationIgnored private var inspectorCache: [UUID: InspectorLoader] = [:]
+    @ObservationIgnored private var inspectorCache: [UUID: (tableID: String, loader: InspectorLoader)] = [:]
     /// Raw schema as returned by the server — every namespace included.
     /// Most callers should prefer `visibleSchema`, which strips schemas
     /// the user has hidden via the sidebar's "Schemas" menu.
@@ -198,10 +198,12 @@ final class ConnectionService {
     /// Inspector cache — same caching contract as `loader(for:table:)`.
     /// The Structure / DDL panes draw from this so flipping panes
     /// doesn't re-issue the catalog queries.
+    /// Keyed by tab, but only valid for the relation it was built for: a
+    /// rename keeps the tab, and the catalog queries must follow the name.
     func inspector(for tab: WorkspaceState.Tab, table: TableNode) -> InspectorLoader {
-        if let cached = inspectorCache[tab.id] { return cached }
+        if let cached = inspectorCache[tab.id], cached.tableID == table.id { return cached.loader }
         let inspector = InspectorLoader(table: table, service: self)
-        inspectorCache[tab.id] = inspector
+        inspectorCache[tab.id] = (table.id, inspector)
         return inspector
     }
 

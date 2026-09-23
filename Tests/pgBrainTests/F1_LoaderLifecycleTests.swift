@@ -21,6 +21,7 @@ final class F1_LoaderLifecycleTests: XCTestCase {
         ws.openTable(table("old", oid: 7))
         let tab = ws.tabs[0]
         let loader = service.loader(for: tab, table: tab.tableNode!)
+        let oldInspector = service.inspector(for: tab, table: tab.tableNode!)
         loader.editBuffer.set(row: 0, column: 0, value: "42")
         XCTAssertTrue(tab.hasPendingChanges)
 
@@ -32,6 +33,8 @@ final class F1_LoaderLifecycleTests: XCTestCase {
         XCTAssertEqual(tab.title, "public.new")
         XCTAssertTrue(service.loader(for: tab, table: tab.tableNode!) === loader, "same loader, not a fresh one")
         XCTAssertTrue(loader.editBuffer.isDirty, "staged edit survived the reload")
+        XCTAssertFalse(service.inspector(for: tab, table: tab.tableNode!) === oldInspector,
+                       "structure / DDL queries follow the new name")
         XCTAssertEqual(loader.table.name, "old", "swap waits while edits are staged against the old relation")
 
         loader.editBuffer.clear()
