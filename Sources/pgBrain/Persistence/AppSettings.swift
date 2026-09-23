@@ -113,6 +113,12 @@ final class AppSettings {
     }
 
     private convenience init() {
+        #if DEBUG
+        if ShowcaseEnvironment.isActive {
+            self.init(defaults: ShowcaseEnvironment.defaults)
+            return
+        }
+        #endif
         self.init(defaults: .standard)
     }
 

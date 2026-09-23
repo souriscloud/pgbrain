@@ -22,7 +22,11 @@ final class SchemaVisibility {
     @ObservationIgnored private let defaults: UserDefaults
 
     private init() {
+        #if DEBUG
+        self.defaults = ShowcaseEnvironment.isActive ? ShowcaseEnvironment.defaults : .standard
+        #else
         self.defaults = .standard
+        #endif
         load()
     }
 

@@ -16,6 +16,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
 
+        #if DEBUG
+        if ShowcaseEnvironment.isActive {
+            ShowcaseRunner.start(delegate: self)
+            return
+        }
+        #endif
+
         NSApp.setActivationPolicy(.regular)
 
         // Re-apply a previously-chosen Light/Dark override before any window opens.

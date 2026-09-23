@@ -134,6 +134,8 @@ mangle data. Recommended for everyone.
 - A column named `description` no longer shows a descending sort arrow.
 - Closing a window while it was still connecting left an SSH process behind.
 - The "unsaved changes" dot vanished when you switched tabs.
+- A partitioned table's header showed "0 bytes"; it now shows the size of
+  all its partitions.
 - The empty-window hint now says ⌘T (not ⌘N) opens a scratchpad.
 - Choosing the current database in the switcher no longer opens a duplicate
   window; cross-DB copy and schema diff target the right database window.

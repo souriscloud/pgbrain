@@ -4,6 +4,16 @@ import SwiftUI
 struct pgBrainApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    #if DEBUG
+    init() {
+        // Must happen before launch finishes: a screenshot run may never get
+        // a Dock icon or take focus from whatever the user is doing.
+        if ShowcaseEnvironment.isActive {
+            NSApplication.shared.setActivationPolicy(.prohibited)
+        }
+    }
+    #endif
+
     var body: some Scene {
         Settings {
             SettingsView()
