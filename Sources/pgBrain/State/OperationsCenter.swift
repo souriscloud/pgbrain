@@ -90,16 +90,42 @@ final class OperationsCenter {
         operations.lazy.filter { !$0.isFinished }.count
     }
 
+    /// Finished operations kept for the popover's history. Anything beyond
+    /// either bound is dropped so a long session doesn't accumulate every
+    /// query it ever ran.
+    static let finishedHistoryLimit = 50
+    static let finishedHistoryAge: TimeInterval = 10 * 60
+
     func begin(kind: Kind, summary: String) -> Operation {
         let op = Operation(kind: kind, summary: summary)
+        pruneFinished()
         operations.append(op)
         return op
+    }
+
+    func pruneFinished(now: Date = Date()) {
+        let cutoff = now.addingTimeInterval(-Self.finishedHistoryAge)
+        var keptFinished = 0
+        var keep = Array(repeating: true, count: operations.count)
+        for i in operations.indices.reversed() {
+            let op = operations[i]
+            guard op.isFinished else { continue }
+            if (op.finishedAt ?? now) < cutoff || keptFinished >= Self.finishedHistoryLimit {
+                keep[i] = false
+            } else {
+                keptFinished += 1
+            }
+        }
+        guard keep.contains(false) else { return }
+        operations = operations.indices.filter { keep[$0] }.map { operations[$0] }
     }
 
     func finish(_ op: Operation, status: Operation.Status) {
         op.status = status
         op.finishedAt = Date()
         op.cancellationHandler = nil
+        op.taskHandle = nil
+        pruneFinished()
         // Long-query toast — fire only when the app is in the
         // background so the user gets pinged without spamming
         // notifications for queries they're sitting on.

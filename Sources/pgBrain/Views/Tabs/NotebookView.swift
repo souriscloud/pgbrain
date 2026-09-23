@@ -39,6 +39,9 @@ struct NotebookView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if let notice = notebook.sessionNotice {
+                sessionNoticeBar(notice)
+            }
             Divider()
             ScrollViewReader { proxy in
                 ScrollView {
@@ -89,15 +92,7 @@ struct NotebookView: View {
             ExplainPlanView(
                 initialSQL: state.sql,
                 runExplain: { analyze in
-                    guard let client = service.client else {
-                        return .failure(Explain.ExplainError.empty)
-                    }
-                    do {
-                        let node = try await Explain.run(sql: state.sql, analyze: analyze, on: client)
-                        return .success(node)
-                    } catch {
-                        return .failure(error)
-                    }
+                    await NotebookRunner.explain(sql: state.sql, analyze: analyze, notebook: notebook, service: service)
                 },
                 onClose: { explainRequest = nil }
             )
@@ -162,7 +157,35 @@ struct NotebookView: View {
             .controlSize(.small)
             .help("Run multi-statement runs as one transaction (BEGIN/COMMIT) — any error rolls the whole batch back")
 
+            commitModePicker
+
+            TransactionIndicator(
+                transaction: notebook.transaction,
+                isRunning: notebook.isRunning,
+                onCommit: { NotebookRunner.endTransaction(commit: true, notebook: notebook, service: service) },
+                onRollback: { NotebookRunner.endTransaction(commit: false, notebook: notebook, service: service) }
+            )
+
             Spacer()
+
+            if notebook.isRunning {
+                Button { notebook.stop() } label: {
+                    Label("Stop", systemImage: "stop.fill").font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(.red)
+                .keyboardShortcut(".", modifiers: .command)
+                .help("Cancel the running statement and the rest of the batch (⌘.)")
+            }
+
+            Button { notebook.clearResults() } label: {
+                Image(systemName: "clear")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(!notebook.cells.contains { if case .result = $0.kind { return true } else { return false } })
+            .help("Clear all results")
             Button { showLibrary = true } label: {
                 Label("Saved", systemImage: "books.vertical").font(.caption)
             }
@@ -175,6 +198,9 @@ struct NotebookView: View {
                     .keyboardShortcut("o", modifiers: .command)
                 Button("Save as .sql…") { saveSQLFile() }
                     .keyboardShortcut("s", modifiers: [.command, .shift])
+                Divider()
+                Button("Reset Session") { resetSession() }
+                    .disabled(notebook.session == nil)
             } label: {
                 Image(systemName: "doc.badge.ellipsis")
             }
@@ -230,6 +256,42 @@ struct NotebookView: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help("search_path for this scratchpad")
+    }
+
+    /// DataGrip's Tx: Auto / Manual. Manual opens a transaction before the
+    /// first data-changing statement and leaves it for Commit / Roll Back.
+    private var commitModePicker: some View {
+        Picker("", selection: $notebook.autoCommit) {
+            Text("Auto").tag(true)
+            Text("Manual").tag(false)
+        }
+        .pickerStyle(.segmented)
+        .controlSize(.small)
+        .labelsHidden()
+        .fixedSize()
+        .help("Auto-commit each statement, or Manual: open a transaction before the first change and wait for Commit / Roll Back")
+    }
+
+    private func sessionNoticeBar(_ notice: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "info.circle").foregroundStyle(.secondary)
+            Text(notice).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            Spacer()
+            Button { notebook.sessionNotice = nil } label: { Image(systemName: "xmark").font(.caption2) }
+                .buttonStyle(.plain)
+                .help("Dismiss")
+        }
+        .padding(.horizontal, Tokens.Spacing.md)
+        .padding(.vertical, 4)
+        .background(Color.yellow.opacity(0.08))
+    }
+
+    /// Drop the pinned connection and start fresh on the next run. Asks first
+    /// when that would throw away an open transaction.
+    private func resetSession() {
+        guard notebook.confirmCloseWithOpenTransaction() else { return }
+        notebook.sessionNotice = nil
+        service.toasts.show(.info, "Session reset — the next run opens a new connection")
     }
 
     /// Open a `.sql` file into a new SQL cell at the end of the
@@ -793,15 +855,27 @@ private struct ResultBody: View {
             }
             .padding(10)
         case .success(let q):
-            if q.page.columns.isEmpty {
-                HStack {
-                    Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
-                    Text(q.commandTag ?? "OK").font(.caption.monospaced())
-                    Spacer()
+            VStack(alignment: .leading, spacing: 0) {
+                if q.page.columns.isEmpty {
+                    HStack {
+                        Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+                        Text(q.commandTag ?? "OK").font(.caption.monospaced())
+                        Spacer()
+                    }
+                    .padding(10)
+                } else {
+                    ResultGridWithViews(page: q.page, service: service, sourceSQL: result.statement, searchPath: notebook.searchPath)
                 }
-                .padding(10)
-            } else {
-                ResultGridWithViews(page: q.page, service: service, sourceSQL: result.statement, searchPath: notebook.searchPath)
+                if !q.notices.isEmpty {
+                    Divider().opacity(0.3)
+                    Text(q.notices.joined(separator: "\n"))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                }
             }
         case .failure(let message):
             HStack(alignment: .top, spacing: 8) {
@@ -852,5 +926,68 @@ private struct ResultBody: View {
         case .failure: return .red.opacity(0.4)
         case .cancelled: return .secondary.opacity(0.3)
         }
+    }
+}
+
+// MARK: - Transaction indicator
+
+/// Toolbar badge for the pinned session's transaction: nothing while idle,
+/// "In transaction · N statements · 0:42" with Commit / Roll Back while one is
+/// open, and a red "Failed — roll back" when the server has aborted it.
+private struct TransactionIndicator: View {
+    let transaction: Notebook.TransactionState
+    let isRunning: Bool
+    let onCommit: () -> Void
+    let onRollback: () -> Void
+
+    var body: some View {
+        if transaction.isOpen {
+            HStack(spacing: 6) {
+                badge
+                if transaction.status == .active {
+                    Button("Commit", action: onCommit)
+                        .controlSize(.small)
+                        .disabled(isRunning)
+                        .help("COMMIT the open transaction")
+                }
+                Button("Roll Back", action: onRollback)
+                    .controlSize(.small)
+                    .disabled(isRunning)
+                    .help("ROLLBACK the open transaction")
+            }
+        }
+    }
+
+    private var badge: some View {
+        let failed = transaction.status == .failed
+        return HStack(spacing: 4) {
+            Circle()
+                .fill(failed ? Color.red : Color.orange)
+                .frame(width: 7, height: 7)
+            if failed {
+                Text("Failed — must roll back")
+                    .font(.caption.weight(.semibold))
+            } else {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text("In transaction · \(transaction.statementCount) stmt\(transaction.statementCount == 1 ? "" : "s") · \(elapsed(at: context.date))")
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                }
+            }
+        }
+        .padding(.horizontal, 8).padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill((failed ? Color.red : Color.orange).opacity(0.14))
+        )
+        .help(failed
+              ? "A statement failed inside the transaction; the server ignores everything until ROLLBACK"
+              : "This scratchpad's session has an uncommitted transaction")
+    }
+
+    private func elapsed(at now: Date) -> String {
+        let seconds = Int(now.timeIntervalSince(transaction.startedAt ?? now))
+        return seconds >= 3600
+            ? String(format: "%d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+            : String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 }

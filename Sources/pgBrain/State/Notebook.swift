@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import Synchronization
 
 /// Cell-based notebook scratchpad. The earlier TextKit-attachment design
 /// fell over hard because `NSTextAttachmentViewProvider` refuses to render
@@ -19,9 +20,9 @@ final class Notebook: Identifiable {
     var title: String
     /// Schema this notebook scopes its queries to. `nil` means "use the
     /// connection's default `search_path`" (typically `"$user", public`).
-    /// When non-nil, the runner runs `SET search_path TO "name"` on the
-    /// checked-out connection before each statement and `RESET search_path`
-    /// afterwards so the connection pool stays clean.
+    /// The runner applies it to the tab's pinned session whenever it differs
+    /// from what was last applied there, so a `SET search_path` the user
+    /// types by hand stays in effect until the picker changes.
     var searchPath: String?
     /// Document is a flat ordered sequence of cells. Always starts and ends
     /// with at least one SQL cell so the user has somewhere to type.
@@ -40,11 +41,46 @@ final class Notebook: Identifiable {
     /// Pulse: ask the host to open the result-diff sheet on the
     /// last two successful results in this notebook.
     var requestedDiffLastTwo: Bool = false
-    /// When true, every multi-statement cell run gets wrapped in a
-    /// single BEGIN/COMMIT on one pooled connection so partial-batch
-    /// failures roll back the whole thing. Default off — keeps the
-    /// existing "each statement autocommits" mental model.
+    /// When true, every multi-statement cell run is wrapped in one
+    /// BEGIN/COMMIT (or a savepoint inside an already-open transaction) so a
+    /// partial-batch failure rolls the whole batch back.
     var runAsTransaction: Bool = false
+    /// DataGrip's Auto / Manual commit. In manual mode the runner opens a
+    /// transaction before the first data-changing statement, and nothing is
+    /// committed until the user presses Commit.
+    var autoCommit: Bool = true
+    /// Server-reported transaction state of the pinned session, plus the
+    /// bookkeeping the toolbar indicator shows.
+    var transaction = TransactionState()
+    /// One-line heads-up about the session itself (reconnected, fell back to
+    /// pooled execution, …).
+    var sessionNotice: String?
+    /// Why the pinned session can't be used on this connection (e.g. an
+    /// authentication method only PostgresNIO speaks). The runner then falls
+    /// back to per-statement pooled execution.
+    var sessionUnavailableReason: String?
+
+    struct TransactionState: Equatable {
+        var status: ScratchpadSession.TransactionStatus = .idle
+        var startedAt: Date?
+        var statementCount = 0
+
+        var isOpen: Bool { status != .idle }
+    }
+
+    /// The in-flight run (all statements of one cell invocation). Cancelled
+    /// by Stop and when the tab's session is closed.
+    @ObservationIgnored var runTask: Task<Void, Never>?
+    /// Ticket of the statement currently on the wire, so Stop can cancel
+    /// exactly that statement.
+    @ObservationIgnored var currentTicket: ScratchpadSession.Ticket?
+    /// The `searchPath` value last applied to the current session; `.none`
+    /// means nothing applied yet (fresh session).
+    @ObservationIgnored var appliedSearchPath: String??
+    /// DDL ran inside a still-open transaction; the sidebar refresh waits for
+    /// COMMIT because the pool can't see the change before then.
+    @ObservationIgnored var schemaChangedInTransaction = false
+    private let sessionBox = SessionBox()
     /// DataGrip-style `:name` query-parameter values, remembered across
     /// re-runs so the user fills a placeholder once and subsequent runs
     /// reuse the value. Keyed by parameter name (without the leading `:`).
@@ -63,10 +99,146 @@ final class Notebook: Identifiable {
         let selection: NSRange?
     }
 
-    init(title: String) {
+    /// `searchPath` presets the schema scope (e.g. "New query here" on a
+    /// schema in the sidebar); nil or blank leaves the server default.
+    init(title: String, searchPath: String? = nil) {
         self.title = title
+        let trimmed = searchPath?.trimmingCharacters(in: .whitespaces)
+        self.searchPath = (trimmed?.isEmpty ?? true) ? nil : trimmed
         // Seed with one empty SQL cell so the user can immediately type.
         self.cells = [NotebookCell(kind: .sql)]
+    }
+
+    deinit {
+        sessionBox.close()
+    }
+
+    // MARK: - Session
+
+    /// The tab's pinned server session, if one has been opened.
+    var session: ScratchpadSession? { sessionBox.current }
+
+    func attach(session: ScratchpadSession) {
+        sessionBox.replace(with: session)
+        appliedSearchPath = .none
+    }
+
+    var isRunning: Bool { runningCellID != nil }
+
+    /// Stop the running statement and the rest of its batch.
+    func stop() {
+        if let ticket = currentTicket, let session {
+            Task { await session.cancel(ticket) }
+        }
+        runTask?.cancel()
+    }
+
+    /// Drop the pinned session: cancels anything running and closes the
+    /// connection, which makes the server roll back an open transaction.
+    /// The next run opens a fresh session.
+    func closeSession() {
+        runTask?.cancel()
+        runTask = nil
+        currentTicket = nil
+        sessionBox.close()
+        appliedSearchPath = .none
+        transaction = TransactionState()
+    }
+
+    /// Fold the status the server reported after a statement into the
+    /// indicator's bookkeeping.
+    func recordTransaction(_ status: ScratchpadSession.TransactionStatus, now: Date = Date()) {
+        switch status {
+        case .idle:
+            transaction = TransactionState()
+        case .active, .failed:
+            if transaction.status == .idle {
+                transaction = TransactionState(status: status, startedAt: now, statementCount: 1)
+            } else {
+                transaction.status = status
+                transaction.statementCount += 1
+            }
+        }
+    }
+
+    /// Adopt the session's status after something that isn't a user
+    /// statement (COMMIT button, batch wrap-up, reconnect) — no count change.
+    func syncTransaction(_ status: ScratchpadSession.TransactionStatus, now: Date = Date()) {
+        switch status {
+        case .idle:
+            transaction = TransactionState()
+        case .active, .failed:
+            if transaction.status == .idle {
+                transaction = TransactionState(status: status, startedAt: now, statementCount: 0)
+            } else {
+                transaction.status = status
+            }
+        }
+    }
+
+    /// Ask before discarding an open transaction (tab or window close).
+    /// Returns false when the user chose to keep the tab open. Commit runs on
+    /// the session before it closes; Roll Back just closes it (the server
+    /// rolls back on disconnect). With no open transaction this closes the
+    /// session and returns true without asking.
+    func confirmCloseWithOpenTransaction() -> Bool {
+        guard transaction.isOpen, let session else {
+            closeSession()
+            return true
+        }
+        let failed = transaction.status == .failed
+        let alert = NSAlert()
+        alert.messageText = "“\(title)” has an open transaction"
+        alert.informativeText = failed
+            ? "The transaction has failed and can only be rolled back."
+            : "\(transaction.statementCount) statement\(transaction.statementCount == 1 ? "" : "s") since BEGIN. Commit them, or roll everything back?"
+        if !failed { alert.addButton(withTitle: "Commit") }
+        alert.addButton(withTitle: "Roll Back")
+        alert.addButton(withTitle: "Cancel")
+        let choices = failed ? ["rollback", "cancel"] : ["commit", "rollback", "cancel"]
+        let index = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        switch choices.indices.contains(index) ? choices[index] : "cancel" {
+        case "commit":
+            runTask?.cancel()
+            sessionBox.detach()
+            transaction = TransactionState()
+            Task.detached {
+                _ = try? await session.run("COMMIT", rowLimit: 1)
+                session.close()
+            }
+            return true
+        case "rollback":
+            closeSession()
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Per-cell cap on stacked result history. Older results under a cell are
+    /// dropped once a new run pushes the count past this.
+    static var resultHistoryLimit: Int {
+        let stored = UserDefaults.standard.integer(forKey: "notebook.resultHistoryLimit")
+        return stored > 0 ? stored : 5
+    }
+
+    /// Remove every finished result from the notebook.
+    func clearResults() {
+        var doomed = Set<UUID>()
+        for cell in cells {
+            guard case .result(let rid) = cell.kind else { continue }
+            if let r = results[rid], case .running = r.status { continue }
+            doomed.insert(rid)
+        }
+        guard !doomed.isEmpty else { return }
+        for rid in doomed { results.removeValue(forKey: rid) }
+        cells.removeAll { cell in
+            if case .result(let rid) = cell.kind { return doomed.contains(rid) }
+            return false
+        }
+        if !cells.contains(where: { $0.kind == .sql }) {
+            cells.append(NotebookCell(kind: .sql))
+        }
     }
 
     // MARK: - Cells
@@ -144,58 +316,23 @@ final class Notebook: Identifiable {
         results[id]
     }
 
-    /// Replace the result cells adjacent to `sqlCellID` with `newResultIDs`.
-    /// Reuses cells in place for the prefix that overlaps; trims extras;
-    /// appends new ones if the new run produced more results than there
-    /// were widgets before. Returns nothing — caller already created the
-    /// `NotebookResult`s and inserted them in `results`.
-    func replaceAdjacentResults(after sqlCellID: UUID, with newResultIDs: [UUID]) {
-        guard let anchorIdx = cells.firstIndex(where: { $0.id == sqlCellID }) else { return }
-        let existing = adjacentResults(after: sqlCellID)
-
-        // Reuse in place for as many as overlap.
-        let overlap = min(existing.count, newResultIDs.count)
-        for i in 0..<overlap {
-            cells[existing[i].cellIndex].kind = .result(resultID: newResultIDs[i])
-            // Drop the old result record from `results` if it differs and
-            // is now orphaned.
-            if existing[i].resultID != newResultIDs[i] {
-                results.removeValue(forKey: existing[i].resultID)
-            }
-        }
-
-        if existing.count > newResultIDs.count {
-            // Trim extras.
-            let extras = existing.suffix(existing.count - newResultIDs.count)
-            for entry in extras.reversed() {
-                results.removeValue(forKey: entry.resultID)
-                cells.remove(at: entry.cellIndex)
-            }
-        } else if newResultIDs.count > existing.count {
-            // Append new result cells after the last one we reused (or
-            // after the SQL cell if there were none).
-            var insertAt = (existing.last?.cellIndex ?? anchorIdx) + 1
-            for i in overlap..<newResultIDs.count {
-                cells.insert(NotebookCell(kind: .result(resultID: newResultIDs[i])), at: insertAt)
-                insertAt += 1
-            }
-        }
-
-        // Always leave a fresh empty SQL cell after the results so the
-        // user can keep typing without manually adding one.
-        let afterResults = (existing.last?.cellIndex ?? anchorIdx) + (newResultIDs.count - existing.count) + (existing.isEmpty ? newResultIDs.count : 0)
-        let trailingSqlIdx = anchorIdx + 1 + newResultIDs.count
-        if trailingSqlIdx >= cells.count || cells[trailingSqlIdx].kind != .sql {
-            cells.insert(NotebookCell(kind: .sql), at: trailingSqlIdx)
-        }
-        _ = afterResults  // satisfy unused
-    }
-
     /// Stack a new run's results *after* whatever results already sit under
     /// `sqlCellID`, collapsing the prior ones so the latest run is what you
-    /// see. The earlier results stay (as collapsed headers) until the user
-    /// removes them — re-running the same cell accumulates a history.
-    func stackResults(after sqlCellID: UUID, newResultIDs: [UUID]) {
+    /// see. Re-running a cell accumulates a history, capped at
+    /// `historyLimit` results per cell (oldest dropped first) so every page
+    /// ever fetched doesn't stay in memory.
+    func stackResults(after sqlCellID: UUID, newResultIDs: [UUID], historyLimit: Int = Notebook.resultHistoryLimit) {
+        guard cells.contains(where: { $0.id == sqlCellID }) else { return }
+        let prior = adjacentResults(after: sqlCellID)
+        let overflow = prior.count + newResultIDs.count - max(historyLimit, newResultIDs.count)
+        if overflow > 0 {
+            let doomed = Set(prior.prefix(overflow).map(\.resultID))
+            for rid in doomed { results.removeValue(forKey: rid) }
+            cells.removeAll { cell in
+                if case .result(let rid) = cell.kind { return doomed.contains(rid) }
+                return false
+            }
+        }
         guard let anchorIdx = cells.firstIndex(where: { $0.id == sqlCellID }) else { return }
         let existing = adjacentResults(after: sqlCellID)
         // Collapse every prior result for this cell — "not current ones".
@@ -277,5 +414,34 @@ final class NotebookResult: Identifiable {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
         return collapsed.count > 120 ? String(collapsed.prefix(120)) + "…" : collapsed
+    }
+}
+
+/// Owns the session reference so the notebook's nonisolated `deinit` can
+/// close it: closing a tab releases the notebook, and the server connection
+/// (with any open transaction) must go with it.
+private final class SessionBox: Sendable {
+    private let state = Mutex<ScratchpadSession?>(nil)
+
+    var current: ScratchpadSession? { state.withLock { $0 } }
+
+    func replace(with session: ScratchpadSession) {
+        let old = state.withLock { s -> ScratchpadSession? in
+            defer { s = session }
+            return s
+        }
+        if old !== session { old?.close() }
+    }
+
+    func detach() {
+        state.withLock { $0 = nil }
+    }
+
+    func close() {
+        let old = state.withLock { s -> ScratchpadSession? in
+            defer { s = nil }
+            return s
+        }
+        old?.close()
     }
 }
