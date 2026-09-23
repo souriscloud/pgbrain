@@ -103,14 +103,19 @@ enum SchemaDuplicator {
           )
         """
         let rows = try await c.query(PostgresQuery(unsafeSQL: sql), logger: logger)
-        for try await (name, type, start, minv, maxv, inc, cycle, cache, last)
-            in rows.decode((String, String, Int64, Int64, Int64, Int64, Bool, Int64, Int64?).self) {
+        // Materialise before issuing the CREATEs: a connection can't run a new
+        // query while it is still streaming this result.
+        var seqs: [(String, String, Int64, Int64, Int64, Int64, Bool, Int64, Int64?)] = []
+        for try await row in rows.decode((String, String, Int64, Int64, Int64, Int64, Bool, Int64, Int64?).self) {
+            seqs.append(row)
+        }
+        for (name, type, start, minv, maxv, inc, cycle, cache, last) in seqs {
             var stmt = "CREATE SEQUENCE \(ident(tgt)).\(ident(name)) AS \(type)"
             stmt += " INCREMENT BY \(inc) MINVALUE \(minv) MAXVALUE \(maxv) START WITH \(start) CACHE \(cache)"
             if cycle { stmt += " CYCLE" }
             try await run(c, stmt)
             if let last {
-                try await run(c, "SELECT setval(\(lit("\(tgt).\(name)")), \(last), true)")
+                try await run(c, "SELECT setval(\(rel(tgt, name)), \(last), true)")
             }
         }
     }
@@ -120,7 +125,7 @@ enum SchemaDuplicator {
     private static func copyTables(_ c: PostgresConnection, _ src: String, _ tgt: String) async throws {
         // 1. Partitioned parents — copy columns via LIKE + carry the partition key.
         for name in try await relations(c, src, relkind: "p", excludePartitions: false) {
-            let partkey = try await scalarString(c, "SELECT pg_get_partkeydef(\(lit("\(src).\(name)"))::regclass)")
+            let partkey = try await scalarString(c, "SELECT pg_get_partkeydef(\(rel(src, name))::regclass)")
             try await run(c, "CREATE TABLE \(ident(tgt)).\(ident(name)) (LIKE \(ident(src)).\(ident(name)) INCLUDING ALL) PARTITION BY \(partkey)")
         }
         // 2. Partition leaves — re-attach with their original bound.
@@ -141,12 +146,13 @@ enum SchemaDuplicator {
             SELECT a.attname, pg_get_expr(ad.adbin, ad.adrelid)
             FROM pg_attrdef ad
             JOIN pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
-            WHERE ad.adrelid = \(lit("\(tgt).\(name)"))::regclass
+            WHERE ad.adrelid = \(rel(tgt, name))::regclass
             """
             let rows = try await c.query(PostgresQuery(unsafeSQL: sql), logger: logger)
             var fixes: [(String, String)] = []
-            for try await (col, expr) in rows.decode((String, String).self) where expr.contains("\(src).") {
-                fixes.append((col, retarget(expr, from: src, to: tgt)))
+            for try await (col, expr) in rows.decode((String, String).self) {
+                let repointed = retarget(expr, from: src, to: tgt)
+                if repointed != expr { fixes.append((col, repointed)) }
             }
             for (col, expr) in fixes {
                 try await run(c, "ALTER TABLE \(ident(tgt)).\(ident(name)) ALTER COLUMN \(ident(col)) SET DEFAULT \(expr)")
@@ -176,7 +182,7 @@ enum SchemaDuplicator {
             // sequence's START, not START+1.
             let maxExpr = "(SELECT max(\(ident(column))) FROM \(ident(tgt)).\(ident(table)))"
             try await run(c, """
-            SELECT setval(pg_get_serial_sequence(\(lit("\(tgt).\(table)")), \(lit(column))),
+            SELECT setval(pg_get_serial_sequence(\(rel(tgt, table)), \(lit(column))),
                           COALESCE(\(maxExpr), 1), \(maxExpr) IS NOT NULL)
             """)
         }
@@ -187,7 +193,7 @@ enum SchemaDuplicator {
         for name in try await relations(c, src, relkind: "r", excludePartitions: false) {
             let alwaysIdentity = try await scalarBool(c, """
             SELECT EXISTS (SELECT 1 FROM pg_attribute
-                           WHERE attrelid = \(lit("\(src).\(name)"))::regclass AND attidentity = 'a')
+                           WHERE attrelid = \(rel(src, name))::regclass AND attidentity = 'a')
             """)
             let overriding = alwaysIdentity ? " OVERRIDING SYSTEM VALUE" : ""
             try await run(c, "INSERT INTO \(ident(tgt)).\(ident(name))\(overriding) SELECT * FROM \(ident(src)).\(ident(name))")
@@ -214,7 +220,7 @@ enum SchemaDuplicator {
         try await run(c, "SET search_path TO \(ident(src))")
         var bodies: [(String, String)] = []
         for name in names {
-            bodies.append((name, try await scalarString(c, "SELECT pg_get_viewdef(\(lit("\(src).\(name)"))::regclass, true)")))
+            bodies.append((name, try await scalarString(c, "SELECT pg_get_viewdef(\(rel(src, name))::regclass, true)")))
         }
         try await run(c, "SET search_path TO \(ident(tgt))")
         for (name, body) in bodies {
@@ -264,7 +270,9 @@ enum SchemaDuplicator {
         WHERE n.nspname = \(lit(src)) AND c.relrowsecurity
         """
         let secRows = try await c.query(PostgresQuery(unsafeSQL: secSQL), logger: logger)
-        for try await (name, force) in secRows.decode((String, Bool).self) {
+        var secured: [(String, Bool)] = []
+        for try await row in secRows.decode((String, Bool).self) { secured.append(row) }
+        for (name, force) in secured {
             try await run(c, "ALTER TABLE \(ident(tgt)).\(ident(name)) ENABLE ROW LEVEL SECURITY")
             if force { try await run(c, "ALTER TABLE \(ident(tgt)).\(ident(name)) FORCE ROW LEVEL SECURITY") }
         }
@@ -290,7 +298,10 @@ enum SchemaDuplicator {
 
     private static func copyPrivileges(_ client: PostgresClient, _ src: String, _ tgt: String) async {
         _ = try? await client.withConnection { c in
-            // Ownership of relations.
+            // Every catalog read is fully materialised before any ALTER/GRANT is
+            // issued — the connection can't serve a new query mid-stream.
+            var statements: [String] = []
+
             let ownRel = """
             SELECT c.relkind::text, c.relname, pg_get_userbyid(c.relowner)
             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -298,11 +309,10 @@ enum SchemaDuplicator {
             """
             if let rows = try? await c.query(PostgresQuery(unsafeSQL: ownRel), logger: logger) {
                 for try await (kind, name, owner) in rows.decode((String, String, String).self) {
-                    let word = relationWord(kind)
-                    _ = try? await c.query(PostgresQuery(unsafeSQL: "ALTER \(word) \(ident(tgt)).\(ident(name)) OWNER TO \(ident(owner))"), logger: logger)
+                    statements.append("ALTER \(relationWord(kind)) \(ident(tgt)).\(ident(name)) OWNER TO \(ident(owner))")
                 }
             }
-            // Ownership of routines.
+
             let ownFn = """
             SELECT p.prokind::text, p.proname, pg_get_function_identity_arguments(p.oid), pg_get_userbyid(p.proowner)
             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -311,10 +321,10 @@ enum SchemaDuplicator {
             if let rows = try? await c.query(PostgresQuery(unsafeSQL: ownFn), logger: logger) {
                 for try await (kind, name, args, owner) in rows.decode((String, String, String, String).self) {
                     let word = kind == "p" ? "PROCEDURE" : "FUNCTION"
-                    _ = try? await c.query(PostgresQuery(unsafeSQL: "ALTER \(word) \(ident(tgt)).\(ident(name))(\(args)) OWNER TO \(ident(owner))"), logger: logger)
+                    statements.append("ALTER \(word) \(ident(tgt)).\(ident(name))(\(args)) OWNER TO \(ident(owner))")
                 }
             }
-            // Grants on relations.
+
             let grantSQL = """
             SELECT c.relkind::text, c.relname,
                    CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(g.grantee) END,
@@ -329,8 +339,12 @@ enum SchemaDuplicator {
                     let to = grantee == "PUBLIC" ? "PUBLIC" : ident(grantee)
                     var stmt = "GRANT \(priv) ON \(onWord) \(ident(tgt)).\(ident(name)) TO \(to)"
                     if grantable { stmt += " WITH GRANT OPTION" }
-                    _ = try? await c.query(PostgresQuery(unsafeSQL: stmt), logger: logger)
+                    statements.append(stmt)
                 }
+            }
+
+            for stmt in statements {
+                _ = try? await c.query(PostgresQuery(unsafeSQL: stmt), logger: logger)
             }
         }
     }
@@ -407,11 +421,93 @@ enum SchemaDuplicator {
         "'" + s.replacingOccurrences(of: "'", with: "''") + "'"
     }
 
-    /// Repoint schema-qualified references from `src.` to `tgt.` (bare and
-    /// double-quoted). Used on DDL fragments only, never on table data.
-    private static func retarget(_ sql: String, from src: String, to tgt: String) -> String {
-        sql
-            .replacingOccurrences(of: "\(src).", with: "\(tgt).")
-            .replacingOccurrences(of: "\"\(src)\".", with: ident(tgt) + ".")
+    /// `'schema.name'` with both parts quoted — for `::regclass` casts and the
+    /// name-parsing catalog functions, which fold unquoted text to lowercase.
+    private static func rel(_ schema: String, _ name: String) -> String {
+        lit(ident(schema) + "." + ident(name))
+    }
+
+    /// Repoint schema qualifiers `src.` / `"src".` to the target schema. Only
+    /// genuine qualifier tokens change: not `myapp.x`, not `x.src.y`, not text
+    /// inside string literals or comments. Dollar-quoted bodies (function
+    /// source) are code and are rewritten recursively, and a string literal
+    /// cast to a `reg*` type (`'src.seq'::regclass` in serial defaults) is an
+    /// object name, so its contents are rewritten too.
+    static func retarget(_ sql: String, from src: String, to tgt: String) -> String {
+        let u = Array(sql.utf16)
+        let toks = SQLLexer.lex(utf16: u)
+        var out = ""
+        var copied = 0
+
+        func significant(after k: Int) -> Int? {
+            var j = k + 1
+            while j < toks.count, SQLLexer.isTrivia(toks[j].kind) { j += 1 }
+            return j < toks.count ? j : nil
+        }
+        func significant(before k: Int) -> Int? {
+            var j = k - 1
+            while j >= 0, SQLLexer.isTrivia(toks[j].kind) { j -= 1 }
+            return j >= 0 ? j : nil
+        }
+        func isDot(_ j: Int?) -> Bool {
+            guard let j else { return false }
+            return toks[j].kind == .punct && u[toks[j].range.location] == 0x2E
+        }
+        func names(_ k: Int, _ schema: String) -> Bool {
+            let t = toks[k]
+            switch t.kind {
+            case .word: return SQLLexer.lowerWord(t, in: u) == schema
+            case .quotedIdent: return SQLLexer.quotedIdentBody(t, in: u) == schema
+            default: return false
+            }
+        }
+
+        for (k, t) in toks.enumerated() {
+            var replacement: String?
+            switch t.kind {
+            case .word, .quotedIdent:
+                if names(k, src), isDot(significant(after: k)), !isDot(significant(before: k)) {
+                    replacement = ident(tgt)
+                }
+            case .dollarString:
+                let text = SQLLexer.text(t, in: u)
+                if let second = text.dropFirst().firstIndex(of: "$") {
+                    let opener = String(text[...second])
+                    if text.count >= opener.count * 2, text.hasSuffix(opener) {
+                        let body = String(text.dropFirst(opener.count).dropLast(opener.count))
+                        replacement = opener + retarget(body, from: src, to: tgt) + opener
+                    }
+                }
+            case .string:
+                guard u[t.range.location] == 0x27, let castOp = significant(after: k),
+                      SQLLexer.text(toks[castOp], in: u) == "::",
+                      let typeIdx = significant(after: castOp), toks[typeIdx].kind == .word else { break }
+                let castType = SQLLexer.lowerWord(toks[typeIdx], in: u)
+                guard castType.hasPrefix("reg") else { break }
+                let content = String(SQLLexer.text(t, in: u).dropFirst().dropLast())
+                    .replacingOccurrences(of: "''", with: "'")
+                let rewritten: String
+                if castType == "regnamespace" {
+                    let inner = SQLLexer.lex(content).filter { !SQLLexer.isTrivia($0.kind) }
+                    let cu = Array(content.utf16)
+                    let isSrc = inner.count == 1 && (
+                        (inner[0].kind == .word && SQLLexer.lowerWord(inner[0], in: cu) == src)
+                        || (inner[0].kind == .quotedIdent && SQLLexer.quotedIdentBody(inner[0], in: cu) == src))
+                    rewritten = isSrc ? ident(tgt) : content
+                } else {
+                    rewritten = retarget(content, from: src, to: tgt)
+                }
+                if rewritten != content { replacement = lit(rewritten) }
+            default:
+                break
+            }
+            if let replacement {
+                out += String(decoding: u[copied..<t.range.location], as: UTF16.self)
+                out += replacement
+                copied = t.upperBound
+            }
+        }
+        out += String(decoding: u[copied...], as: UTF16.self)
+        return out
     }
 }

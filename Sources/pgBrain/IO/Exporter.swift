@@ -47,12 +47,9 @@ enum Exporter {
         let sql = "SELECT \(projection) FROM \(SQLIdent.qualified(schema: table.schema, name: table.name))"
 
         return try await client.withConnection { connection in
-            try? FileManager.default.removeItem(at: destination)
-            FileManager.default.createFile(atPath: destination.path, contents: nil)
-            guard let handle = try? FileHandle(forWritingTo: destination) else {
-                throw ExportError.openFailed(destination.path)
-            }
-            defer { try? handle.close() }
+            let file = try AtomicExportFile(destination: destination)
+            defer { file.discard() }
+            let handle = file.handle
 
             // Cancellation handshake — same pattern as QueryRunner.
             if let opID = operationID, let tracker {
@@ -84,13 +81,15 @@ enum Exporter {
                 values.reserveCapacity(columns.count)
                 for i in 0..<columns.count {
                     let cell = random[i]
-                    values.append(cell.bytes == nil ? nil : try? cell.decode(String.self, context: .default))
+                    // Every column is projected `::text`, so a decode failure is
+                    // a real error — never quietly export it as NULL.
+                    values.append(cell.bytes == nil ? nil : try cell.decode(String.self, context: .default))
                 }
                 try writer.writeRow(values, isLast: false)
                 rowCount += 1
             }
             try writer.writeFooter()
-            try handle.synchronize()
+            try file.commit()
             return Stats(
                 rowsWritten: rowCount,
                 bytesWritten: writer.bytesWritten,
@@ -107,12 +106,9 @@ enum Exporter {
         destination: URL,
         tableNameHint: String = "result"
     ) throws -> Stats {
-        try? FileManager.default.removeItem(at: destination)
-        FileManager.default.createFile(atPath: destination.path, contents: nil)
-        guard let handle = try? FileHandle(forWritingTo: destination) else {
-            throw ExportError.openFailed(destination.path)
-        }
-        defer { try? handle.close() }
+        let file = try AtomicExportFile(destination: destination)
+        defer { file.discard() }
+        let handle = file.handle
         let table = TableNode(schema: "", name: tableNameHint, kind: .table, columns: page.columns)
         let writer = StreamingWriter(handle: handle, columns: page.columns, format: format, table: table)
         try writer.writeHeader()
@@ -121,12 +117,36 @@ enum Exporter {
             try writer.writeRow(row, isLast: false)
         }
         try writer.writeFooter()
-        try handle.synchronize()
+        try file.commit()
         return Stats(
             rowsWritten: page.rows.count,
             bytesWritten: writer.bytesWritten,
             elapsed: Date().timeIntervalSince(started)
         )
+    }
+
+    /// RFC 8259 number grammar: `-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?`.
+    static func isJSONNumber(_ s: String) -> Bool {
+        let b = Array(s.utf8)
+        var i = 0
+        func digits() -> Int {
+            let start = i
+            while i < b.count, b[i] >= 0x30, b[i] <= 0x39 { i += 1 }
+            return i - start
+        }
+        if i < b.count, b[i] == 0x2D { i += 1 }
+        guard i < b.count else { return false }
+        if b[i] == 0x30 { i += 1 } else if digits() == 0 { return false }
+        if i < b.count, b[i] == 0x2E {
+            i += 1
+            guard digits() > 0 else { return false }
+        }
+        if i < b.count, b[i] == 0x65 || b[i] == 0x45 {
+            i += 1
+            if i < b.count, b[i] == 0x2B || b[i] == 0x2D { i += 1 }
+            guard digits() > 0 else { return false }
+        }
+        return i == b.count
     }
 
     enum ExportError: LocalizedError {
@@ -136,6 +156,46 @@ enum Exporter {
             case .openFailed(let path): return "Couldn't open \(path) for writing."
             }
         }
+    }
+}
+
+/// Export target that only appears at `destination` once the export fully
+/// succeeds: rows go to a hidden temp file in the same directory (same volume,
+/// so the final rename is atomic); a failed or cancelled export deletes it and
+/// leaves any previous file at `destination` untouched.
+final class AtomicExportFile {
+    let destination: URL
+    let tempURL: URL
+    let handle: FileHandle
+    private var committed = false
+
+    init(destination: URL) throws {
+        self.destination = destination
+        let dir = destination.deletingLastPathComponent()
+        tempURL = dir.appendingPathComponent(".\(destination.lastPathComponent).pgbrain-\(UUID().uuidString.prefix(8)).tmp")
+        guard FileManager.default.createFile(atPath: tempURL.path, contents: nil),
+              let h = try? FileHandle(forWritingTo: tempURL) else {
+            throw Exporter.ExportError.openFailed(destination.path)
+        }
+        handle = h
+    }
+
+    func commit() throws {
+        try handle.synchronize()
+        try handle.close()
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: tempURL)
+        } else {
+            try FileManager.default.moveItem(at: tempURL, to: destination)
+        }
+        committed = true
+    }
+
+    /// No-op after a successful `commit`.
+    func discard() {
+        guard !committed else { return }
+        try? handle.close()
+        try? FileManager.default.removeItem(at: tempURL)
     }
 }
 
@@ -173,7 +233,7 @@ private final class StreamingWriter {
     func writeRow(_ values: [String?], isLast: Bool) throws {
         switch format {
         case .csv:
-            appendLine(values.map { csvEscape($0 ?? "") }.joined(separator: ","))
+            appendLine(values.map { csvField($0) }.joined(separator: ","))
         case .json:
             if !firstJSONRow { append(",\n") }
             firstJSONRow = false
@@ -223,8 +283,16 @@ private final class StreamingWriter {
     private func append(_ s: String) { buffer.append(contentsOf: s.utf8) }
     private func appendLine(_ s: String) { append(s); append("\n") }
 
+    /// PostgreSQL `COPY … CSV` convention: NULL is an empty unquoted field and
+    /// the empty string is `""`, so the two survive a round trip.
+    private func csvField(_ value: String?) -> String {
+        guard let value else { return "" }
+        return value.isEmpty ? "\"\"" : csvEscape(value)
+    }
+
     private func csvEscape(_ s: String) -> String {
-        if s.contains(where: { $0 == "," || $0 == "\"" || $0 == "\n" || $0 == "\r" }) {
+        // Scalars, not Characters: "\r\n" is one Character and matches neither.
+        if s.unicodeScalars.contains(where: { $0 == "," || $0 == "\"" || $0 == "\n" || $0 == "\r" }) || s == "\\." {
             return "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
         }
         return s
@@ -252,7 +320,9 @@ private final class StreamingWriter {
     private func jsonValue(_ s: String, kind: ColumnTypeKind) -> String {
         switch kind {
         case .integer, .number:
-            return s   // already numeric text
+            // NaN / Infinity (float, numeric) and money's "$1,234.00" aren't
+            // JSON numbers — emit those as strings so the file stays valid.
+            return Exporter.isJSONNumber(s) ? s : jsonString(s)
         case .bool:
             switch s.lowercased() {
             case "t", "true", "1": return "true"

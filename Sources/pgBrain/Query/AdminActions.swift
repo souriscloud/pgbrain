@@ -10,8 +10,10 @@ import PostgresNIO
 /// (and gets a Cancel button), then `client.query(...)`.
 ///
 /// Identifiers are wrapped through `SQLIdent.quote` so a table named
-/// `"my table"` or `"select"` doesn't blow up at runtime. Comment
-/// values are SQL-literal-escaped via doubled apostrophes.
+/// `"my table"` or `"select"` doesn't blow up at runtime. Values go through
+/// bind parameters where the statement allows them, and through `literal(_:)`
+/// (safe regardless of `standard_conforming_strings`) where it doesn't
+/// (COMMENT, CREATE DATABASE).
 @MainActor
 enum AdminActions {
     // MARK: - VACUUM / ANALYZE / REINDEX
@@ -124,7 +126,7 @@ enum AdminActions {
         service: ConnectionService
     ) async -> Result<Void, Error> {
         let qualified = SQLIdent.quote(schema) + "." + SQLIdent.quote(table)
-        let body = comment.map { "'\(escape($0))'" } ?? "NULL"
+        let body = comment.map { literal($0) } ?? "NULL"
         return await runDDL(
             "COMMENT ON TABLE \(qualified) IS \(body)",
             summary: "COMMENT ON TABLE \(schema).\(table)",
@@ -137,7 +139,7 @@ enum AdminActions {
         service: ConnectionService
     ) async -> Result<Void, Error> {
         let qualified = SQLIdent.quote(schema) + "." + SQLIdent.quote(table) + "." + SQLIdent.quote(column)
-        let body = comment.map { "'\(escape($0))'" } ?? "NULL"
+        let body = comment.map { literal($0) } ?? "NULL"
         return await runDDL(
             "COMMENT ON COLUMN \(qualified) IS \(body)",
             summary: "COMMENT ON COLUMN \(schema).\(table).\(column)",
@@ -150,10 +152,10 @@ enum AdminActions {
     static func setval(schema: String, sequence: String, value: Int64, service: ConnectionService) async -> Result<Int64, Error> {
         guard let client = service.client else { return .failure(AdminError.notConnected) }
         let qualified = SQLIdent.quote(schema) + "." + SQLIdent.quote(sequence)
-        let sql = "SELECT setval('\(escape(qualified))', \(value))"
+        let sql: PostgresQuery = "SELECT setval(\(qualified)::regclass, \(value))"
         let op = service.operations.begin(kind: .update, summary: "setval \(schema).\(sequence) → \(value)")
         do {
-            let rows = try await client.query(PostgresQuery(unsafeSQL: sql))
+            let rows = try await client.query(sql)
             for try await v in rows.decode(Int64.self) {
                 service.operations.finish(op, status: .succeeded)
                 return .success(v)
@@ -170,10 +172,10 @@ enum AdminActions {
     static func nextval(schema: String, sequence: String, service: ConnectionService) async -> Result<Int64, Error> {
         guard let client = service.client else { return .failure(AdminError.notConnected) }
         let qualified = SQLIdent.quote(schema) + "." + SQLIdent.quote(sequence)
-        let sql = "SELECT nextval('\(escape(qualified))')"
+        let sql: PostgresQuery = "SELECT nextval(\(qualified)::regclass)"
         let op = service.operations.begin(kind: .update, summary: "nextval \(schema).\(sequence)")
         do {
-            let rows = try await client.query(PostgresQuery(unsafeSQL: sql))
+            let rows = try await client.query(sql)
             for try await v in rows.decode(Int64.self) {
                 service.operations.finish(op, status: .succeeded)
                 return .success(v)
@@ -240,15 +242,62 @@ enum AdminActions {
         schema: String, signature: String,
         service: ConnectionService
     ) async -> Result<Void, Error> {
-        // `signature` is what `pg_get_function_identity_arguments` returns —
-        // either `()` or `(text, int)`. We don't quote it; it's already
-        // server-shaped SQL.
-        let qualified = SQLIdent.quote(schema) + "." + signature
+        // `signature` is `name(arg types)`. It is never spliced into the DROP:
+        // the server resolves it via to_regprocedure (a bind parameter, parsed
+        // as a name — nothing in it can execute) and hands back its own
+        // canonical, properly quoted regprocedure text plus the routine kind.
+        guard let client = service.client else { return .failure(AdminError.notConnected) }
+        guard let spec = functionSpec(schema: schema, signature: signature) else {
+            return .failure(AdminError.invalidInput("\"\(signature)\" isn't a function signature like name(type, …)."))
+        }
+        let lookup: PostgresQuery = """
+        SELECT p.oid::regprocedure::text, p.prokind::text
+        FROM pg_proc p WHERE p.oid = to_regprocedure(\(spec))
+        """
+        var resolved: (String, String)?
+        do {
+            for try await row in try await client.query(lookup).decode((String, String).self) { resolved = row }
+        } catch {
+            return .failure(AdminError.serverSaid(PostgresErrorMessage.describe(error)))
+        }
+        guard let (canonical, kind) = resolved else {
+            return .failure(AdminError.serverSaid("Function \(schema).\(signature) doesn't exist."))
+        }
+        let word = switch kind {
+        case "p": "PROCEDURE"
+        case "a": "AGGREGATE"
+        default: "FUNCTION"
+        }
         return await runDDL(
-            "DROP FUNCTION \(qualified)",
-            summary: "DROP FUNCTION \(schema).\(signature)",
+            "DROP \(word) \(canonical)",
+            summary: "DROP \(word) \(schema).\(signature)",
             service: service
         )
+    }
+
+    /// `schema.name(args)` text for `to_regprocedure`, with the name part
+    /// quoted unless it already is. `nil` when `signature` isn't
+    /// `name(…)`-shaped with balanced parens and no statement separators.
+    nonisolated static func functionSpec(schema: String, signature: String) -> String? {
+        let sig = signature.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let open = sig.firstIndex(of: "("), sig.hasSuffix(")") else { return nil }
+        let name = sig[..<open].trimmingCharacters(in: .whitespaces)
+        let args = String(sig[open...])
+        guard !name.isEmpty else { return nil }
+        var depth = 0
+        for t in SQLLexer.lex(args) {
+            switch t.kind {
+            case .lineComment, .blockComment, .string, .dollarString, .parameter: return nil
+            case .punct:
+                let c = (args as NSString).character(at: t.range.location)
+                if c == 0x28 { depth += 1 } else if c == 0x29 { depth -= 1 } else if c == 0x3B { return nil }
+                if depth < 0 { return nil }
+            default: break
+            }
+        }
+        guard depth == 0 else { return nil }
+        let quotedName = name.hasPrefix("\"") && name.hasSuffix("\"") && name.count >= 2 ? name : SQLIdent.quote(name)
+        return SQLIdent.quote(schema) + "." + quotedName + args
     }
 
     // MARK: - Database CRUD
@@ -263,7 +312,7 @@ enum AdminActions {
         var sql = "CREATE DATABASE \(SQLIdent.quote(name))"
         if let owner, !owner.isEmpty { sql += " OWNER \(SQLIdent.quote(owner))" }
         if let template, !template.isEmpty { sql += " TEMPLATE \(SQLIdent.quote(template))" }
-        if let encoding, !encoding.isEmpty { sql += " ENCODING '\(escape(encoding))'" }
+        if let encoding, !encoding.isEmpty { sql += " ENCODING \(literal(encoding))" }
         return await runDDL(sql, summary: "CREATE DATABASE \(name)", service: service)
     }
 
@@ -357,21 +406,38 @@ enum AdminActions {
 
     // MARK: - GRANT / REVOKE
 
+    /// Table privilege keywords accepted by `setPrivileges` — the list is
+    /// spliced into SQL, so anything else is rejected rather than escaped.
+    nonisolated static let tablePrivileges: Set<String> = [
+        "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN",
+        "ALL", "ALL PRIVILEGES",
+    ]
+
     /// Build + run a GRANT or REVOKE for a set of privileges on one
-    /// table. `privileges` are raw SQL keywords (SELECT, INSERT, …).
+    /// table. `privileges` must be keywords from `tablePrivileges`.
     static func setPrivileges(
         grant: Bool, privileges: [String],
         schema: String, table: String, role: String,
         service: ConnectionService
     ) async -> Result<Void, Error> {
         guard !privileges.isEmpty else { return .success(()) }
+        let normalized = privileges.map {
+            $0.trimmingCharacters(in: .whitespaces).uppercased()
+                .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        }
+        if let bad = normalized.first(where: { !tablePrivileges.contains($0) }) {
+            return .failure(AdminError.invalidInput("\"\(bad)\" isn't a table privilege."))
+        }
         let qualified = SQLIdent.quote(schema) + "." + SQLIdent.quote(table)
-        let privList = privileges.joined(separator: ", ")
+        let privList = normalized.joined(separator: ", ")
+        // PUBLIC is a keyword, not a role name — quoting it would target a
+        // (nonexistent) role literally called "PUBLIC".
+        let grantee = role.uppercased() == "PUBLIC" ? "PUBLIC" : SQLIdent.quote(role)
         let sql: String
         if grant {
-            sql = "GRANT \(privList) ON TABLE \(qualified) TO \(SQLIdent.quote(role))"
+            sql = "GRANT \(privList) ON TABLE \(qualified) TO \(grantee)"
         } else {
-            sql = "REVOKE \(privList) ON TABLE \(qualified) FROM \(SQLIdent.quote(role))"
+            sql = "REVOKE \(privList) ON TABLE \(qualified) FROM \(grantee)"
         }
         return await runDDL(
             sql,
@@ -390,17 +456,11 @@ enum AdminActions {
 
     // MARK: - LISTEN / NOTIFY
 
-    /// Fire a NOTIFY from a regular pooled connection. Payload is wrapped
-    /// in single quotes with apostrophe-doubling.
+    /// Fire a NOTIFY from a regular pooled connection. `pg_notify` takes the
+    /// channel and payload as bind parameters (same semantics as
+    /// `NOTIFY "channel", 'payload'`), so no quoting is involved at all.
     static func notify(channel: String, payload: String, service: ConnectionService) async -> Result<Void, Error> {
-        let payloadSQL = payload.isEmpty
-            ? "NOTIFY \(SQLIdent.quote(channel))"
-            : "NOTIFY \(SQLIdent.quote(channel)), '\(escape(payload))'"
-        return await runDDL(
-            payloadSQL,
-            summary: "NOTIFY \(channel)",
-            service: service
-        )
+        await runQuery("SELECT pg_notify(\(channel), \(payload))", summary: "NOTIFY \(channel)", service: service)
     }
 
     /// Run an arbitrary statement as a tracked `.update` operation. Used by
@@ -437,10 +497,14 @@ enum AdminActions {
     // MARK: - Internals
 
     private static func runDDL(_ sql: String, summary: String, service: ConnectionService) async -> Result<Void, Error> {
+        await runQuery(PostgresQuery(unsafeSQL: sql), summary: summary, service: service)
+    }
+
+    private static func runQuery(_ query: PostgresQuery, summary: String, service: ConnectionService) async -> Result<Void, Error> {
         guard let client = service.client else { return .failure(AdminError.notConnected) }
         let op = service.operations.begin(kind: .update, summary: summary)
         do {
-            _ = try await client.query(PostgresQuery(unsafeSQL: sql))
+            _ = try await client.query(query)
             service.operations.finish(op, status: .succeeded)
             return .success(())
         } catch {
@@ -450,20 +514,30 @@ enum AdminActions {
         }
     }
 
-    /// SQL string literal escape — only ' needs doubling for stdard
-    /// strings (standard_conforming_strings is on by default since 9.1).
-    private static func escape(_ s: String) -> String {
-        s.replacingOccurrences(of: "'", with: "''")
+    /// SQL string literal for statements that can't take bind parameters.
+    /// Uses `E'…'` (backslashes and quotes escaped) whenever a backslash is
+    /// present, so the result means the same thing whether or not the server
+    /// runs with `standard_conforming_strings`. NULs are dropped: the wire
+    /// protocol would truncate the statement at one.
+    nonisolated static func literal(_ s: String) -> String {
+        let clean = s.contains("\0") ? s.replacingOccurrences(of: "\0", with: "") : s
+        let quoted = clean.replacingOccurrences(of: "'", with: "''")
+        if clean.contains("\\") {
+            return "E'" + quoted.replacingOccurrences(of: "\\", with: "\\\\") + "'"
+        }
+        return "'" + quoted + "'"
     }
 }
 
 enum AdminError: LocalizedError {
     case notConnected
     case serverSaid(String)
+    case invalidInput(String)
     var errorDescription: String? {
         switch self {
         case .notConnected:        return "Not connected."
         case .serverSaid(let m):   return m
+        case .invalidInput(let m): return m
         }
     }
 }
