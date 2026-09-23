@@ -51,8 +51,8 @@ final class SqlCellNSTextView: NSTextView {
             default: break
             }
         }
-        // ⌘↩ → run.
-        if event.modifierFlags.contains(.command), event.keyCode == 36 {
+        // ⌘↩ → run; 76 is the numeric keypad's Enter.
+        if event.modifierFlags.contains(.command), event.keyCode == 36 || event.keyCode == 76 {
             onRun?()
             return
         }
@@ -67,9 +67,10 @@ final class SqlCellNSTextView: NSTextView {
             formatSQL(nil)
             return
         }
-        // ⌘E → Explain Statement (Postico / DataGrip convention).
-        if event.modifierFlags.contains(.command),
-           !event.modifierFlags.contains(.shift),
+        // ⌘⇧E → Explain Statement. Plain ⌘E stays the system's
+        // "Use Selection for Find".
+        if event.modifierFlags.contains([.command, .shift]),
+           !event.modifierFlags.contains(.option),
            event.charactersIgnoringModifiers?.lowercased() == "e" {
             explainStatement(nil)
             return
@@ -357,7 +358,8 @@ final class SqlCellNSTextView: NSTextView {
         let format = NSMenuItem(title: "Format SQL", action: #selector(formatSQL(_:)), keyEquivalent: "")
         format.target = self
         menu.addItem(format)
-        let explain = NSMenuItem(title: "Explain Statement", action: #selector(explainStatement(_:)), keyEquivalent: "")
+        let explain = NSMenuItem(title: "Explain Statement", action: #selector(explainStatement(_:)), keyEquivalent: "E")
+        explain.keyEquivalentModifierMask = [.command, .shift]
         explain.target = self
         menu.addItem(explain)
 
