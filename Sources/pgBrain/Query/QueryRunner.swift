@@ -1,6 +1,7 @@
 import Foundation
 import Logging
 import PostgresNIO
+import Synchronization
 
 /// Output of a single query execution. Reuses the grid-friendly `RowsFetcher.Page`
 /// shape so result blocks can render through the existing `DataGridView`.
@@ -10,6 +11,9 @@ import PostgresNIO
 struct QueryResult: Sendable {
     var page: RowsFetcher.Page
     var commandTag: String?
+    /// NOTICE / WARNING lines the server sent while running the statement
+    /// (`RAISE NOTICE`, "relation already exists, skipping", …).
+    var notices: [String] = []
 
     var rowsAffected: Int? {
         // commandTag is "<TAG> [oid] <count>"; the count is always the last token.
@@ -127,47 +131,46 @@ enum QueryRunner {
         searchPath: String? = nil
     ) async throws -> QueryResult {
         try await client.withConnection { connection in
+            // The connection must not go back to the pool while a cancel for
+            // its PID is still in flight, or the cancel could hit whichever
+            // caller checks it out next.
+            let gate = CancelGate()
             if let opID = operationID, let tracker {
                 let pid = try await OperationsHelpers.fetchBackendPID(connection, logger: pgbrainQuietLogger)
                 let cancelHandler: @Sendable () async -> Void = { [weak client] in
                     guard let client else { return }
-                    _ = try? await client.withConnection { sister in
-                        _ = try await sister.query(
-                            PostgresQuery(unsafeSQL: "SELECT pg_cancel_backend(\(pid))"),
-                            logger: pgbrainQuietLogger
-                        )
+                    await gate.fire {
+                        _ = try? await client.withConnection { sister in
+                            _ = try await sister.query(
+                                PostgresQuery(unsafeSQL: "SELECT pg_cancel_backend(\(pid))"),
+                                logger: pgbrainQuietLogger
+                            )
+                        }
                     }
                 }
-                // Hop back to main to wire the op without crossing the @MainActor
-                // boundary inside this nonisolated closure.
                 Task { @MainActor in
                     tracker.attachCancellation(toOperationID: opID, pid: pid, handler: cancelHandler)
                 }
             }
-            if let schema = searchPath {
-                // SET (without LOCAL) persists on the connection — we RESET
-                // after the user query so the pool doesn't bleed this
-                // setting into the next checkout.
-                _ = try await connection.query(
-                    PostgresQuery(unsafeSQL: "SET search_path TO \(SQLIdent.quote(schema))"),
-                    logger: pgbrainQuietLogger
-                )
-            }
             do {
-                let result = try await runOnConnection(sql, on: connection, limit: limit)
-                if searchPath != nil {
-                    _ = try? await connection.query(
-                        PostgresQuery(unsafeSQL: "RESET search_path"),
+                if let schema = searchPath {
+                    // SET (without LOCAL) persists on the connection — RESET
+                    // afterwards so the pool doesn't bleed it into the next checkout.
+                    _ = try await connection.query(
+                        PostgresQuery(unsafeSQL: "SET search_path TO \(SQLIdent.quote(schema))"),
                         logger: pgbrainQuietLogger
                     )
                 }
+                let result = try await runOnConnection(sql, on: connection, limit: limit)
+                await gate.close()
+                if searchPath != nil {
+                    _ = try? await connection.query(PostgresQuery(unsafeSQL: "RESET search_path"), logger: pgbrainQuietLogger)
+                }
                 return result
             } catch {
+                await gate.close()
                 if searchPath != nil {
-                    _ = try? await connection.query(
-                        PostgresQuery(unsafeSQL: "RESET search_path"),
-                        logger: pgbrainQuietLogger
-                    )
+                    _ = try? await connection.query(PostgresQuery(unsafeSQL: "RESET search_path"), logger: pgbrainQuietLogger)
                 }
                 throw error
             }
@@ -191,11 +194,14 @@ enum QueryRunner {
         let started = Date()
         let verdict = SQLSafety.classify(sql)
         if verdict != .readOnly {
-            // Materialised path: gets command tag back via PostgresQueryResult.
-            let result = try await connection
-                .query(PostgresQuery(unsafeSQL: sql), logger: pgbrainQuietLogger)
-                .get()
-            let (columns, rows, truncated) = materialise(result.rows, limit: limit)
+            // Callback API: streams rows *and* surfaces the command tag
+            // ("UPDATE 12", "INSERT 0 5"). Rows past `limit` are dropped as
+            // they arrive, so a huge `INSERT … RETURNING` can't balloon memory.
+            let sink = RowSink(limit: limit)
+            let metadata = try await connection.query(
+                PostgresQuery(unsafeSQL: sql), logger: pgbrainQuietLogger
+            ) { row in sink.accept(row) }.get()
+            let (columns, rows, truncated) = sink.snapshot()
             let page = RowsFetcher.Page(
                 columns: columns,
                 rows: rows,
@@ -203,8 +209,7 @@ enum QueryRunner {
                 limit: limit, offset: 0,
                 elapsed: Date().timeIntervalSince(started)
             )
-            let tag = formatCommandTag(result.metadata)
-            return QueryResult(page: page, commandTag: tag)
+            return QueryResult(page: page, commandTag: formatCommandTag(metadata))
         }
 
         // Bound the server's work: append LIMIT to a bare SELECT so it doesn't
@@ -252,35 +257,6 @@ enum QueryRunner {
         return QueryResult(page: page, commandTag: "SELECT \(rows.count)")
     }
 
-    /// Walk an already-materialised `[PostgresRow]`, decoding each cell to
-    /// `String?` and rebuilding the column metadata from the first row.
-    private static func materialise(_ rows: [PostgresRow], limit: Int) -> (columns: [ColumnNode], rows: [[String?]], truncated: Bool) {
-        guard !rows.isEmpty else { return ([], [], false) }
-        let first = rows[0]
-        var columns: [ColumnNode] = []
-        for cell in first {
-            columns.append(ColumnNode(
-                name: cell.columnName,
-                typeName: pgTypeName(cell.dataType),
-                nullable: true,
-                ordinal: cell.columnIndex
-            ))
-        }
-        var values: [[String?]] = []
-        var truncated = false
-        for (i, row) in rows.enumerated() {
-            if i >= limit { truncated = true; break }
-            let random = PostgresRandomAccessRow(row)
-            var line: [String?] = []
-            line.reserveCapacity(columns.count)
-            for c in 0..<columns.count {
-                line.append(stringify(random[c]))
-            }
-            values.append(line)
-        }
-        return (columns, values, truncated)
-    }
-
     /// libpq-style tag from the parsed metadata: "UPDATE 12", "INSERT 0 5".
     private static func formatCommandTag(_ md: PostgresQueryMetadata) -> String {
         switch md.command {
@@ -303,7 +279,7 @@ enum QueryRunner {
         return collapsed.count > max ? String(collapsed.prefix(max)) + "…" : collapsed
     }
 
-    private static func pgTypeName(_ type: PostgresDataType) -> String {
+    fileprivate static func pgTypeName(_ type: PostgresDataType) -> String {
         switch type {
         case .bool: return "boolean"
         case .int2: return "smallint"
@@ -329,5 +305,71 @@ enum QueryRunner {
         case .inet: return "inet"
         default: return "oid \(type.rawValue)"
         }
+    }
+}
+
+/// Collects streamed rows from PostgresNIO's `@Sendable` row callback,
+/// keeping only the first `limit`.
+private final class RowSink: Sendable {
+    private struct State {
+        var columns: [ColumnNode] = []
+        var rows: [[String?]] = []
+        var truncated = false
+    }
+    private let limit: Int
+    private let state = Mutex(State())
+
+    init(limit: Int) { self.limit = limit }
+
+    func accept(_ row: PostgresRow) {
+        state.withLock { s in
+            if s.columns.isEmpty {
+                for cell in row {
+                    s.columns.append(ColumnNode(
+                        name: cell.columnName,
+                        typeName: QueryRunner.pgTypeName(cell.dataType),
+                        nullable: true,
+                        ordinal: cell.columnIndex
+                    ))
+                }
+            }
+            guard s.rows.count < limit else { s.truncated = true; return }
+            let random = PostgresRandomAccessRow(row)
+            s.rows.append((0..<s.columns.count).map { QueryRunner.stringify(random[$0]) })
+        }
+    }
+
+    func snapshot() -> ([ColumnNode], [[String?]], Bool) {
+        state.withLock { ($0.columns, $0.rows, $0.truncated) }
+    }
+}
+
+/// Serialises a pool-path cancel against the connection's return to the
+/// pool: `fire` only runs while the statement is live, and `close` waits for
+/// an in-flight cancel before the connection is released.
+final class CancelGate: Sendable {
+    private struct State {
+        var open = true
+        var inFlight: Task<Void, Never>?
+    }
+    private let state = Mutex(State())
+
+    func fire(_ action: @escaping @Sendable () async -> Void) async {
+        let task: Task<Void, Never>? = state.withLock { s in
+            guard s.open else { return nil }
+            if let existing = s.inFlight { return existing }
+            let t = Task { await action() }
+            s.inFlight = t
+            return t
+        }
+        await task?.value
+    }
+
+    func close() async {
+        let pending = state.withLock { s -> Task<Void, Never>? in
+            s.open = false
+            return s.inFlight
+        }
+        await pending?.value
     }
 }
