@@ -278,6 +278,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Termination
 
+    /// ⌘Q, the menu-bar Quit and Sparkle's install-and-relaunch all land
+    /// here; without it they would drop staged grid edits and let the server
+    /// roll back open scratchpad transactions without a word.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let workspaces = windowManager.entries.compactMap { $0.service?.workspace }
+        return TabCloseGuard.confirmClosingAll(workspaces) ? .terminateNow : .terminateCancel
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         AppTermination.run()
     }

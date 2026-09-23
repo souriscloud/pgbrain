@@ -80,19 +80,12 @@ final class ConnectionWindowCloseObserver: NSObject, NSWindowDelegate {
     func windowDidExitFullScreen(_ notification: Notification) { rehideTitle(notification) }
     func windowDidEnterFullScreen(_ notification: Notification) { rehideTitle(notification) }
 
-    /// Closing the window drops every tab, so open scratchpad transactions
-    /// and unapplied grid edits get the same prompts a single tab close would.
+    /// Closing the window drops every tab, so unapplied grid edits and open
+    /// scratchpad transactions get the same prompts (in the same order) as
+    /// a tab close or quit.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         MainActor.assumeIsolated {
-            let workspace = service.workspace
-            let all = workspace.tabs.map(\.id)
-            guard TabCloseGuard.resolveTransactions(all, in: workspace).count == all.count else { return false }
-            let dirty = workspace.dirtyTabs(among: all)
-            guard !dirty.isEmpty else { return true }
-            TabCloseGuard.confirmDiscard(dirty.map { workspace.displayTitle(for: $0) }, window: sender) { discard in
-                if discard { sender.close() }
-            }
-            return false
+            TabCloseGuard.confirmClosingAll([service.workspace])
         }
     }
 
