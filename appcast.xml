@@ -6,6 +6,14 @@
         <link>https://github.com/souriscloud/pgbrain</link>
         <language>en</language>
         <item>
+            <title>0.10.0</title>
+            <pubDate>Thu, 24 Sep 2026 02:34:42 +0200</pubDate>
+            <sparkle:version>30</sparkle:version>
+            <sparkle:shortVersionString>0.10.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.10.0/pgBrain-0.10.0.dmg" length="12293448" type="application/octet-stream" sparkle:edSignature="qwGj9YIkkZchpRAfW23SrNh2J+LkX1R6KGy7L3Na2J5EIk8GDenQBoxbD08tVDk5NfU2JK4riHr30Lqfy4DhBg=="/>
+        </item>
+        <item>
             <title>0.9.7</title>
             <pubDate>Tue, 09 Jun 2026 03:31:10 +0200</pubDate>
             <sparkle:version>29</sparkle:version>
@@ -76,142 +84,6 @@
             <sparkle:shortVersionString>0.8.3</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.8.3/pgBrain-0.8.3.dmg" length="11030206" type="application/octet-stream" sparkle:edSignature="OpWFrSeqNM5fTO45M6ICllTcV57YkdvcUENxGbuj3Xm5pCQ+V1GXy/wIs3wAL82ksgb0kUX9v9YfLL5zZ/GzCQ=="/>
-        </item>
-        <item>
-            <title>0.8.2</title>
-            <pubDate>Sun, 31 May 2026 06:30:09 +0200</pubDate>
-            <sparkle:version>20</sparkle:version>
-            <sparkle:shortVersionString>0.8.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.8.2/pgBrain-0.8.2.dmg" length="10979436" type="application/octet-stream" sparkle:edSignature="uob94eSTO/+R53ZOCUU5m0i9PNYw7codOxWqJhbm6ZD/IcaRVi8ZYPYjnV1JLThALfW3oHAfuHz/XNaBo2GKDg=="/>
-        </item>
-        <item>
-            <title>0.8.1</title>
-            <pubDate>Sun, 31 May 2026 02:52:39 +0200</pubDate>
-            <sparkle:version>19</sparkle:version>
-            <sparkle:shortVersionString>0.8.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.8.1/pgBrain-0.8.1.dmg" length="10836858" type="application/octet-stream" sparkle:edSignature="mV8C+wsdyVE4BnrvSb3TAHhXH/ppgvzVzD5PaM3D47YIrsxq8k9DERBZXd3lESg1+gO6Z9g8B7IrX8XrJwJDAg=="/>
-        </item>
-        <item>
-            <title>0.8.0</title>
-            <pubDate>Sat, 30 May 2026 21:14:25 +0200</pubDate>
-            <sparkle:version>18</sparkle:version>
-            <sparkle:shortVersionString>0.8.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.8.0/pgBrain-0.8.0.dmg" length="10698347" type="application/octet-stream" sparkle:edSignature="7W8TbxW1yyo0xBTdEub1lvN5PlzEauZcUvOcQtutI1kT/ZONei4fK2KNFXIATGmWl7hraqyzzc56c0HffqH/Cw=="/>
-        </item>
-        <item>
-            <title>0.7.0</title>
-            <pubDate>Fri, 29 May 2026 15:51:37 +0200</pubDate>
-            <sparkle:version>17</sparkle:version>
-            <sparkle:shortVersionString>0.7.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.7.0/pgBrain-0.7.0.dmg" length="10484369" type="application/octet-stream" sparkle:edSignature="ihOsY3jItzAMNH2ztnPXorDMZGNX9IOAdpUozuLyJ+wXNv7kfgnJkZDff6IdQQz+Y1KTU9Vqr96aeYWJQm8/Ag=="/>
-        </item>
-        <item>
-            <title>0.6.0</title>
-            <pubDate>Fri, 29 May 2026 01:19:47 +0200</pubDate>
-            <sparkle:version>16</sparkle:version>
-            <sparkle:shortVersionString>0.6.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.6.0/pgBrain-0.6.0.dmg" length="10388221" type="application/octet-stream" sparkle:edSignature="gU16EGlvnA9rnX871L5gc0HwlDaAUpWZ/WHhk64ZWtMzSNPjZsvzf5vdZIMJ9jm3K238IxkCOTVTlvz8Q0yrBw=="/>
-        </item>
-        <item>
-            <title>0.5.1</title>
-            <pubDate>Fri, 29 May 2026 00:29:41 +0200</pubDate>
-            <sparkle:version>15</sparkle:version>
-            <sparkle:shortVersionString>0.5.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.5.1/pgBrain-0.5.1.dmg" length="10146095" type="application/octet-stream" sparkle:edSignature="uy21uLXfLpd0pgfGlrhLz+UY/gvGx7VTShjmFo5QP0fmG17g+T/LNYasb9UjQKny2hGVDPgwsfdVv0dPf+K7Dw=="/>
-        </item>
-        <item>
-            <title>0.5.0</title>
-            <pubDate>Fri, 29 May 2026 00:14:29 +0200</pubDate>
-            <sparkle:version>14</sparkle:version>
-            <sparkle:shortVersionString>0.5.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.5.0/pgBrain-0.5.0.dmg" length="10135383" type="application/octet-stream" sparkle:edSignature="121ctK/WtHxsE/2g7PS9b7SA+0ZAldOQ0MLhOqCzKq0ZztuYYRk+62g61yMt46fFAzMQLpmZ4z/gubuBGp2ECQ=="/>
-        </item>
-        <item>
-            <title>0.4.0</title>
-            <pubDate>Thu, 28 May 2026 23:43:17 +0200</pubDate>
-            <sparkle:version>13</sparkle:version>
-            <sparkle:shortVersionString>0.4.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.4.0/pgBrain-0.4.0.dmg" length="9860538" type="application/octet-stream" sparkle:edSignature="oY4J1WBwNCOGgl9qda18jkQfl6VtZgAZ9NL/dTsn7MlBAHIeiSz3ap/tLIVG2HrOcLF8s67xxQBJxWXFwWHZCQ=="/>
-        </item>
-        <item>
-            <title>0.3.0</title>
-            <pubDate>Thu, 28 May 2026 22:49:56 +0200</pubDate>
-            <sparkle:version>12</sparkle:version>
-            <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.3.0/pgBrain-0.3.0.dmg" length="9509742" type="application/octet-stream" sparkle:edSignature="6XHNz/i3evR0UdhoMFZGQDCj8EZBiqj4nFtxgiONP0oWTuyganZhMdrVEx3yhY3Mwb1RlsKNAx6icYQ1+nZUCQ=="/>
-        </item>
-        <item>
-            <title>0.2.3</title>
-            <pubDate>Thu, 28 May 2026 18:17:05 +0200</pubDate>
-            <sparkle:version>11</sparkle:version>
-            <sparkle:shortVersionString>0.2.3</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.2.3/pgBrain-0.2.3.dmg" length="9342871" type="application/octet-stream" sparkle:edSignature="LJiIFbVD8CoXzFgZZQCcMxZtx4blM6BBHthcRvfPaHW46qLYL2BYfhqJlVJJ59F8dpRS2tUlEsxEoH1gv1CvBQ=="/>
-        </item>
-        <item>
-            <title>0.2.2</title>
-            <pubDate>Thu, 28 May 2026 17:28:29 +0200</pubDate>
-            <sparkle:version>10</sparkle:version>
-            <sparkle:shortVersionString>0.2.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.2.2/pgBrain-0.2.2.dmg" length="9155616" type="application/octet-stream" sparkle:edSignature="VAmg68/ZDQkmMhsIrRdYhVka8+i0WPsfgAE0VogVtuVA6Uvz4yRK144AAqoRz4FqKkl1tQAUtF4OvvKbQE/VDQ=="/>
-        </item>
-        <item>
-            <title>0.2.1</title>
-            <pubDate>Thu, 28 May 2026 16:55:53 +0200</pubDate>
-            <sparkle:version>9</sparkle:version>
-            <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.2.1/pgBrain-0.2.1.dmg" length="9139922" type="application/octet-stream" sparkle:edSignature="KdY+94404AxPkxObUBb6j5Ycu9XwB0wKmyX+mK1D8qvxIO9S1V60Uc39BTzyocSor11Ex90+io8wKvat6qQqBw=="/>
-        </item>
-        <item>
-            <title>0.2.0</title>
-            <pubDate>Thu, 28 May 2026 16:33:38 +0200</pubDate>
-            <sparkle:version>8</sparkle:version>
-            <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.2.0/pgBrain-0.2.0.dmg" length="9139093" type="application/octet-stream" sparkle:edSignature="uDQKB5oe17FSdKGpeZeB3WanZT4vhXziuDDygeFT45GBqrewmyktwOr5dIEnL0P4EruCzI35KLTFgHLDA5bFBg=="/>
-        </item>
-        <item>
-            <title>0.1.1</title>
-            <pubDate>Thu, 28 May 2026 04:34:22 +0200</pubDate>
-            <sparkle:version>7</sparkle:version>
-            <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.1.1/pgBrain-0.1.1.dmg" length="8795188" type="application/octet-stream" sparkle:edSignature="iA7pko7SMkmAqsQGTYde2kF3z7J02R66zJ+ZQYcpVAtFN1wLZQFBYngT2qh+DYXVHhURafRKB6iMvMN0BmB7Aw=="/>
-        </item>
-        <item>
-            <title>0.1.0</title>
-            <pubDate>Thu, 28 May 2026 04:08:45 +0200</pubDate>
-            <sparkle:version>6</sparkle:version>
-            <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.1.0/pgBrain-0.1.0.dmg" length="8793345" type="application/octet-stream" sparkle:edSignature="MOadcY2VpXgSpstKjVGp9tJqyHu8SWc/d+1DLv9UvJH9FNE+uDDRrJp3dzZ+hPWxs+m86crIh6OrF9gUx1lQBg=="/>
-        </item>
-        <item>
-            <title>0.0.5</title>
-            <pubDate>Thu, 28 May 2026 00:34:51 +0200</pubDate>
-            <sparkle:version>5</sparkle:version>
-            <sparkle:shortVersionString>0.0.5</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.0.5/pgBrain-0.0.5.dmg" length="8616513" type="application/octet-stream" sparkle:edSignature="G6nT46cgmm4mRaQqcP36f7swSThu/mI3jJ6FXF0gvHQmk7K/ceLxhyQHs7pyDkTVN7SUCa5nSsFeAsqQoJCPBA=="/>
-        </item>
-        <item>
-            <title>0.0.4</title>
-            <pubDate>Thu, 28 May 2026 00:06:45 +0200</pubDate>
-            <sparkle:version>4</sparkle:version>
-            <sparkle:shortVersionString>0.0.4</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/souriscloud/pgbrain/releases/download/v0.0.4/pgBrain-0.0.4.dmg" length="8625839" type="application/octet-stream" sparkle:edSignature="uOEwFishJZfnP+XqYrAujmfFxQ1H5ZPPrTkf7RifYRzucAkmz3rGOW4v4V2Dhtv5SbC2ru5eAu+rIu0dBLn/Dg=="/>
         </item>
     </channel>
 </rss>
