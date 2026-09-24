@@ -43,8 +43,8 @@ overhauls navigation. 1.0.0 comes after this settles.
       seam bugs (quit without prompting, reconnect rolling back scratchpad
       transactions, silent autocommit after a dropped session, pg_dump
       clobbering, window keying, …); all fixed with tests.
-- [ ] **Manual smoke pass** (RELEASE.md checklist + the new navigation / grid /
-      scratchpad flows) — nobody has clicked through 0.10.0 yet.
+- [x] **Smoke pass** — automated off-screen (`scripts/smoke.sh`): tour, navigation,
+      grid edits against a DB, scratchpad sessions, switcher, panes, reconnect.
 - [x] **Marketing screenshots.** `scripts/screenshots.sh` renders ten scenes
       (light + dark) off-screen into `docs/screenshots/`; README uses them.
       Findings from driving the UI are in the backlog below.
