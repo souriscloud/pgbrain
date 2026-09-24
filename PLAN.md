@@ -5,7 +5,7 @@ conventions live in `CLAUDE.md`; user-facing history lives in `CHANGELOG.md`;
 the iteration-by-iteration log for v0.0.1 → v0.9.7 is archived in
 `docs/history/iterations-v0.0-v0.9.md`.
 
-## Now — v0.10.0 (full sweep, started 2026-09-23)
+## Last release — v0.10.0 (full sweep, 2026-09-23 → 2026-09-24)
 
 A full audit of the codebase (navigation UX, grid/editor, data layer and
 security, repo hygiene) fed one release that fixes everything it found and
@@ -48,7 +48,7 @@ overhauls navigation. 1.0.0 comes after this settles.
 - [x] **Marketing screenshots.** `scripts/screenshots.sh` renders ten scenes
       (light + dark) off-screen into `docs/screenshots/`; README uses them.
       Findings from driving the UI are in the backlog below.
-- [ ] **Release v0.10.0** (`./scripts/release.sh minor`).
+- [x] **Released v0.10.0** (2026-09-24) — notarized DMG on GitHub Releases, appcast updated, apps.souris.cloud page refreshed with new screenshots.
 
 How it was built: Phase 0 on `main`, then five parallel worktree agents
 (A lexer/IO, B navigation, C grid, D connectivity/security, E scratchpad),
