@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import pgBrain
 
@@ -28,5 +29,26 @@ final class OnboardingTourTests: XCTestCase {
         XCTAssertLessThanOrEqual(c.x + half.width / 2, window.width)
         XCTAssertGreaterThanOrEqual(c.y - half.height / 2, 0)
         XCTAssertLessThanOrEqual(c.y + half.height / 2, window.height)
+    }
+
+    /// A nested anchor (schema picker inside the sidebar, new-tab button
+    /// inside the tab strip) must survive the outer one.
+    @MainActor
+    func testNestedAnchorsAreAllReported() {
+        final class Box { var keys: Set<OnboardingAnchor> = [] }
+        let box = Box()
+        let view = VStack {
+            Text("picker").onboardingAnchor(.schemaPicker)
+            Text("tree")
+        }
+        .onboardingAnchor(.sidebar)
+        .overlayPreferenceValue(OnboardingAnchorKey.self) { anchors in
+            let _ = { box.keys = Set(anchors.keys) }()
+            Color.clear
+        }
+        let host = NSHostingView(rootView: view.frame(width: 200, height: 200))
+        host.frame = CGRect(x: 0, y: 0, width: 200, height: 200)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(box.keys, [.sidebar, .schemaPicker])
     }
 }

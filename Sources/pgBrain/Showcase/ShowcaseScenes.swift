@@ -23,10 +23,10 @@ final class ShowcaseScenes {
     let appearance: Appearance = ProcessInfo.processInfo.environment["PGBRAIN_SHOWCASE_APPEARANCE"]
         .flatMap(Appearance.init(rawValue:)) ?? .light
     private let only: Set<String>
-    private var window: NSWindow!
-    private var service: ConnectionService!
+    var window: NSWindow!
+    var service: ConnectionService!
     /// Sheet / palette host windows, kept alive until the run ends.
-    private var scratchWindows: [NSWindow] = []
+    var scratchWindows: [NSWindow] = []
     private var failures: [String] = []
 
     init(delegate: AppDelegate, outputDirectory: URL) {
@@ -36,7 +36,7 @@ final class ShowcaseScenes {
         only = Set(filter.split(separator: ",").map(String.init))
     }
 
-    private let connection = Connection(
+    let connection = Connection(
         name: "Driftwood", host: "localhost", port: 5432,
         database: ShowcaseEnvironment.databaseName, username: NSUserName(),
         sslMode: .disable, colorTag: .purple)
@@ -62,8 +62,8 @@ final class ShowcaseScenes {
             ("09-connection-editor", connectionEditor),
             ("11-tour", tour),
             ("12-tour-sidebar", tourSidebar),
-        ]
-        for (name, scene) in scenes where only.isEmpty || only.contains(name) {
+        ] + smokeScenes
+        for (name, scene) in scenes where shouldRun(name) {
             ShowcaseLog.write("scene \(name)")
             do {
                 try await scene()
@@ -77,7 +77,16 @@ final class ShowcaseScenes {
         }
     }
 
-    private var scope: NavigationHistoryStore.Scope {
+    /// Smoke scenes only run when asked for (`smoke-*` or by name), so the
+    /// marketing run stays exactly the marketing set.
+    private func shouldRun(_ name: String) -> Bool {
+        if only.isEmpty { return !name.hasPrefix("smoke-") }
+        return only.contains { pattern in
+            pattern.hasSuffix("*") ? name.hasPrefix(pattern.dropLast()) : pattern == name
+        }
+    }
+
+    var scope: NavigationHistoryStore.Scope {
         NavigationHistoryStore.Scope(connectionID: connection.id, database: connection.database)
     }
 
@@ -114,7 +123,7 @@ final class ShowcaseScenes {
         ShowcaseLog.write("connected, \(service.tableCount) relations")
     }
 
-    private func table(_ schema: String, _ name: String) throws -> TableNode {
+    func table(_ schema: String, _ name: String) throws -> TableNode {
         guard let t = service.schema.schemas.first(where: { $0.name == schema })?
             .tables.first(where: { $0.name == name }) else {
             throw ShowcaseError("\(schema).\(name) is not in the schema snapshot")
@@ -122,7 +131,7 @@ final class ShowcaseScenes {
         return t
     }
 
-    private func closeAllTabs() {
+    func closeAllTabs() {
         for tab in service.workspace.tabs {
             if let node = tab.tableNode { service.loader(for: tab, table: node).revert() }
         }
@@ -131,7 +140,7 @@ final class ShowcaseScenes {
 
     /// Open `table` as a kept tab and wait until its first page is on screen.
     @discardableResult
-    private func openLoaded(_ node: TableNode, orderBy: String = "",
+    func openLoaded(_ node: TableNode, orderBy: String = "",
                             where filter: String = "") async throws -> (WorkspaceState.Tab, RowsLoader) {
         service.workspace.openTable(node)
         guard let tab = service.workspace.selectedTab else { throw ShowcaseError("no tab for \(node.id)") }
@@ -389,7 +398,7 @@ final class ShowcaseScenes {
     }
 
     /// Scroll the tallest SwiftUI scroll view in `window` to its end.
-    private func scrollToBottom(in window: NSWindow) {
+    func scrollToBottom(in window: NSWindow) {
         var clips: [NSClipView] = []
         func collect(_ v: NSView) {
             if let clip = v as? NSClipView,
@@ -438,7 +447,7 @@ final class ShowcaseScenes {
         grid.sizeLastColumnToFit()
     }
 
-    private func findView<T: NSView>(_ type: T.Type, in root: NSView?) -> T? {
+    func findView<T: NSView>(_ type: T.Type, in root: NSView?) -> T? {
         guard let root else { return nil }
         if let hit = root as? T { return hit }
         for sub in root.subviews {
@@ -451,7 +460,7 @@ final class ShowcaseScenes {
 
     /// A borderless off-screen window hosting a sheet / panel view at its
     /// fitting size, with the window background a real sheet would have.
-    private func hostWindow<V: View>(_ view: V, transparent: Bool = false) -> NSWindow {
+    func hostWindow<V: View>(_ view: V, transparent: Bool = false) -> NSWindow {
         let root = view.background(transparent ? Color.clear : Color(nsColor: .windowBackgroundColor))
         let hosting = NSHostingView(rootView: root)
         let size = hosting.fittingSize
@@ -466,7 +475,7 @@ final class ShowcaseScenes {
         return w
     }
 
-    private func capture(_ name: String, base: NSWindow? = nil,
+    func capture(_ name: String, base: NSWindow? = nil,
                              overlay makeOverlay: (() -> NSWindow)? = nil,
                              placement: Placement = .sheet, dim: CGFloat = 0.12,
                              cornerRadius: CGFloat = 16, settleTurns: Int = 8) async throws {

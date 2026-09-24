@@ -77,8 +77,11 @@ struct OnboardingAnchorKey: PreferenceKey {
 
 extension View {
     /// Make this view something the onboarding tour can point at.
+    /// Merges with anchors inside it: a plain `anchorPreference` would
+    /// replace them, so the sidebar hid the schema picker and the tab strip
+    /// hid the new-tab button.
     func onboardingAnchor(_ anchor: OnboardingAnchor) -> some View {
-        anchorPreference(key: OnboardingAnchorKey.self, value: .bounds) { [anchor: $0] }
+        transformAnchorPreference(key: OnboardingAnchorKey.self, value: .bounds) { $0[anchor] = $1 }
     }
 }
 
@@ -211,17 +214,8 @@ struct OnboardingOverlay: View {
         withAnimation(.easeInOut(duration: 0.2)) { workspace.onboardingStep = index - 1 }
     }
 
-    /// Put the window in a state where the step's element exists: the grid
-    /// steps need a table tab, so open a preview of one if none is showing.
     private func prepare(_ step: OnboardingStep) {
-        switch step.anchor {
-        case .grid, .tableHeader:
-            OnboardingTour.ensureTableTab(in: service)
-        case .sidebar, .schemaPicker:
-            if !workspace.sidebarVisible { workspace.sidebarVisible = true }
-        default:
-            break
-        }
+        OnboardingTour.prepare(step, in: service)
     }
 
     private func finish() {
@@ -238,6 +232,21 @@ extension OnboardingTour {
         withAnimation(.easeInOut(duration: 0.2)) { service.workspace.onboardingStep = 0 }
     }
 
+    /// Put the window in a state where the step's element exists: the tab /
+    /// breadcrumb and grid steps need a table tab, so open a preview of one
+    /// if none is showing.
+    @MainActor
+    static func prepare(_ step: OnboardingStep, in service: ConnectionService) {
+        switch step.anchor {
+        case .tabs, .grid, .tableHeader:
+            ensureTableTab(in: service)
+        case .sidebar, .schemaPicker:
+            if !service.workspace.sidebarVisible { service.workspace.sidebarVisible = true }
+        default:
+            break
+        }
+    }
+
     /// Opens a preview tab of a table when the active tab isn't one, preferring
     /// a recent table, then the first table of `public`, then any table.
     @MainActor
@@ -252,6 +261,19 @@ extension OnboardingTour {
         if let pick { service.workspace.openTable(pick, preview: true) }
     }
 }
+
+#if DEBUG
+extension OnboardingTour {
+    /// Anchors each window last laid out, so the smoke suite can check that
+    /// every anchored step has something on screen to point at.
+    @MainActor static var anchorsSeen: [UUID: Set<OnboardingAnchor>] = [:]
+
+    @MainActor static func recordAnchors(_ anchors: Set<OnboardingAnchor>, window: UUID) {
+        guard ShowcaseEnvironment.isActive else { return }
+        anchorsSeen[window] = anchors
+    }
+}
+#endif
 
 /// Pure card placement, kept apart from the view so it can be tested.
 enum OnboardingLayout {

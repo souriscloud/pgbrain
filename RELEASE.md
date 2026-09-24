@@ -111,7 +111,17 @@ The Sparkle CLI tools live under `.build/artifacts/sparkle/Sparkle/bin/`. Run `s
 
 ## Before running release.sh — mandatory smoke test
 
-Two production releases (v0.0.2 and v0.0.3) shipped with crashes that 30 seconds of clicking would have caught. Don't skip this:
+Two production releases (v0.0.2 and v0.0.3) shipped with crashes that 30 seconds of clicking would have caught. Don't skip this.
+
+**1. Automated smoke test first** (needs a local PostgreSQL reachable as `$USER`):
+
+```bash
+./scripts/smoke.sh
+```
+
+It runs every `smoke-*` scene of the off-screen showcase harness against throwaway `pgbrain_smoke` / `pgbrain_smoke_b` databases — nothing on screen, no focus change, no Keychain, no real app data — and exits non-zero if any assertion fails. Covered: the first-run tour (every step's anchor), preview/pinned tabs, back/forward with WHERE, Go to Table, schema hiding and reload, grid edit / insert / delete / stale-row guard / dirty guard / no-PK (ctid) apply against the DB, scratchpad session affinity, transactions, psql-exact type rendering, Stop, Structure / DDL / EXPLAIN / ERD, CSV import and CSV / JSON export, the database switcher's sibling window, and recovery after the server kills pgBrain's backends. Look through the PNGs in the output directory it prints; `showcase-light.log` lists every check.
+
+**2. Then the release binary by hand:**
 
 ```bash
 ./scripts/bundle.sh release
