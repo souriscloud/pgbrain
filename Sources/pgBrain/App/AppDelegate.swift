@@ -154,6 +154,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let snapshot, let service = windowManager.service(for: existing) {
                 restoreTabs(into: service, from: snapshot, selectRestored: false)
             }
+            #if DEBUG
+            if ShowcaseEnvironment.isActive { return }
+            #endif
             NSApp.activate(ignoringOtherApps: true)
             existing.makeKeyAndOrderFront(nil)
             return
@@ -191,6 +194,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        #if DEBUG
+        // A smoke run drives the switcher's entry point; the window must
+        // stay off-screen and never take focus.
+        if ShowcaseEnvironment.isActive {
+            ShowcaseRenderer.orderInOffscreen(result.window)
+            return
+        }
+        #endif
         NSApp.activate(ignoringOtherApps: true)
         result.window.makeKeyAndOrderFront(nil)
         SessionStateStore.shared.scheduleSnapshot()

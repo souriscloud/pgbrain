@@ -210,6 +210,9 @@ struct ConnectionWindowContent: View {
     private var withSchemaSheets: some View {
         chromeStack
         .overlayPreferenceValue(OnboardingAnchorKey.self) { anchors in
+            #if DEBUG
+            let _ = OnboardingTour.recordAnchors(Set(anchors.keys), window: service.workspace.windowID)
+            #endif
             OnboardingOverlay(service: service, anchors: anchors)
         }
         .sheet(item: $copySource) { source in

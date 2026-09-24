@@ -65,7 +65,7 @@ Resources/          .app bundle resources: Info.plist, entitlements (release + d
                     AppIcon.icns (generated), dmg-background.png
 scripts/            bundle.sh, run.sh, clean.sh, release.sh, bump.sh, build-dmg.sh,
                     sparkle-tools.sh, gen-icon.swift, gen-dmg-background.swift, .env.example,
-                    screenshots.sh + showcase/ (seed.sql, frame.swift)
+                    screenshots.sh, smoke.sh + showcase/ (seed.sql, smoke-seed.sql, frame.swift)
 docs/screenshots/   generated marketing screenshots (scripts/screenshots.sh)
 appcast.xml         Sparkle feed (release.sh prepends items, keeps the newest 10)
 ```
@@ -93,6 +93,7 @@ PGBRAIN_KEYCHAIN_TESTS=1 swift test                   # also the real-Keychain t
 
 ## Screenshots
 `scripts/screenshots.sh` seeds a throwaway `pgbrain_showcase` database, runs a debug build in showcase mode (one run per appearance) and frames the PNGs into `docs/screenshots/`. Showcase mode must stay invisible and side-effect free: activation policy *prohibited*, windows parked at (-30000, -30000) below the desktop level and rendered with `cacheDisplay` (never screen capture), no Keychain access (guarded in `Keychain`), its own `AppSupport` directory (`PGBRAIN_SUPPORT_DIR`) and defaults suite, no Sparkle / menu bar item / session restore. Scenes drive the app through model objects only. Hooks into app code are `#if DEBUG` and keyed off `ShowcaseEnvironment.isActive`.
+`scripts/smoke.sh` is the automated smoke test on the same harness: the `smoke-*` scenes (`Showcase/ShowcaseSmoke.swift`, fixtures in `scripts/showcase/smoke-seed.sql`) assert real outcomes (DB state, loader/notebook state, tour anchors) and capture raw light PNGs plus `showcase-light.log` into a temp dir; they only run when listed (`smoke-*`), so the marketing run is unchanged. `screenshots.sh` takes `PGBRAIN_SHOWCASE_OUT`, `_APPEARANCES`, `_RAW=1`, `_EXTRA_SEED` and `_NO_CLIENTS=1` overrides. Smoke scenes must never reach an `NSAlert.runModal` path — assert the decision state instead.
 
 ## Window model (DataGrip-style)
 - **Welcome window** at launch and whenever no other window is open.

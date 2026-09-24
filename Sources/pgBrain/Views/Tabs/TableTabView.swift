@@ -242,7 +242,7 @@ struct TableTabView: View {
         switch loader.state {
         case .loaded(let page):
             HStack(spacing: 6) {
-                Text(page.truncated ? "\(page.rows.count)+ rows" : "\(page.rows.count) rows")
+                Text(page.truncated ? "\(page.rows.count)+ rows" : "\(page.rows.count) row\(page.rows.count == 1 ? "" : "s")")
                 if let size = loader.tableSizePretty {
                     Text("·").foregroundStyle(.tertiary)
                     Text(size)
