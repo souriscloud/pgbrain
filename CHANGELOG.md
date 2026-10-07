@@ -12,6 +12,9 @@ page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
 ### Changed
 
+- Auto-update metadata is published after the new installer is available, avoiding
+  an update notification that points to an unavailable download.
+
 - Unified app icon family with a cool gray data-circuit texture, a soft radial fade,
   and the complete original Souris.CLOUD logo in the corner badge. About and Welcome
   branding uses the actual app icon; installers display the same new icon.

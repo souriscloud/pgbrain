@@ -12,7 +12,7 @@
 #   7. codesign + notarize + staple the DMG
 #   8. sign_update against the DMG → EdDSA signature
 #   9. Prepend item to appcast.xml (keeps the newest $APPCAST_KEEP items)
-#  10. Commit Info.plist + appcast.xml, push, gh release create with DMG
+#  10. Commit + push tag, publish DMG, then push the branch with appcast.xml
 #      (release notes = the version's CHANGELOG.md section)
 #
 # Required: scripts/.env (see scripts/.env.example) — TEAM_ID,
@@ -331,7 +331,7 @@ rm -f "$TMP_APPCAST" "$ITEM_FILE"
 # ==========================================================================
 # STEP 9: COMMIT + PUSH
 # ==========================================================================
-info "Step 9/10: Committing release artefacts + pushing"
+info "Step 9/10: Committing release artefacts + publishing tag"
 git add "$PLIST" appcast.xml
 git commit -m "release v$VERSION"
 # Past this point the bump is committed — disarm the rollback trap so a later
@@ -339,7 +339,6 @@ git commit -m "release v$VERSION"
 RELEASE_COMMITTED=1
 git tag "v$VERSION"
 CURRENT_BRANCH=$(git branch --show-current)
-git push origin "$CURRENT_BRANCH"
 git push origin "v$VERSION"
 
 # ==========================================================================
@@ -356,13 +355,20 @@ if [[ $SKIP_UPLOAD -eq 0 ]]; then
         --notes-file "$NOTES" \
         --latest
     rm -f "$NOTES"
+    # Sparkle reads the branch feed. Expose it only after its download exists.
+    git push origin "$CURRENT_BRANCH"
 else
     info "Step 10/10: (skip-upload) — upload manually with:"
     echo "    gh release create v$VERSION $DMG_BUILD_PATH --repo $GITHUB_REPO --title \"pgBrain $VERSION\" --notes …"
+    echo "    After the installer is uploaded: git push origin $CURRENT_BRANCH"
 fi
 
 echo
-success "pgBrain v$VERSION released"
+if [[ $SKIP_UPLOAD -eq 0 ]]; then
+    success "pgBrain v$VERSION released"
+else
+    success "pgBrain v$VERSION prepared; downloads and branch feed remain unpublished"
+fi
 echo "  Release:  https://github.com/$GITHUB_REPO/releases/tag/v$VERSION"
 echo "  DMG:      $DOWNLOAD_URL"
 echo "  Appcast:  https://raw.githubusercontent.com/$GITHUB_REPO/main/appcast.xml"

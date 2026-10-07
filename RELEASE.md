@@ -182,3 +182,5 @@ signature. See [installer kit](scripts/installer/README.md).
 `--local --reuse-build` packages a release product already compiled from the current sources. Developer ID signing, notarization and Sparkle signing still go through the normal release pipeline before publication.
 
 Regenerate approved icons with `python3 scripts/icons/build.py`. The original Souris logo is committed in the icon kit. All macOS sizes, Retina slots, transparency and sRGB colour are verified, and app branding uses the actual bundle icon.
+
+The release pipeline pushes the tag, publishes the installer, and then pushes the branch carrying the new appcast. `--skip-upload` leaves that branch unpushed until the installer is uploaded, so Sparkle cannot advertise a missing download.
