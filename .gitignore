@@ -14,3 +14,6 @@ Resources/AppIcon.icns
 releases/
 # Agent worktrees (Claude Code)
 .claude/worktrees/
+
+# Local installer tooling and rehearsals.
+.local/

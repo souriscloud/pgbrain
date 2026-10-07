@@ -51,7 +51,7 @@ The release script's preflight checks all of these and bails with a useful messa
 3. **`scripts/bundle.sh release`** — `swift build -c release --arch arm64`, assembles `build/pgBrain.app`, embeds `Sparkle.framework` from `.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/` into `Contents/Frameworks/`, ad-hoc signs nested helpers (release script re-signs with Developer ID in step 4).
 4. **Codesign with Developer ID** — signs nested Sparkle helpers first (XPCServices/Downloader.xpc → Installer.xpc → Autoupdate → Updater.app → Sparkle.framework), then the main app last. Uses `--options runtime --timestamp` with `Resources/pgBrain.entitlements` (intentionally empty: hardened runtime with no exemptions). Local ad-hoc builds use `Resources/pgBrain-dev.entitlements`, which only disables library validation because ad-hoc signatures carry no Team ID. No `--deep` (deprecated).
 5. **Notarize app** — `xcrun notarytool submit ... --wait` then `xcrun stapler staple`.
-6. **`scripts/build-dmg.sh`** — pure macOS tools, no `create-dmg` dep: stages `pgBrain.app` + `Applications` symlink + `.background/background.png`; creates UDRW DMG; mounts; AppleScript Finder into the branded layout (window 660×400, icon size 96, pgBrain at (180,200), Applications at (480,200), brand-gradient bg); detaches; converts to compressed UDZO.
+6. **`scripts/build-dmg.sh`** — uses the common Souris.CLOUD installer kit. It writes a 720×440 layout with 96-point icons at (180,215) and (540,215), renders 1×/2× Retina brush artwork, and verifies the completed DMG without Finder automation.
 7. **Codesign + notarize DMG** — same identity and notary profile.
 8. **`sparkle-tools.sh sign_update`** — produces the EdDSA `sparkle:edSignature` for the DMG.
 9. **Update `appcast.xml`** — awk inserts a fresh `<item>` block in the channel (after the channel metadata, before any existing items so newest-first), with `minimumSystemVersion` read from `LSMinimumSystemVersion`, then prunes to the 10 newest items. Older DMGs stay on GitHub Releases.
@@ -95,7 +95,7 @@ Preflight runs *before* bump, so failures in preflight never mutate the tree. If
 The last 40 lines are printed; the full log is `build/test.log`.
 
 ### DMG looks blank / no Applications folder
-Finder's AppleScript layout occasionally loses a race with the mount. `build-dmg.sh` detaches leftover `/Volumes/pgBrain*` volumes first (a stale one used to make the layout land on the wrong disk); just rerun.
+The builder verifies background metadata, icon positions and the Applications link before succeeding. Read the build output for a failed check; Finder automation and broad volume detachment are no longer used.
 
 ### "Library not loaded: @rpath/Sparkle.framework/..." at launch
 The binary lost its `@executable_path/../Frameworks` rpath. It's pinned in `Package.swift` via `linkerSettings` — verify it didn't get removed. Otool check:
@@ -159,3 +159,26 @@ Claude has all the pieces:
 - If the run succeeds, Claude verifies the release artifacts (DMG downloadable, appcast XML parses, GitHub Release exists).
 
 Default to **patch** bump unless you specify otherwise. For breaking changes or major UX shifts, ask for `minor` or `major`.
+
+## Common installer tooling
+
+The unified Souris.CLOUD installer uses the shared kit in `scripts/installer/`.
+Set up its isolated build tools once:
+
+```bash
+python3 -m venv .local/dmg-tools
+.local/dmg-tools/bin/pip install -r scripts/installer/requirements.txt
+```
+
+DMG assembly does not control Finder. It writes the layout directly and checks
+1×/2× Retina artwork, icon positions, the Applications link and the bundled app
+signature. See [installer kit](scripts/installer/README.md).
+
+
+## Focus-safe local release preparation
+
+`./scripts/release.sh --local` builds and packages the current version into `.local/releases/<version>/`, without Developer ID access, notarization, Git publication or launching a GUI app. It uses the approved icon generator and shared installer kit, checks the real DMG, and writes an installer preview and hash manifest. Artifacts use ad-hoc signatures and are local verification builds, not public distribution builds.
+
+`--local --reuse-build` packages a release product already compiled from the current sources. Developer ID signing, notarization and Sparkle signing still go through the normal release pipeline before publication.
+
+Regenerate approved icons with `python3 scripts/icons/build.py`. The original Souris logo is committed in the icon kit. All macOS sizes, Retina slots, transparency and sRGB colour are verified, and app branding uses the actual bundle icon.

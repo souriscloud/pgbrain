@@ -5,6 +5,14 @@ conventions live in `CLAUDE.md`; user-facing history lives in `CHANGELOG.md`;
 the iteration-by-iteration log for v0.0.1 → v0.9.7 is archived in
 `docs/history/iterations-v0.0-v0.9.md`.
 
+## Installer design — 2026-10-07
+
+- [x] Adopt the common Souris.CLOUD installer kit: dark canvas, brush gesture,
+      720 × 440 window, consistent typography, 1×/2× Retina background.
+- [x] Replace Finder automation with background packaging and verify final
+      layout, image resolution and app signature inside the DMG.
+- [ ] Visual acceptance of the new DMG in Finder on an isolated desktop.
+
 ## Last release — v0.10.0 (full sweep, 2026-09-23 → 2026-09-24)
 
 A full audit of the codebase (navigation UX, grid/editor, data layer and

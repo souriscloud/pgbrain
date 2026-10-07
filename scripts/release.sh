@@ -29,6 +29,13 @@
 #   scripts/release.sh patch --skip-upload     # skip GitHub release publish
 
 set -euo pipefail
+
+# Focus-safe artifact preparation, requiring no Keychain access or publication.
+if [[ "${1:-}" == "--local" ]]; then
+    shift
+    exec python3 "$(dirname "$0")/prepare-local-release.py" "$@"
+fi
+
 cd "$(dirname "$0")/.."
 
 # --- Configuration (.env) ---

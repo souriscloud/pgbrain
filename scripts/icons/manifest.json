@@ -1,0 +1,25 @@
+{
+  "design": "C-data-circuit-gray",
+  "inputs": {
+    "render.swift": "bb65292c3e3ab86a0527977b1d12868ecc294a56b686e4297dba37492d915d84",
+    "config.json": "9a9a330f92adfc6fd68bf56e3dc17d9ed9f58a93229c24b83740042f5faf3c54",
+    "souris-original.png": "3ac383a78042c21b12600e8cf11a5e8e368a1a76200a1126872562be66ce9751",
+    "build.py": "ba45f410195b007d0d21192f77d71b8ce229f33e842580429c00accf72e5c961",
+    "verify.swift": "3b0c016dd8fc70073f19e3ee8560c6b4ea7b277eff3cfe1dd878bb424132648f"
+  },
+  "outputs": {
+    "Resources/AppIcon.icns": "c0c94c1b0c6ff6298b385b0583cd7d0fb37bf690e2a582956a0619c9611fb6d2",
+    "Resources/AppIcon.png": "b585f3cd07fd9d5c85d5b9d540685cced06dd97ae84afec109bf0194b9d2f1c7"
+  },
+  "native_png_sizes": [
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024
+  ],
+  "icns_representations": 10,
+  "original_logo_sha256": "3ac383a78042c21b12600e8cf11a5e8e368a1a76200a1126872562be66ce9751"
+}

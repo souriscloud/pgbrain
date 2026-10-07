@@ -6,6 +6,22 @@ pgBrain auto-updates via Sparkle, so most users land on the latest build
 without downloading anything — this log is for the curious and the changelog
 page on [apps.souris.cloud](https://apps.souris.cloud/apps/pgbrain).
 
+## Unreleased
+
+## v0.10.1 — 2026-10-07
+
+### Changed
+
+- Unified app icon family with a cool gray data-circuit texture, a soft radial fade,
+  and the complete original Souris.CLOUD logo in the corner badge. About and Welcome
+  branding uses the actual app icon; installers display the same new icon.
+- Icons are reproducibly generated and checked at every native macOS size, with
+  complete 1x/2x representations, sRGB colour and transparent outer edges.
+
+- Unified Souris.CLOUD installer design with a dark gradient, consistent layout,
+  curved brush arrow and Retina artwork. Packaging no longer controls Finder and
+  verifies layout, image scale and the bundled app signature.
+
 ## v0.10.0 — 2026-09-24
 
 A full sweep: navigation rebuilt around how you actually move through a

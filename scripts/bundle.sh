@@ -31,11 +31,8 @@ if [[ ! -f "$BIN_PATH" ]]; then
     exit 1
 fi
 
-# Generate icon if missing or older than the generator script.
-if [[ ! -f "Resources/AppIcon.icns" ]] || [[ "scripts/gen-icon.swift" -nt "Resources/AppIcon.icns" ]]; then
-    echo "→ Generating AppIcon.icns…"
-    swift scripts/gen-icon.swift Resources/AppIcon.icns
-fi
+# Check all renderer inputs and packaged assets before assembling the bundle.
+python3 scripts/icons/build.py
 
 echo "→ Assembling ${APP_DIR}…"
 rm -rf "$APP_DIR"

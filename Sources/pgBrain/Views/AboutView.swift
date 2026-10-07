@@ -5,14 +5,7 @@ struct AboutView: View {
         VStack(spacing: Tokens.Spacing.md) {
             Spacer(minLength: 0)
 
-            Image(systemName: "cylinder.split.1x2.fill")
-                .font(.system(size: 64, weight: .semibold))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [Tokens.Brand.primary, Tokens.Brand.primaryDim],
-                        startPoint: .top, endPoint: .bottom
-                    )
-                )
+            AppIconView(size: 96)
                 .padding(.bottom, Tokens.Spacing.sm)
 
             Text("pgBrain")

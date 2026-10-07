@@ -1,0 +1,7 @@
+{
+  "name": "pgBrain",
+  "subtitle": "Your databases. A clearer state of mind.",
+  "design_version": "1.0.0",
+  "preview_icon": "Resources/AppIcon.icns",
+  "legacy_background": "Resources/dmg-background.png"
+}

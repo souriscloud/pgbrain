@@ -120,9 +120,7 @@ struct WelcomeView: View {
     private var brandPane: some View {
         VStack(alignment: .leading, spacing: Tokens.Spacing.lg) {
             HStack(spacing: Tokens.Spacing.sm) {
-                Image(systemName: "cylinder.split.1x2.fill")
-                    .font(.system(size: 36, weight: .semibold))
-                    .foregroundStyle(.white)
+                AppIconView(size: 56)
                 Text("pgBrain")
                     .font(.system(size: 30, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
